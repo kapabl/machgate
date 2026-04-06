@@ -1,0 +1,17 @@
+GALAXY_SHIM {
+    global:
+        _ZN6galaxy3api4InitERKNS0_11InitOptionsE;
+        _ZN6galaxy3api8ShutdownEv;
+        _ZN6galaxy3api11ProcessDataEv;
+        _ZN6galaxy3api4AppsEv;
+        _ZN6galaxy3api4UserEv;
+        _ZN6galaxy3api5StatsEv;
+        _ZN6galaxy3api7FriendsEv;
+        _ZN6galaxy3api7StorageEv;
+        _ZN6galaxy3api10NetworkingEv;
+        _ZN6galaxy3api11MatchmakingEv;
+        _ZN6galaxy3api17ListenerRegistrarEv;
+        _ZN6galaxy3api8GetErrorEv;
+    local:
+        *;
+};

@@ -53,6 +53,20 @@ target_link_options(system_shim PRIVATE
     -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/shim/libsystem_shim.ver
 )
 
+# --- libgalaxy_shim.so (GOG Galaxy SDK stub for DLC ownership) ---
+
+add_library(galaxy_shim SHARED
+    src/shim/libgalaxy_shim.c
+)
+set_target_properties(galaxy_shim PROPERTIES
+    OUTPUT_NAME "galaxy_shim"
+    PREFIX "lib"
+)
+target_compile_options(galaxy_shim PRIVATE -Wall -O2 -g)
+target_link_options(galaxy_shim PRIVATE
+    -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/shim/libgalaxy_shim.ver
+)
+
 # --- wrapgen utility ---
 
 if(BUILD_WRAPGEN)
