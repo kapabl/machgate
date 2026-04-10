@@ -127,7 +127,205 @@ struct unwind_info_regular_second_level_page_header {
 
 /* DW_EH_PE pointer encodings */
 #define DW_EH_PE_absptr    0x00
+#define DW_EH_PE_udata2    0x02
+#define DW_EH_PE_udata4    0x03
+#define DW_EH_PE_udata8    0x04
+#define DW_EH_PE_sdata2    0x0a
+#define DW_EH_PE_sdata4    0x0b
+#define DW_EH_PE_sdata8    0x0c
+#define DW_EH_PE_pcrel     0x10
+#define DW_EH_PE_indirect  0x80
 #define DW_EH_PE_omit      0xff
+
+/* ========== Native __eh_frame Parsing ========== */
+
+/* Entry for eh_frame_hdr sorted table */
+struct hdr_entry {
+	uint64_t initial_location;
+	uint64_t fde_ptr;
+};
+
+static int cmp_hdr_entry(const void* a, const void* b)
+{
+	const struct hdr_entry* ea = (const struct hdr_entry*)a;
+	const struct hdr_entry* eb = (const struct hdr_entry*)b;
+	if (ea->initial_location < eb->initial_location) return -1;
+	if (ea->initial_location > eb->initial_location) return 1;
+	return 0;
+}
+
+static uint64_t eh_read_uleb128(const uint8_t** p, const uint8_t* end)
+{
+	uint64_t result = 0;
+	int shift = 0;
+	while (*p < end) {
+		uint8_t byte = **p; (*p)++;
+		result |= (uint64_t)(byte & 0x7F) << shift;
+		if ((byte & 0x80) == 0) break;
+		shift += 7;
+	}
+	return result;
+}
+
+static int64_t eh_read_sleb128(const uint8_t** p, const uint8_t* end)
+{
+	int64_t result = 0;
+	int shift = 0;
+	uint8_t byte;
+	do {
+		if (*p >= end) break;
+		byte = **p; (*p)++;
+		result |= (int64_t)(byte & 0x7F) << shift;
+		shift += 7;
+	} while (byte & 0x80);
+	if (shift < 64 && (byte & 0x40))
+		result |= -(1LL << shift);
+	return result;
+}
+
+static uint64_t eh_read_encoded_ptr(const uint8_t** p, const uint8_t* end,
+                                     uint8_t encoding)
+{
+	if (encoding == DW_EH_PE_omit) return 0;
+	uintptr_t base = (uintptr_t)*p;
+	uint64_t value = 0;
+	switch (encoding & 0x0F) {
+	case 0x00: /* absptr */
+		if (*p + 8 > end) return 0;
+		memcpy(&value, *p, 8); *p += 8; break;
+	case DW_EH_PE_udata2:
+		if (*p + 2 > end) return 0;
+		{ uint16_t v; memcpy(&v, *p, 2); value = v; } *p += 2; break;
+	case DW_EH_PE_udata4:
+		if (*p + 4 > end) return 0;
+		{ uint32_t v; memcpy(&v, *p, 4); value = v; } *p += 4; break;
+	case DW_EH_PE_udata8:
+		if (*p + 8 > end) return 0;
+		memcpy(&value, *p, 8); *p += 8; break;
+	case DW_EH_PE_sdata2:
+		if (*p + 2 > end) return 0;
+		{ int16_t v; memcpy(&v, *p, 2); value = (uint64_t)(int64_t)v; } *p += 2; break;
+	case DW_EH_PE_sdata4:
+		if (*p + 4 > end) return 0;
+		{ int32_t v; memcpy(&v, *p, 4); value = (uint64_t)(int64_t)v; } *p += 4; break;
+	case DW_EH_PE_sdata8:
+		if (*p + 8 > end) return 0;
+		{ int64_t v; memcpy(&v, *p, 8); value = (uint64_t)v; } *p += 8; break;
+	default: return 0;
+	}
+	if ((encoding & 0x70) == DW_EH_PE_pcrel)
+		value += base;
+	if (encoding & DW_EH_PE_indirect)
+		value = *(uint64_t*)(uintptr_t)value;
+	return value;
+}
+
+/* Parse CIE augmentation to find the FDE pointer encoding ('R' byte). */
+static uint8_t parse_cie_fde_encoding(const uint8_t* cie_data, size_t cie_length)
+{
+	const uint8_t* p = cie_data;
+	const uint8_t* end = cie_data + cie_length;
+
+	/* Skip cie_id (4 bytes, already known to be 0) */
+	if (p + 4 > end) return DW_EH_PE_absptr;
+	p += 4;
+
+	/* Version */
+	if (p >= end) return DW_EH_PE_absptr;
+	uint8_t version = *p++;
+
+	/* Augmentation string */
+	const char* aug_str = (const char*)p;
+	while (p < end && *p) p++;
+	if (p >= end) return DW_EH_PE_absptr;
+	p++; /* skip null */
+
+	/* Code alignment factor (ULEB128) */
+	eh_read_uleb128(&p, end);
+	/* Data alignment factor (SLEB128) */
+	eh_read_sleb128(&p, end);
+	/* Return address register */
+	if (version == 1) { if (p < end) p++; }
+	else eh_read_uleb128(&p, end);
+
+	if (aug_str[0] != 'z') return DW_EH_PE_absptr;
+
+	/* Augmentation data length */
+	uint64_t aug_len = eh_read_uleb128(&p, end);
+	const uint8_t* aug_end = p + aug_len;
+	if (aug_end > end) aug_end = end;
+
+	for (int i = 1; aug_str[i] && p < aug_end; i++) {
+		switch (aug_str[i]) {
+		case 'L': p++; break;
+		case 'P': { uint8_t enc = *p++; eh_read_encoded_ptr(&p, aug_end, enc); break; }
+		case 'R': return (p < aug_end) ? *p : DW_EH_PE_absptr;
+		default: return DW_EH_PE_absptr;
+		}
+	}
+	return DW_EH_PE_absptr;
+}
+
+/* Parse native __eh_frame and extract FDE (initial_location, fde_ptr) pairs. */
+static int parse_native_eh_frame_fdes(const uint8_t* eh_frame, size_t eh_frame_size,
+                                       struct hdr_entry** out_entries)
+{
+	int capacity = 256, count = 0;
+	struct hdr_entry* entries = malloc(capacity * sizeof(*entries));
+	if (!entries) return 0;
+
+	size_t pos = 0;
+	while (pos + 4 <= eh_frame_size) {
+		uint32_t length;
+		memcpy(&length, eh_frame + pos, 4);
+		if (length == 0) break;
+
+		size_t data_start = pos + 4;
+		size_t data_end;
+		if (length == 0xFFFFFFFF) {
+			if (pos + 12 > eh_frame_size) break;
+			uint64_t len64; memcpy(&len64, eh_frame + pos + 4, 8);
+			data_start = pos + 12;
+			data_end = data_start + len64;
+		} else {
+			data_end = data_start + length;
+		}
+		if (data_end > eh_frame_size) break;
+
+		uint32_t cie_ptr;
+		memcpy(&cie_ptr, eh_frame + data_start, 4);
+
+		if (cie_ptr != 0) {
+			/* FDE — cie_ptr is byte offset back to its CIE */
+			size_t cie_pos = data_start - cie_ptr;
+			if (cie_pos < eh_frame_size) {
+				uint32_t cie_len;
+				memcpy(&cie_len, eh_frame + cie_pos, 4);
+				uint8_t fde_enc = parse_cie_fde_encoding(
+					eh_frame + cie_pos + 4, cie_len);
+
+				const uint8_t* fde_p = eh_frame + data_start + 4;
+				const uint8_t* fde_end = eh_frame + data_end;
+				uint64_t init_loc = eh_read_encoded_ptr(&fde_p, fde_end, fde_enc);
+
+				if (init_loc != 0) {
+					if (count >= capacity) {
+						capacity *= 2;
+						entries = realloc(entries, capacity * sizeof(*entries));
+						if (!entries) return 0;
+					}
+					entries[count].initial_location = init_loc;
+					entries[count].fde_ptr = (uint64_t)(uintptr_t)(eh_frame + pos);
+					count++;
+				}
+			}
+		}
+		pos = data_end;
+	}
+
+	*out_entries = entries;
+	return count;
+}
 
 /* ========== _dl_find_object Interposition ========== */
 
@@ -723,6 +921,8 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 	uintptr_t text_base = 0;     /* __TEXT vmaddr (unslid) */
 	const uint8_t* unwind_info = NULL;
 	size_t unwind_size = 0;
+	const uint8_t* native_eh_frame = NULL;
+	size_t native_eh_frame_size = 0;
 
 	for (uint32_t i = 0; i < header->ncmds; i++) {
 		struct load_command* lc = (struct load_command*)cmd_ptr;
@@ -736,6 +936,10 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 					if (strcmp(sect->sectname, "__unwind_info") == 0) {
 						unwind_info = (const uint8_t*)(sect->addr + slide);
 						unwind_size = sect->size;
+					}
+					if (strcmp(sect->sectname, "__eh_frame") == 0) {
+						native_eh_frame = (const uint8_t*)(sect->addr + slide);
+						native_eh_frame_size = sect->size;
 					}
 				}
 			}
@@ -864,13 +1068,13 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 	 * Hook _dl_find_object to make our .eh_frame visible to the unwinder.
 	 *
 	 * GCC 15+ with glibc 2.35+ uses _dl_find_object() as the sole FDE lookup
-	 * mechanism. When _dl_find_object returns -1 (address not in any loaded ELF),
-	 * _Unwind_Find_FDE returns NULL immediately WITHOUT searching __register_frame'd
-	 * objects. This means __register_frame is effectively broken.
+	 * mechanism. When _dl_find_object returns -1 (not in any ELF), the unwinder
+	 * gives up WITHOUT checking __register_frame'd objects.
 	 *
-	 * Our workaround: interpose _dl_find_object via the libgcc_s GOT. When the
-	 * query address is in the Mach-O's __TEXT range, we return our synthetic
-	 * .eh_frame_hdr. Otherwise, call the real _dl_find_object.
+	 * Our workaround: interpose _dl_find_object and return a merged .eh_frame_hdr
+	 * containing BOTH synthetic FDEs (from compact unwind) AND native FDEs (from
+	 * __eh_frame). This ensures all functions have unwind info for both unwinding
+	 * and C++ exception catch handler lookup (LSDA).
 	 */
 
 	/* Store pointers for the hook */
@@ -879,16 +1083,58 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 	macho_eh_frame = ehf_buf;
 	macho_eh_frame_size = ehf_pos;
 
-	/* Build .eh_frame_hdr — a binary search index for the unwinder.
-	 * Format: 1-byte version, 1-byte eh_frame_ptr_enc, 1-byte fde_count_enc,
-	 * 1-byte table_enc, then eh_frame_ptr, fde_count, and sorted table entries.
-	 * We use DW_EH_PE_absptr (0x00) for all encodings for simplicity. */
+	/* Build merged .eh_frame_hdr — binary search index covering all FDEs.
+	 * Includes both synthetic (from compact unwind) and native (from __eh_frame)
+	 * so the _dl_find_object hook can serve any PC in the Mach-O range. */
 	{
-		size_t hdr_size = 4 + 8 + 8 + (size_t)fdes_emitted * 16;
+		/* Collect synthetic FDE entries from our generated .eh_frame */
+		int syn_count = 0;
+		struct hdr_entry* syn_entries = malloc((size_t)fdes_emitted * sizeof(struct hdr_entry));
+		{
+			size_t pos = 0;
+			while (pos + 4 < ehf_pos) {
+				uint32_t length;
+				memcpy(&length, ehf_buf + pos, 4);
+				if (length == 0) break;
+				uint32_t cie_id;
+				memcpy(&cie_id, ehf_buf + pos + 4, 4);
+				if (cie_id != 0) {
+					uint64_t init_loc;
+					memcpy(&init_loc, ehf_buf + pos + 8, 8);
+					syn_entries[syn_count].initial_location = init_loc;
+					syn_entries[syn_count].fde_ptr = (uint64_t)(uintptr_t)(ehf_buf + pos);
+					syn_count++;
+				}
+				pos += 4 + length;
+			}
+		}
+
+		/* Collect native FDE entries from __eh_frame */
+		int nat_count = 0;
+		struct hdr_entry* nat_entries = NULL;
+		if (native_eh_frame && native_eh_frame_size > 0) {
+			nat_count = parse_native_eh_frame_fdes(native_eh_frame,
+				native_eh_frame_size, &nat_entries);
+			fprintf(stderr, "eh_frame: parsed %d native FDEs from __eh_frame (%zu bytes)\n",
+			        nat_count, native_eh_frame_size);
+		}
+
+		/* Merge and sort */
+		int total_count = syn_count + nat_count;
+		struct hdr_entry* all_entries = malloc((size_t)total_count * sizeof(struct hdr_entry));
+		if (syn_count > 0)
+			memcpy(all_entries, syn_entries, (size_t)syn_count * sizeof(struct hdr_entry));
+		if (nat_count > 0)
+			memcpy(all_entries + syn_count, nat_entries, (size_t)nat_count * sizeof(struct hdr_entry));
+		qsort(all_entries, total_count, sizeof(struct hdr_entry), cmp_hdr_entry);
+
+		/* Build .eh_frame_hdr */
+		size_t hdr_size = 4 + 8 + 8 + (size_t)total_count * 16;
 		macho_eh_frame_hdr = mmap(NULL, hdr_size, PROT_READ | PROT_WRITE,
 		                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		if (macho_eh_frame_hdr == MAP_FAILED) {
 			fprintf(stderr, "eh_frame: failed to allocate .eh_frame_hdr\n");
+			free(syn_entries); free(nat_entries); free(all_entries);
 			return -1;
 		}
 
@@ -899,72 +1145,55 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 		h[3] = DW_EH_PE_absptr;  /* table encoding */
 		size_t hp = 4;
 
-		/* eh_frame_ptr: pointer to .eh_frame section */
+		/* eh_frame_ptr: pointer to synthetic .eh_frame section */
 		memcpy(h + hp, &macho_eh_frame, 8); hp += 8;
 
 		/* fde_count */
-		uint64_t fde_count_val = fdes_emitted;
+		uint64_t fde_count_val = total_count;
 		memcpy(h + hp, &fde_count_val, 8); hp += 8;
 
-		/* Table: sorted (initial_location, fde_offset) pairs.
-		 * Walk the synthetic .eh_frame to extract FDE locations. */
-		size_t pos = 0;
-		int table_idx = 0;
-		while (pos < ehf_pos - 4) {
-			uint32_t length;
-			memcpy(&length, ehf_buf + pos, 4);
-			if (length == 0) break;
-
-			uint32_t cie_id;
-			memcpy(&cie_id, ehf_buf + pos + 4, 4);
-
-			if (cie_id != 0) {
-				/* FDE — read initial_location */
-				uint64_t init_loc;
-				memcpy(&init_loc, ehf_buf + pos + 8, 8);
-
-				/* Table entry: (initial_location, fde_ptr) — both absptr */
-				uint64_t fde_ptr = (uint64_t)(uintptr_t)(ehf_buf + pos);
-				memcpy(h + hp, &init_loc, 8); hp += 8;
-				memcpy(h + hp, &fde_ptr, 8); hp += 8;
-				table_idx++;
-			}
-
-			pos += 4 + length;
+		/* Sorted (initial_location, fde_ptr) table — both absptr */
+		for (int i = 0; i < total_count; i++) {
+			memcpy(h + hp, &all_entries[i].initial_location, 8); hp += 8;
+			memcpy(h + hp, &all_entries[i].fde_ptr, 8); hp += 8;
 		}
 
 		macho_eh_frame_hdr_size = hp;
-		fprintf(stderr, "eh_frame: built .eh_frame_hdr (%zu bytes, %d entries)\n",
-		        hp, table_idx);
+		fprintf(stderr, "eh_frame: built .eh_frame_hdr (%zu bytes, %d entries: %d synthetic + %d native)\n",
+		        hp, total_count, syn_count, nat_count);
+
+		free(syn_entries);
+		free(nat_entries);
+		free(all_entries);
 	}
 
-	/* Register with __register_frame so the traditional unwinder path
-	 * (GCC <15 / glibc <2.35) can find our FDEs. This is the only
-	 * mechanism on older systems — _dl_find_object doesn't exist. */
+	/* Register with __register_frame for older unwinder path (GCC <15 / glibc <2.35) */
 	{
 		void (*reg_frame)(const void *) = dlsym(RTLD_DEFAULT, "__register_frame");
 		if (reg_frame) {
 			reg_frame(ehf_buf);
-			fprintf(stderr, "eh_frame: registered %d FDEs via __register_frame\n",
+			fprintf(stderr, "eh_frame: registered %d synthetic FDEs via __register_frame\n",
 			        fdes_emitted);
+			if (native_eh_frame && native_eh_frame_size > 0) {
+				reg_frame(native_eh_frame);
+				fprintf(stderr, "eh_frame: registered native __eh_frame (%zu bytes) via __register_frame\n",
+				        native_eh_frame_size);
+			}
 		} else {
 			fprintf(stderr, "eh_frame: WARNING: __register_frame not found\n");
 		}
 	}
 
-	/* Resolve real _dl_find_object from glibc.
-	 * Our interposed _dl_find_object (defined above) is called by libgcc_s
-	 * because the main executable's symbols take precedence over glibc's.
-	 * We need the real one for forwarding non-Mach-O queries. */
+	/* Resolve real _dl_find_object from glibc for forwarding non-Mach-O queries */
 	{
-		/* RTLD_NEXT from the main executable points to glibc's version */
 		real_dl_find_object = dlsym(RTLD_NEXT, "_dl_find_object");
-		if (real_dl_find_object)
+		if (real_dl_find_object) {
 			fprintf(stderr, "eh_frame: _dl_find_object hook active for %p..%p\n",
 			        (void*)macho_text_start, (void*)macho_text_end);
-		else
+		} else {
 			fprintf(stderr, "eh_frame: using __register_frame only "
 			        "(no _dl_find_object in this glibc)\n");
+		}
 	}
 
 	return 0;

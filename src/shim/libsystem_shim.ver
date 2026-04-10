@@ -15,4 +15,7 @@ GLIBC_2.17 {
         pthread_rwlock_rdlock;
         pthread_rwlock_wrlock;
         pthread_rwlock_unlock;
+        dlopen;
+        mmap;
+        __assert_rtn;
 };

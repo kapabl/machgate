@@ -1,62 +1,167 @@
+diff --git a/libcxx/include/__ios/fpos.h b/libcxx/include/__ios/fpos.h
+index 87f0135fc3..ff331806c6 100644
+--- a/libcxx/include/__ios/fpos.h
++++ b/libcxx/include/__ios/fpos.h
+@@ -23,6 +23,13 @@ template <class _StateT>
+ class _LIBCPP_TEMPLATE_VIS fpos {
+ private:
+   _StateT __st_;
++#if defined(_LIBCPP_ABI_DARWIN_MBSTATE_COMPAT) && !defined(__APPLE__)
++  // macOS mbstate_t is a 128-byte union vs glibc's 8-byte struct. Pad so
++  // fpos<mbstate_t> matches macOS size (136 bytes), preventing stack buffer
++  // overflows when Mach-O virtual functions (e.g. basic_filebuf::seekoff)
++  // write a macOS-sized return value into our stack frame.
++  char __darwin_pad_[128 - sizeof(_StateT)];
++#endif
+   streamoff __off_;
+ 
+ public:
+diff --git a/libcxx/include/__mutex_base b/libcxx/include/__mutex_base
+index ac0d090b7d..76cc02b801 100644
+--- a/libcxx/include/__mutex_base
++++ b/libcxx/include/__mutex_base
+@@ -497,7 +497,7 @@ condition_variable::__do_timed_wait(unique_lock<mutex>& __lk,
+         __ts.tv_sec = __ts_sec_max;
+         __ts.tv_nsec = giga::num - 1;
+     }
+-    int __ec = pthread_cond_clockwait(&__cv_, __lk.mutex()->native_handle(), CLOCK_MONOTONIC, &__ts);
++    int __ec = pthread_cond_clockwait(&__cv_, &__lk.mutex()->native_handle()->__m, CLOCK_MONOTONIC, &__ts);
+     if (__ec != 0 && __ec != ETIMEDOUT)
+         __throw_system_error(__ec, "condition_variable timed_wait failed");
+ }
 diff --git a/libcxx/include/__threading_support b/libcxx/include/__threading_support
-index a7f0da972a8..056ce8482ae 100644
+index a7f0da972a..c47b6056af 100644
 --- a/libcxx/include/__threading_support
 +++ b/libcxx/include/__threading_support
-@@ -62,7 +62,9 @@ _LIBCPP_BEGIN_NAMESPACE_STD
+@@ -61,10 +61,25 @@ _LIBCPP_BEGIN_NAMESPACE_STD
+ 
  #if defined(_LIBCPP_HAS_THREAD_API_PTHREAD)
  // Mutex
- typedef pthread_mutex_t __libcpp_mutex_t;
+-typedef pthread_mutex_t __libcpp_mutex_t;
 -#define _LIBCPP_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
-+/* Use recursive mutex for Apple ABI compatibility — macOS game code
-+   may re-lock std::mutex from the same thread without deadlocking. */
-+#define _LIBCPP_MUTEX_INITIALIZER PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
+-
+-typedef pthread_mutex_t __libcpp_recursive_mutex_t;
++//
++// Apple ABI compat: macOS pthread_mutex_t is 64 bytes (sig + 56 opaque) vs
++// Linux aarch64's 48 bytes. Pad to match macOS layout so struct offsets in
++// inlined Mach-O code (e.g. std::future's __assoc_sub_state) agree with our
++// compiled libc++.so. Same principle as _LIBCPP_ABI_ALTERNATE_STRING_LAYOUT.
++//
++// Use recursive mutex for Apple ABI compatibility — macOS game code may
++// re-lock std::mutex from the same thread without deadlocking.
++#define _LIBCPP_DARWIN_MUTEX_SIZE 64
++typedef struct {
++    pthread_mutex_t __m;
++    char __darwin_pad[_LIBCPP_DARWIN_MUTEX_SIZE - sizeof(pthread_mutex_t)];
++} __libcpp_mutex_t;
++#define _LIBCPP_MUTEX_INITIALIZER { PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP, {0} }
++
++typedef struct {
++    pthread_mutex_t __m;
++    char __darwin_pad[_LIBCPP_DARWIN_MUTEX_SIZE - sizeof(pthread_mutex_t)];
++} __libcpp_recursive_mutex_t;
  
- typedef pthread_mutex_t __libcpp_recursive_mutex_t;
+ // Condition Variable
+ typedef pthread_cond_t __libcpp_condvar_t;
+@@ -255,6 +270,22 @@ int __libcpp_tls_set(__libcpp_tls_key __key, void *__p);
  
-@@ -299,13 +301,34 @@ int __libcpp_recursive_mutex_destroy(__libcpp_recursive_mutex_t *__m)
-   return pthread_mutex_destroy(__m);
- }
+ #if defined(_LIBCPP_HAS_THREAD_API_PTHREAD)
  
-+/* Detect macOS PTHREAD_MUTEX_INITIALIZER (sig=0x32AAABA7) and reinitialize
-+   as a recursive mutex for Linux. Mach-O inline constructors write this
-+   signature at runtime, so we catch it here on first lock. */
- int __libcpp_mutex_lock(__libcpp_mutex_t *__m)
- {
-+  long* __sig = (long*)__m;
++/* Detect macOS PTHREAD_MUTEX_INITIALIZER (sig=0x32AAABA7) or recursive
++   (sig=0x32AAABA1) and reinitialize as a Linux recursive mutex. Mach-O
++   inline constructors write this signature; we catch it on first use. */
++static inline void __fixup_darwin_mutex(pthread_mutex_t *__pm)
++{
++  long *__sig = (long *)__pm;
 +  if (*__sig == 0x32AAABA7L || *__sig == 0x32AAABA1L) {
 +    pthread_mutexattr_t __attr;
 +    pthread_mutexattr_init(&__attr);
 +    pthread_mutexattr_settype(&__attr, PTHREAD_MUTEX_RECURSIVE);
-+    __builtin_memset(__m, 0, sizeof(pthread_mutex_t));
-+    pthread_mutex_init(__m, &__attr);
++    __builtin_memset(__pm, 0, sizeof(pthread_mutex_t));
++    pthread_mutex_init(__pm, &__attr);
 +    pthread_mutexattr_destroy(&__attr);
 +  }
-   return pthread_mutex_lock(__m);
++}
++
+ int __libcpp_recursive_mutex_init(__libcpp_recursive_mutex_t *__m)
+ {
+   pthread_mutexattr_t attr;
+@@ -266,14 +297,14 @@ int __libcpp_recursive_mutex_init(__libcpp_recursive_mutex_t *__m)
+     pthread_mutexattr_destroy(&attr);
+     return __ec;
+   }
+-  __ec = pthread_mutex_init(__m, &attr);
++  __ec = pthread_mutex_init(&__m->__m, &attr);
+   if (__ec) {
+     pthread_mutexattr_destroy(&attr);
+     return __ec;
+   }
+   __ec = pthread_mutexattr_destroy(&attr);
+   if (__ec) {
+-    pthread_mutex_destroy(__m);
++    pthread_mutex_destroy(&__m->__m);
+     return __ec;
+   }
+   return 0;
+@@ -281,45 +312,62 @@ int __libcpp_recursive_mutex_init(__libcpp_recursive_mutex_t *__m)
+ 
+ int __libcpp_recursive_mutex_lock(__libcpp_recursive_mutex_t *__m)
+ {
+-  return pthread_mutex_lock(__m);
++  __fixup_darwin_mutex(&__m->__m);
++  return pthread_mutex_lock(&__m->__m);
+ }
+ 
+ bool __libcpp_recursive_mutex_trylock(__libcpp_recursive_mutex_t *__m)
+ {
+-  return pthread_mutex_trylock(__m) == 0;
++  __fixup_darwin_mutex(&__m->__m);
++  return pthread_mutex_trylock(&__m->__m) == 0;
+ }
+ 
+ int __libcpp_recursive_mutex_unlock(__libcpp_recursive_mutex_t *__m)
+ {
+-  return pthread_mutex_unlock(__m);
++  return pthread_mutex_unlock(&__m->__m);
+ }
+ 
+ int __libcpp_recursive_mutex_destroy(__libcpp_recursive_mutex_t *__m)
+ {
+-  return pthread_mutex_destroy(__m);
++  return pthread_mutex_destroy(&__m->__m);
+ }
+ 
+ int __libcpp_mutex_lock(__libcpp_mutex_t *__m)
+ {
+-  return pthread_mutex_lock(__m);
++  __fixup_darwin_mutex(&__m->__m);
++  return pthread_mutex_lock(&__m->__m);
  }
  
  bool __libcpp_mutex_trylock(__libcpp_mutex_t *__m)
  {
-+  long* __sig = (long*)__m;
-+  if (*__sig == 0x32AAABA7L || *__sig == 0x32AAABA1L) {
-+    pthread_mutexattr_t __attr;
-+    pthread_mutexattr_init(&__attr);
-+    pthread_mutexattr_settype(&__attr, PTHREAD_MUTEX_RECURSIVE);
-+    __builtin_memset(__m, 0, sizeof(pthread_mutex_t));
-+    pthread_mutex_init(__m, &__attr);
-+    pthread_mutexattr_destroy(&__attr);
-+  }
-   return pthread_mutex_trylock(__m) == 0;
+-  return pthread_mutex_trylock(__m) == 0;
++  __fixup_darwin_mutex(&__m->__m);
++  return pthread_mutex_trylock(&__m->__m) == 0;
  }
  
-@@ -320,6 +343,20 @@ int __libcpp_mutex_destroy(__libcpp_mutex_t *__m)
+ int __libcpp_mutex_unlock(__libcpp_mutex_t *__m)
+ {
+-  return pthread_mutex_unlock(__m);
++  return pthread_mutex_unlock(&__m->__m);
+ }
+ 
+ int __libcpp_mutex_destroy(__libcpp_mutex_t *__m)
+ {
+-  return pthread_mutex_destroy(__m);
++  return pthread_mutex_destroy(&__m->__m);
  }
  
  // Condition Variable
 +
 +/* Detect macOS PTHREAD_COND_INITIALIZER (sig=0x3CB0B1BB) and reinitialize
-+   for Linux. Same pattern as the mutex fixup above — Mach-O code writes
-+   the macOS signature at construction time, and the libsystem_shim
-+   interposition doesn't reach calls made from within this .so. */
++   for Linux. Same pattern as the mutex fixup — Mach-O code writes the
++   macOS signature at construction time. */
 +static inline void __fixup_darwin_cond(__libcpp_condvar_t *__cv)
 +{
 +  long *__sig = (long *)__cv;
@@ -69,18 +174,21 @@ index a7f0da972a8..056ce8482ae 100644
  int __libcpp_condvar_signal(__libcpp_condvar_t *__cv)
  {
    return pthread_cond_signal(__cv);
-@@ -332,12 +369,14 @@ int __libcpp_condvar_broadcast(__libcpp_condvar_t *__cv)
+@@ -332,13 +380,15 @@ int __libcpp_condvar_broadcast(__libcpp_condvar_t *__cv)
  
  int __libcpp_condvar_wait(__libcpp_condvar_t *__cv, __libcpp_mutex_t *__m)
  {
+-  return pthread_cond_wait(__cv, __m);
 +  __fixup_darwin_cond(__cv);
-   return pthread_cond_wait(__cv, __m);
++  return pthread_cond_wait(__cv, &__m->__m);
  }
  
  int __libcpp_condvar_timedwait(__libcpp_condvar_t *__cv, __libcpp_mutex_t *__m,
                                 __libcpp_timespec_t *__ts)
  {
+-  return pthread_cond_timedwait(__cv, __m, __ts);
 +  __fixup_darwin_cond(__cv);
-   return pthread_cond_timedwait(__cv, __m, __ts);
++  return pthread_cond_timedwait(__cv, &__m->__m, __ts);
  }
  
+ int __libcpp_condvar_destroy(__libcpp_condvar_t *__cv)

@@ -13,7 +13,9 @@ Makefile
 
 # External library builds
 build-bgfx/
+build-gl4es/
 build-libcxx/
+build-libcxx-standard/
 build-luajit/
 build-sfml/
 

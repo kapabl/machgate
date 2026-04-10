@@ -18,6 +18,7 @@
 #include "macho_defs.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <link.h>        /* struct link_map, ELF types, DT_* */
 #include <string.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
@@ -127,6 +128,7 @@ static int wrapped_luaopen_jit(void *L)
 		if (lua_dostring(L, "require('jit.v').start()") == 0)
 			fprintf(stderr, "resolver: LuaJIT verbose JIT logging enabled\n");
 	}
+
 
 	/* Run an arbitrary Lua script file for debugging/introspection */
 	const char *inject_path = getenv("MACHISMO_LUA_INJECT");
@@ -320,10 +322,11 @@ struct dyld_chained_import_addend64 {
 
 /* Actions for unmapped dylibs */
 enum dylib_action {
-	DYLIB_MAP,     /* map to a Linux .so */
-	DYLIB_STUB,    /* return stub (NULL/0) for all symbols */
-	DYLIB_SKIP,    /* silently skip — symbols remain unresolved */
-	DYLIB_MACHO,   /* look up in a loaded Mach-O dylib */
+	DYLIB_MAP,      /* map to a Linux .so */
+	DYLIB_STUB,     /* return stub (NULL/0) for all symbols */
+	DYLIB_SKIP,     /* silently skip — symbols remain unresolved */
+	DYLIB_MACHO,    /* look up in a loaded Mach-O dylib */
+	DYLIB_DEFERRED, /* library path recorded, dlopen deferred until GL context */
 };
 
 struct dylib_entry {
@@ -371,6 +374,17 @@ struct resolver_state {
 	uint32_t fixups_datasize;
 	bool has_chained_fixups;
 
+	/* LC_DYLD_INFO / LC_DYLD_INFO_ONLY */
+	bool has_dyld_info;
+	uint32_t dyld_info_rebase_off;
+	uint32_t dyld_info_rebase_size;
+	uint32_t dyld_info_bind_off;
+	uint32_t dyld_info_bind_size;
+	uint32_t dyld_info_weak_bind_off;
+	uint32_t dyld_info_weak_bind_size;
+	uint32_t dyld_info_lazy_bind_off;
+	uint32_t dyld_info_lazy_bind_size;
+
 	/* Dylib mapping config */
 	struct dylib_mapping mappings[MAX_MAPPINGS];
 	int nmappings;
@@ -381,6 +395,76 @@ struct resolver_state {
 	int binds_failed;
 	int rebases_applied;
 };
+
+/* ---- Deferred library loading ----
+ *
+ * Libraries with a DEFERRED: prefix in dylib_map.conf are not dlopen'd
+ * during initial resolution. Instead, their bind slots get return-0 stubs
+ * and are recorded here. When the game calls SDL_GL_CreateContext (hooked
+ * during resolution), we dlopen the deferred library and re-resolve all
+ * recorded binds with real symbols.
+ *
+ * Primary use: gl4es on KMSDRM — its constructor needs an EGL display that
+ * only exists after SDL creates a window. */
+
+#define MAX_DEFERRED_BINDS 512
+
+struct deferred_bind {
+	uintptr_t got_slot;       /* GOT entry address to patch */
+	const char* sym_name;     /* pointer into __LINKEDIT — stable for process life */
+	int lib_ordinal;          /* which deferred library (1-based) */
+	int weak;
+	int64_t addend;
+};
+
+static struct {
+	struct deferred_bind binds[MAX_DEFERRED_BINDS];
+	int count;
+	bool active;   /* set in open_dylibs when DEFERRED: library found */
+	bool resolved;
+	struct dylib_entry dylibs[MAX_DYLIBS]; /* copy of dylib entries for completion */
+	int ndylibs;
+} g_deferred;
+
+static void* (*g_real_SDL_GL_CreateContext)(void*) = NULL;
+static int (*g_real_SDL_GL_SetAttribute)(int, int) = NULL;
+
+/* Forward declarations for deferred loading */
+static uintptr_t alloc_return0_stub(void);
+static void resolver_complete_deferred(void);
+
+/* SDL_video.h constants for GL attribute overrides */
+#define MACHISMO_SDL_GL_CONTEXT_MAJOR_VERSION 17
+#define MACHISMO_SDL_GL_CONTEXT_MINOR_VERSION 18
+#define MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK  21
+#define MACHISMO_SDL_GL_CONTEXT_PROFILE_ES    0x0004
+
+/* Force GLES 2.0 profile when using gl4es on GLES-only hardware.
+ * Without this, the game requests desktop GL 3.2 Core and SDL's KMSDRM
+ * backend fails because EGL can't create a desktop GL context. */
+static int wrapped_SDL_GL_SetAttribute(int attr, int value)
+{
+	switch (attr) {
+	case MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK:
+		value = MACHISMO_SDL_GL_CONTEXT_PROFILE_ES;
+		break;
+	case MACHISMO_SDL_GL_CONTEXT_MAJOR_VERSION:
+		value = 2;
+		break;
+	case MACHISMO_SDL_GL_CONTEXT_MINOR_VERSION:
+		value = 0;
+		break;
+	}
+	return g_real_SDL_GL_SetAttribute(attr, value);
+}
+
+static void* wrapped_SDL_GL_CreateContext(void* window)
+{
+	void* ctx = g_real_SDL_GL_CreateContext(window);
+	if (ctx)
+		resolver_complete_deferred();
+	return ctx;
+}
 
 /* ---- C++ constructor/destructor ABI adapters ----
  *
@@ -725,12 +809,96 @@ static uintptr_t lookup_macho_symbol(struct resolver_state* rs, const char* name
 	return 0;
 }
 
+/* Public API: look up symbol by name in a Mach-O nlist */
+uintptr_t resolver_lookup_symbol(void* mh_ptr, uintptr_t slide, const char* name)
+{
+	struct resolver_state rs = {0};
+	rs.mh = (struct mach_header_64*)mh_ptr;
+	rs.slide = slide;
+	return lookup_macho_symbol(&rs, name);
+}
+
+/* ---- ULEB128 / SLEB128 decoders ----
+ * Based on libiberty (FSF) — used by dyld for LC_DYLD_INFO opcode streams. */
+
+static inline size_t read_uleb128(const uint8_t* buf, const uint8_t* end, uint64_t* r)
+{
+	const uint8_t* p = buf;
+	unsigned int shift = 0;
+	uint64_t result = 0;
+	while (p < end) {
+		uint8_t byte = *p++;
+		result |= ((uint64_t)(byte & 0x7f)) << shift;
+		if ((byte & 0x80) == 0) break;
+		shift += 7;
+	}
+	*r = result;
+	return p - buf;
+}
+
+static inline size_t read_sleb128(const uint8_t* buf, const uint8_t* end, int64_t* r)
+{
+	const uint8_t* p = buf;
+	unsigned int shift = 0;
+	int64_t result = 0;
+	uint8_t byte = 0;
+	while (p < end) {
+		byte = *p++;
+		result |= ((uint64_t)(byte & 0x7f)) << shift;
+		shift += 7;
+		if ((byte & 0x80) == 0) break;
+	}
+	if (shift < 64 && (byte & 0x40))
+		result |= -(((uint64_t)1) << shift);
+	*r = result;
+	return p - buf;
+}
+
+/* ---- LC_DYLD_INFO rebase opcodes ---- */
+
+#define REBASE_TYPE_POINTER                  1
+
+#define REBASE_OPCODE_MASK                   0xF0
+#define REBASE_IMMEDIATE_MASK                0x0F
+#define REBASE_OPCODE_DONE                   0x00
+#define REBASE_OPCODE_SET_TYPE_IMM           0x10
+#define REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x20
+#define REBASE_OPCODE_ADD_ADDR_ULEB          0x30
+#define REBASE_OPCODE_ADD_ADDR_IMM_SCALED    0x40
+#define REBASE_OPCODE_DO_REBASE_IMM_TIMES    0x50
+#define REBASE_OPCODE_DO_REBASE_ULEB_TIMES   0x60
+#define REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB 0x70
+#define REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB 0x80
+
+/* ---- LC_DYLD_INFO bind opcodes ---- */
+
+#define BIND_TYPE_POINTER                    1
+
+#define BIND_OPCODE_MASK                     0xF0
+#define BIND_IMMEDIATE_MASK                  0x0F
+#define BIND_OPCODE_DONE                     0x00
+#define BIND_OPCODE_SET_DYLIB_ORDINAL_IMM    0x10
+#define BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB   0x20
+#define BIND_OPCODE_SET_DYLIB_SPECIAL_IMM    0x30
+#define BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM 0x40
+#define BIND_OPCODE_SET_TYPE_IMM             0x50
+#define BIND_OPCODE_SET_ADDEND_SLEB          0x60
+#define BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x70
+#define BIND_OPCODE_ADD_ADDR_ULEB            0x80
+#define BIND_OPCODE_DO_BIND                  0x90
+#define BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB    0xA0
+#define BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED 0xB0
+#define BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB 0xC0
+
+#define BIND_SYMBOL_FLAGS_WEAK_IMPORT        0x01
+
 /* ---- Forward declarations ---- */
 
 static int parse_load_commands(struct resolver_state* rs);
 static int load_mapping_config(struct resolver_state* rs, const char* path);
 static int open_dylibs(struct resolver_state* rs);
 static int process_chained_fixups(struct resolver_state* rs);
+static int process_dyld_info(struct resolver_state* rs);
 static int walk_chain(struct resolver_state* rs, uint64_t* chain_start, uint16_t pointer_format,
                       const struct dyld_chained_fixups_header* header, const char* chain_data);
 static void close_dylibs(struct resolver_state* rs);
@@ -755,14 +923,19 @@ int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file)
 		goto out;
 	}
 
-	if (!rs.has_chained_fixups) {
-		fprintf(stderr, "resolver: no LC_DYLD_CHAINED_FIXUPS found — nothing to resolve\n");
+	if (!rs.has_chained_fixups && !rs.has_dyld_info) {
+		fprintf(stderr, "resolver: no LC_DYLD_CHAINED_FIXUPS or LC_DYLD_INFO found — nothing to resolve\n");
 		ret = 0;
 		goto out;
 	}
 
-	fprintf(stderr, "resolver: found %d dylibs, chained fixups at file offset 0x%x (size %u)\n",
-			rs.ndylibs, rs.fixups_dataoff, rs.fixups_datasize);
+	if (rs.has_chained_fixups)
+		fprintf(stderr, "resolver: found %d dylibs, chained fixups at file offset 0x%x (size %u)\n",
+				rs.ndylibs, rs.fixups_dataoff, rs.fixups_datasize);
+	else
+		fprintf(stderr, "resolver: found %d dylibs, LC_DYLD_INFO (bind=%u rebase=%u weak=%u lazy=%u bytes)\n",
+				rs.ndylibs, rs.dyld_info_bind_size, rs.dyld_info_rebase_size,
+				rs.dyld_info_weak_bind_size, rs.dyld_info_lazy_bind_size);
 
 	/* Step 2: Load dylib mapping config */
 	if (load_mapping_config(&rs, map_file) < 0) {
@@ -774,6 +947,12 @@ int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file)
 		fprintf(stderr, "resolver: failed to open dylibs\n");
 		goto out;
 	}
+
+	/* Pre-load libgcc_s globally so compiler runtime symbols (__clear_cache,
+	 * __register_frame, _Unwind_*, etc.) are available via RTLD_DEFAULT.
+	 * Without this, they aren't found because libgcc_s is not in the
+	 * global symbol scope by default on some Linux configurations. */
+	dlopen("libgcc_s.so.1", RTLD_GLOBAL | RTLD_LAZY);
 
 	/* Resolve shim's malloc/free for operator new/delete hooks.
 	 * Find the libSystem.B dylib entry — its handle is the shim .so.
@@ -790,14 +969,29 @@ int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file)
 		}
 	}
 
-	/* Step 4: Walk chained fixups and resolve */
-	if (process_chained_fixups(&rs) < 0) {
-		fprintf(stderr, "resolver: failed processing fixups\n");
-		goto out;
+	/* Step 4: Walk fixups and resolve */
+	if (rs.has_chained_fixups) {
+		if (process_chained_fixups(&rs) < 0) {
+			fprintf(stderr, "resolver: failed processing chained fixups\n");
+			goto out;
+		}
+	} else if (rs.has_dyld_info) {
+		if (process_dyld_info(&rs) < 0) {
+			fprintf(stderr, "resolver: failed processing LC_DYLD_INFO\n");
+			goto out;
+		}
 	}
 
 	fprintf(stderr, "resolver: done — %d binds resolved, %d stubbed, %d failed, %d rebases, %d ctor/dtor ABI adapters, %d variadic thunks\n",
 			rs.binds_resolved, rs.binds_stubbed, rs.binds_failed, rs.rebases_applied, ctor_tramp_count, variadic_thunk_count);
+
+	/* Save dylib state for deferred completion (runs later from game thread) */
+	if (g_deferred.active && !g_deferred.resolved) {
+		memcpy(g_deferred.dylibs, rs.dylibs, sizeof(rs.dylibs));
+		g_deferred.ndylibs = rs.ndylibs;
+		fprintf(stderr, "resolver: %d deferred binds recorded, waiting for SDL_GL_CreateContext\n",
+				g_deferred.count);
+	}
 
 	ret = 0;
 
@@ -860,6 +1054,20 @@ static int parse_load_commands(struct resolver_state* rs)
 			rs->fixups_dataoff = ldc->dataoff;
 			rs->fixups_datasize = ldc->datasize;
 			rs->has_chained_fixups = true;
+			break;
+		}
+		case LC_DYLD_INFO:
+		case LC_DYLD_INFO_ONLY: {
+			struct dyld_info_command* dic = (struct dyld_info_command*)lc;
+			rs->dyld_info_rebase_off = dic->rebase_off;
+			rs->dyld_info_rebase_size = dic->rebase_size;
+			rs->dyld_info_bind_off = dic->bind_off;
+			rs->dyld_info_bind_size = dic->bind_size;
+			rs->dyld_info_weak_bind_off = dic->weak_bind_off;
+			rs->dyld_info_weak_bind_size = dic->weak_bind_size;
+			rs->dyld_info_lazy_bind_off = dic->lazy_bind_off;
+			rs->dyld_info_lazy_bind_size = dic->lazy_bind_size;
+			rs->has_dyld_info = true;
 			break;
 		}
 		}
@@ -1011,6 +1219,16 @@ static int open_dylibs(struct resolver_state* rs)
 			continue;
 		}
 
+		/* DEFERRED: prefix — defer dlopen until trigger (SDL_GL_CreateContext) */
+		if (strncmp(m->so_path, "DEFERRED:", 9) == 0) {
+			de->action = DYLIB_DEFERRED;
+			snprintf(de->so_path, MAX_NAME, "%s", m->so_path + 9);
+			g_deferred.active = true;
+			fprintf(stderr, "resolver: dylib[%d] '%s' → DEFERRED '%s'\n",
+					de->ordinal, de->name, de->so_path);
+			continue;
+		}
+
 		/* Try to dlopen the Linux .so */
 		de->handle = dlopen(m->so_path, RTLD_LAZY | RTLD_GLOBAL);
 		if (!de->handle) {
@@ -1114,6 +1332,101 @@ static int process_chained_fixups(struct resolver_state* rs)
 	return 0;
 }
 
+/* ---- Shared stub allocator ---- */
+
+static uintptr_t alloc_return0_stub(void)
+{
+	static uint8_t* pool = NULL;
+	static size_t used = 0;
+	static const size_t cap = 256 * 4096; /* 1MB */
+	if (!pool) {
+		pool = mmap(NULL, cap, PROT_READ | PROT_WRITE | PROT_EXEC,
+		            MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+		if (pool == MAP_FAILED) { pool = NULL; return 0; }
+	}
+	if (used + 128 > cap) return 0;
+	uintptr_t slot = (uintptr_t)(pool + used);
+	uint32_t* code = (uint32_t*)(pool + used);
+	code[0] = 0x52800000; /* mov w0, #0 */
+	code[1] = 0xd65f03c0; /* ret */
+	__builtin___clear_cache((char*)code, (char*)(code + 2));
+	used += 128;
+	return slot;
+}
+
+/* ---- Deferred library completion ----
+ *
+ * Called from wrapped_SDL_GL_CreateContext after the GL context is created.
+ * dlopen's deferred libraries and resolves all recorded deferred binds. */
+
+static void resolver_complete_deferred(void)
+{
+	if (g_deferred.resolved) return;
+	g_deferred.resolved = true;
+
+	/* Phase 1: dlopen all deferred libraries */
+	for (int i = 0; i < g_deferred.ndylibs; i++) {
+		struct dylib_entry* de = &g_deferred.dylibs[i];
+		if (de->action != DYLIB_DEFERRED) continue;
+
+		de->handle = dlopen(de->so_path, RTLD_LAZY | RTLD_GLOBAL);
+		if (!de->handle) {
+			fprintf(stderr, "resolver: deferred dlopen '%s' FAILED: %s\n",
+					de->so_path, dlerror());
+			continue;
+		}
+		de->action = DYLIB_MAP;
+		fprintf(stderr, "resolver: deferred dlopen '%s' — loaded\n", de->so_path);
+	}
+
+	/* Phase 2: resolve all recorded deferred binds */
+	long page_size = sysconf(_SC_PAGESIZE);
+	int resolved = 0, failed = 0;
+	for (int i = 0; i < g_deferred.count; i++) {
+		struct deferred_bind* db = &g_deferred.binds[i];
+		struct dylib_entry* de = &g_deferred.dylibs[db->lib_ordinal - 1];
+		if (!de->handle) continue;
+
+		const char* lookup = db->sym_name;
+		if (lookup[0] == '_') lookup++;
+
+		/* Strip $ suffixes */
+		char stripped[256];
+		const char* dollar = strchr(lookup, '$');
+		if (dollar && (size_t)(dollar - lookup) < sizeof(stripped)) {
+			memcpy(stripped, lookup, dollar - lookup);
+			stripped[dollar - lookup] = '\0';
+			lookup = stripped;
+		}
+
+		void* addr = dlsym(de->handle, lookup);
+		if (!addr && strncmp(lookup, "_ZN", 3) == 0)
+			addr = try_mangling_variants(de->handle, lookup);
+		if (!addr)
+			addr = dlsym(RTLD_DEFAULT, lookup);
+
+		if (addr) {
+			uintptr_t result = (uintptr_t)addr + db->addend;
+			if (is_ctor_or_dtor(db->sym_name) && !ctor_has_stack_params(db->sym_name))
+				result = wrap_ctor_for_apple_abi(result);
+
+			/* mprotect GOT page (permissions may have been restored) */
+			uintptr_t page = db->got_slot & ~(uintptr_t)(page_size - 1);
+			mprotect((void*)page, page_size, PROT_READ | PROT_WRITE);
+			*(uint64_t*)db->got_slot = result;
+			resolved++;
+		} else if (!db->weak) {
+			if (failed < 10)
+				fprintf(stderr, "resolver: deferred symbol '%s' not found in '%s'\n",
+						lookup, de->so_path);
+			failed++;
+		}
+	}
+
+	fprintf(stderr, "resolver: deferred complete — %d resolved, %d failed\n",
+			resolved, failed);
+}
+
 /* ---- Resolve a single bind entry ---- */
 
 static uintptr_t resolve_import(struct resolver_state* rs,
@@ -1174,6 +1487,21 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 	const char* lookup_name = sym_name;
 	if (lookup_name[0] == '_')
 		lookup_name++;
+
+	/* Strip Apple $ suffixes ($DARWIN_EXTSN, $UNIX2003, $NOCANCEL).
+	 * On Linux, glibc provides the modern behavior by default. */
+	char dollar_stripped[256];
+	{
+		const char* dollar = strchr(lookup_name, '$');
+		if (dollar) {
+			size_t len = dollar - lookup_name;
+			if (len < sizeof(dollar_stripped)) {
+				memcpy(dollar_stripped, lookup_name, len);
+				dollar_stripped[len] = '\0';
+				lookup_name = dollar_stripped;
+			}
+		}
+	}
 
 	if (strstr(sym_name, "registr") && strstr(sym_name, "s_instance") && !strstr(sym_name, "ZGV"))
 		fprintf(stderr, "resolver: TRACE s_instance: ordinal=%u lib_ordinal=%d weak=%d name='%s'\n",
@@ -1331,8 +1659,26 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 					if (thunk) result = thunk;
 				}
 			}
+			/* Hook SDL GL functions for deferred library loading */
+			if (g_deferred.active && !g_deferred.resolved) {
+				if (strcmp(lookup_name, "SDL_GL_CreateContext") == 0) {
+					g_real_SDL_GL_CreateContext = (void* (*)(void*))result;
+					result = (uintptr_t)wrapped_SDL_GL_CreateContext;
+				} else if (strcmp(lookup_name, "SDL_GL_SetAttribute") == 0) {
+					g_real_SDL_GL_SetAttribute = (int (*)(int, int))result;
+					result = (uintptr_t)wrapped_SDL_GL_SetAttribute;
+				}
+			}
 			rs->binds_resolved++;
 			return result;
+		}
+		/* Fallback: try RTLD_DEFAULT for symbols provided by
+		 * the compiler runtime (libgcc_s: __clear_cache, _Unwind_*,
+		 * __register_frame, etc.) or other loaded libraries */
+		addr = dlsym(RTLD_DEFAULT, lookup_name);
+		if (addr) {
+			rs->binds_resolved++;
+			return (uintptr_t)addr + addend;
 		}
 		if (!weak) {
 			/* Only print for first few failures to avoid spam */
@@ -1392,35 +1738,16 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 			rs->binds_stubbed++;
 		}
 		goto alloc_stub_slot;
+	case DYLIB_DEFERRED:
+		/* Should not reach here — deferred binds are handled at the
+		 * walk_chain/do_bind_one level before calling resolve_import.
+		 * Fall through to stub as a safety net. */
+		rs->binds_stubbed++;
+		goto alloc_stub_slot;
 	}
 
 alloc_stub_slot:
-	/* Provide a unique executable stub for unresolved binds.
-	 * Each stub is a "mov w0, #0; ret" (return 0) so that stubbed
-	 * functions don't crash when called through __stubs trampolines.
-	 * Also safe as data: first 8 bytes are nonzero so NULL checks pass. */
-	{
-		static uint8_t* stub_pool = NULL;
-		static size_t stub_pool_used = 0;
-		static size_t stub_pool_capacity = 0;
-		if (!stub_pool) {
-			stub_pool_capacity = 256 * 4096; /* 1MB */
-			stub_pool = mmap(NULL, stub_pool_capacity,
-			                 PROT_READ | PROT_WRITE | PROT_EXEC,
-			                 MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-			if (stub_pool == MAP_FAILED) stub_pool = NULL;
-		}
-		if (stub_pool && stub_pool_used + 128 <= stub_pool_capacity) {
-			uintptr_t slot = (uintptr_t)(stub_pool + stub_pool_used);
-			/* Write arm64: mov w0, #0; ret */
-			uint32_t* code = (uint32_t*)(stub_pool + stub_pool_used);
-			code[0] = 0x52800000; /* mov w0, #0 */
-			code[1] = 0xD65F03C0; /* ret */
-			stub_pool_used += 128;
-			return slot;
-		}
-	}
-	return 0;
+	return alloc_return0_stub();
 }
 
 /* ---- Walk a single fixup chain ---- */
@@ -1478,6 +1805,491 @@ static int walk_chain(struct resolver_state* rs, uint64_t* chain_start, uint16_t
 
 		/* Stride is 4 bytes for DYLD_CHAINED_PTR_64 and PTR_64_OFFSET */
 		loc = (uint64_t*)((uint8_t*)loc + (next * 4));
+	}
+
+	return 0;
+}
+
+/* ---- LC_DYLD_INFO_ONLY: resolve a single bind by lib_ordinal + symbol name ----
+ *
+ * Reuses the same resolution logic as resolve_import() but takes the already-
+ * extracted bind parameters directly (no chained fixup header dependency).
+ */
+static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
+                                      int lib_ordinal, const char* sym_name,
+                                      int weak, int64_t addend)
+{
+	/* Strip leading underscore (Mach-O convention) */
+	const char* lookup_name = sym_name;
+	if (lookup_name[0] == '_')
+		lookup_name++;
+
+	/* Strip Apple $ suffixes ($DARWIN_EXTSN, $UNIX2003, $NOCANCEL) */
+	char dollar_stripped[256];
+	{
+		const char* dollar = strchr(lookup_name, '$');
+		if (dollar) {
+			size_t len = dollar - lookup_name;
+			if (len < sizeof(dollar_stripped)) {
+				memcpy(dollar_stripped, lookup_name, len);
+				dollar_stripped[len] = '\0';
+				lookup_name = dollar_stripped;
+			}
+		}
+	}
+
+	/* Hook operator new/new[]/delete/delete[] for macOS malloc compat */
+	if (strcmp(sym_name, "__Znwm") == 0 || strcmp(sym_name, "__Znam") == 0) {
+		rs->binds_resolved++;
+		return (uintptr_t)zeroing_operator_new;
+	}
+	if (strcmp(sym_name, "__ZdlPv") == 0 || strcmp(sym_name, "__ZdaPv") == 0) {
+		rs->binds_resolved++;
+		return (uintptr_t)zeroing_operator_delete;
+	}
+
+	/* Hook LuaJIT functions for profiler injection */
+	if (strcmp(sym_name, "_luaopen_jit") == 0) {
+		rs->binds_resolved++;
+		return (uintptr_t)wrapped_luaopen_jit;
+	}
+	if (strcmp(sym_name, "_lua_close") == 0) {
+		rs->binds_resolved++;
+		return (uintptr_t)wrapped_lua_close;
+	}
+	if (strcmp(sym_name, "_lua_pcall") == 0) {
+		rs->binds_resolved++;
+		return (uintptr_t)wrapped_lua_pcall;
+	}
+
+	/* Special ordinals */
+	if (lib_ordinal == 0 || lib_ordinal == -1) {
+		/* 0 = BIND_SPECIAL_DYLIB_SELF (this image)
+		 * -1 = BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE */
+		uintptr_t addr = lookup_macho_symbol(rs, sym_name);
+		if (addr) {
+			rs->binds_resolved++;
+			return addr + addend;
+		}
+		/* Fallback: try RTLD_DEFAULT for C++ RTTI and other symbols
+		 * that may come from linked shared libraries */
+		void* fallback = dlsym(RTLD_DEFAULT, lookup_name);
+		if (fallback) {
+			rs->binds_resolved++;
+			return (uintptr_t)fallback + addend;
+		}
+		if (!weak) rs->binds_failed++;
+		else rs->binds_stubbed++;
+		goto alloc_stub;
+	}
+	if (lib_ordinal == -2) {
+		/* BIND_SPECIAL_DYLIB_FLAT_LOOKUP */
+		void* addr = dlsym(RTLD_DEFAULT, lookup_name);
+		if (addr) {
+			uintptr_t result = (uintptr_t)addr + addend;
+			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
+				result = wrap_ctor_for_apple_abi(result);
+			const struct variadic_info* vi = lookup_variadic(lookup_name);
+			if (vi) {
+				void* v_func = dlsym(RTLD_DEFAULT, vi->v_name);
+				if (v_func) {
+					uintptr_t thunk = create_variadic_thunk((uintptr_t)v_func, vi);
+					if (thunk) result = thunk;
+				}
+			}
+			rs->binds_resolved++;
+			return result;
+		}
+		if (!weak) rs->binds_failed++;
+		goto alloc_stub;
+	}
+	if (lib_ordinal == -3) {
+		/* BIND_SPECIAL_DYLIB_WEAK_LOOKUP */
+		uintptr_t macho_addr = lookup_macho_symbol(rs, sym_name);
+		if (macho_addr) {
+			rs->binds_resolved++;
+			return macho_addr + addend;
+		}
+		void* addr = dlsym(RTLD_DEFAULT, lookup_name);
+		if (addr) {
+			uintptr_t result = (uintptr_t)addr + addend;
+			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
+				result = wrap_ctor_for_apple_abi(result);
+			rs->binds_resolved++;
+			return result;
+		}
+		rs->binds_stubbed++;
+		goto alloc_stub;
+	}
+
+	/* Normal library ordinal (1-based) */
+	if (lib_ordinal < 1 || lib_ordinal > rs->ndylibs) {
+		extern int machismo_verbose;
+		if (machismo_verbose)
+			fprintf(stderr, "resolver: dyld_info bind '%s' lib_ordinal %d out of range\n",
+					sym_name, lib_ordinal);
+		rs->binds_failed++;
+		goto alloc_stub;
+	}
+
+	struct dylib_entry* de = &rs->dylibs[lib_ordinal - 1];
+
+	switch (de->action) {
+	case DYLIB_MAP: {
+		void* addr = dlsym(de->handle, lookup_name);
+		if (!addr && strncmp(lookup_name, "_ZN", 3) == 0)
+			addr = try_mangling_variants(de->handle, lookup_name);
+		if (addr) {
+			uintptr_t result = (uintptr_t)addr + addend;
+			if (is_ctor_or_dtor(sym_name)) {
+				if (!ctor_has_stack_params(sym_name))
+					result = wrap_ctor_for_apple_abi(result);
+			}
+			const struct variadic_info* vi = lookup_variadic(lookup_name);
+			if (vi) {
+				void* v_func = dlsym(RTLD_DEFAULT, vi->v_name);
+				if (v_func) {
+					uintptr_t thunk = create_variadic_thunk((uintptr_t)v_func, vi);
+					if (thunk) result = thunk;
+				}
+			}
+			/* Hook SDL GL functions for deferred library loading */
+			if (g_deferred.active && !g_deferred.resolved) {
+				if (strcmp(lookup_name, "SDL_GL_CreateContext") == 0) {
+					g_real_SDL_GL_CreateContext = (void* (*)(void*))result;
+					result = (uintptr_t)wrapped_SDL_GL_CreateContext;
+				} else if (strcmp(lookup_name, "SDL_GL_SetAttribute") == 0) {
+					g_real_SDL_GL_SetAttribute = (int (*)(int, int))result;
+					result = (uintptr_t)wrapped_SDL_GL_SetAttribute;
+				}
+			}
+			rs->binds_resolved++;
+			return result;
+		}
+		/* Fallback: try RTLD_DEFAULT for compiler runtime symbols */
+		addr = dlsym(RTLD_DEFAULT, lookup_name);
+		if (addr) {
+			rs->binds_resolved++;
+			return (uintptr_t)addr + addend;
+		}
+		if (!weak) {
+			if (rs->binds_failed < 20)
+				fprintf(stderr, "resolver: symbol '%s' not found in '%s'\n",
+						lookup_name, de->so_path);
+			rs->binds_failed++;
+		} else {
+			rs->binds_stubbed++;
+		}
+		goto alloc_stub;
+	}
+	case DYLIB_MACHO: {
+		uintptr_t addr = dylib_loader_lookup(de->macho_info, sym_name);
+		if (!addr && strstr(sym_name, "_ZN")) {
+			char* variant = strdup(sym_name);
+			if (variant) {
+				for (char* c = variant; *c; c++) {
+					if (*c == 'y') { *c = 'm'; break; }
+					else if (*c == 'm') { *c = 'y'; break; }
+				}
+				addr = dylib_loader_lookup(de->macho_info, variant);
+				free(variant);
+			}
+		}
+		if (addr) {
+			rs->binds_resolved++;
+			return addr + addend;
+		}
+		if (!weak) {
+			if (rs->binds_failed < 20)
+				fprintf(stderr, "resolver: symbol '%s' not found in MACHO '%s'\n",
+						lookup_name, de->so_path);
+			rs->binds_failed++;
+		} else {
+			rs->binds_stubbed++;
+		}
+		goto alloc_stub;
+	}
+	case DYLIB_STUB:
+		rs->binds_stubbed++;
+		goto alloc_stub;
+	case DYLIB_SKIP:
+		if (!weak) rs->binds_failed++;
+		else rs->binds_stubbed++;
+		goto alloc_stub;
+	case DYLIB_DEFERRED:
+		/* Handled by do_bind_one before calling this function.
+		 * If we reach here, fall through to stub as safety net. */
+		rs->binds_stubbed++;
+		goto alloc_stub;
+	}
+
+alloc_stub:
+	return alloc_return0_stub();
+}
+
+/* ---- Bind helper with deferred library support ---- */
+
+static void do_bind_one(struct resolver_state* rs, int seg_index,
+                        uint64_t seg_offset, int lib_ordinal,
+                        const char* sym_name, int weak, int64_t addend)
+{
+	if (seg_index >= rs->nsegments) return;
+	uintptr_t addr = rs->segments[seg_index].vmaddr + rs->slide + seg_offset;
+
+	/* Check for deferred library — record bind for later resolution */
+	if (lib_ordinal >= 1 && lib_ordinal <= rs->ndylibs &&
+	    rs->dylibs[lib_ordinal - 1].action == DYLIB_DEFERRED) {
+		if (g_deferred.count < MAX_DEFERRED_BINDS) {
+			struct deferred_bind* db = &g_deferred.binds[g_deferred.count++];
+			db->got_slot = addr;
+			db->sym_name = sym_name;
+			db->lib_ordinal = lib_ordinal;
+			db->weak = weak;
+			db->addend = addend;
+		}
+		*(uint64_t*)addr = alloc_return0_stub();
+		rs->binds_stubbed++;
+		return;
+	}
+
+	uintptr_t resolved = resolve_bind_by_name(rs, lib_ordinal, sym_name, weak, addend);
+	*(uint64_t*)addr = resolved;
+}
+
+/* ---- LC_DYLD_INFO_ONLY: process rebase + bind opcode streams ---- */
+
+static int process_dyld_info(struct resolver_state* rs)
+{
+	extern int machismo_verbose;
+
+	/* Make writable segments temporarily writable for patching */
+	for (int i = 0; i < rs->nsegments; i++) {
+		struct seg_info* seg = &rs->segments[i];
+		if (seg->vmsize == 0) continue;
+		uintptr_t addr = seg->vmaddr + rs->slide;
+		if (mprotect((void*)addr, seg->vmsize, PROT_READ | PROT_WRITE | PROT_EXEC) < 0) {
+			/* Not all segments are writable (e.g., __TEXT) — only warn on DATA segments */
+			if (seg->prot & VM_PROT_WRITE)
+				fprintf(stderr, "resolver: mprotect writable failed for segment at 0x%lx: %s\n",
+						addr, strerror(errno));
+		}
+	}
+
+	/* ---- Process rebases ---- */
+	if (rs->dyld_info_rebase_size > 0) {
+		const uint8_t* p = (const uint8_t*)fileoff_to_mem(rs, rs->dyld_info_rebase_off);
+		const uint8_t* end = p + rs->dyld_info_rebase_size;
+		if (!p) {
+			fprintf(stderr, "resolver: cannot map rebase data at offset 0x%x\n",
+					rs->dyld_info_rebase_off);
+			return -1;
+		}
+
+		int seg_index = 0;
+		uint64_t seg_offset = 0;
+		bool done = false;
+
+		while (p < end && !done) {
+			uint8_t byte = *p++;
+			uint8_t opcode = byte & REBASE_OPCODE_MASK;
+			uint8_t imm = byte & REBASE_IMMEDIATE_MASK;
+			uint64_t uleb_val;
+
+			switch (opcode) {
+			case REBASE_OPCODE_DONE:
+				done = true;
+				break;
+			case REBASE_OPCODE_SET_TYPE_IMM:
+				/* type = imm; only REBASE_TYPE_POINTER matters for arm64 */
+				break;
+			case REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+				seg_index = imm;
+				p += read_uleb128(p, end, &seg_offset);
+				break;
+			case REBASE_OPCODE_ADD_ADDR_ULEB:
+				p += read_uleb128(p, end, &uleb_val);
+				seg_offset += uleb_val;
+				break;
+			case REBASE_OPCODE_ADD_ADDR_IMM_SCALED:
+				seg_offset += (uint64_t)imm * 8;
+				break;
+			case REBASE_OPCODE_DO_REBASE_IMM_TIMES:
+				for (int i = 0; i < imm; i++) {
+					if (seg_index < rs->nsegments) {
+						uintptr_t addr = rs->segments[seg_index].vmaddr + rs->slide + seg_offset;
+						uint64_t* loc = (uint64_t*)addr;
+						*loc += rs->slide;
+						rs->rebases_applied++;
+					}
+					seg_offset += 8;
+				}
+				break;
+			case REBASE_OPCODE_DO_REBASE_ULEB_TIMES: {
+				p += read_uleb128(p, end, &uleb_val);
+				for (uint64_t i = 0; i < uleb_val; i++) {
+					if (seg_index < rs->nsegments) {
+						uintptr_t addr = rs->segments[seg_index].vmaddr + rs->slide + seg_offset;
+						uint64_t* loc = (uint64_t*)addr;
+						*loc += rs->slide;
+						rs->rebases_applied++;
+					}
+					seg_offset += 8;
+				}
+				break;
+			}
+			case REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB:
+				if (seg_index < rs->nsegments) {
+					uintptr_t addr = rs->segments[seg_index].vmaddr + rs->slide + seg_offset;
+					uint64_t* loc = (uint64_t*)addr;
+					*loc += rs->slide;
+					rs->rebases_applied++;
+				}
+				p += read_uleb128(p, end, &uleb_val);
+				seg_offset += uleb_val + 8;
+				break;
+			case REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB: {
+				uint64_t count, skip;
+				p += read_uleb128(p, end, &count);
+				p += read_uleb128(p, end, &skip);
+				for (uint64_t i = 0; i < count; i++) {
+					if (seg_index < rs->nsegments) {
+						uintptr_t addr = rs->segments[seg_index].vmaddr + rs->slide + seg_offset;
+						uint64_t* loc = (uint64_t*)addr;
+						*loc += rs->slide;
+						rs->rebases_applied++;
+					}
+					seg_offset += skip + 8;
+				}
+				break;
+			}
+			default:
+				fprintf(stderr, "resolver: unknown rebase opcode 0x%x\n", opcode);
+				return -1;
+			}
+		}
+	}
+
+	/* ---- Process binds (regular, weak, lazy) ---- */
+	struct {
+		uint32_t off;
+		uint32_t size;
+		const char* name;
+	} bind_passes[] = {
+		{ rs->dyld_info_bind_off, rs->dyld_info_bind_size, "bind" },
+		{ rs->dyld_info_weak_bind_off, rs->dyld_info_weak_bind_size, "weak_bind" },
+		{ rs->dyld_info_lazy_bind_off, rs->dyld_info_lazy_bind_size, "lazy_bind" },
+	};
+
+	for (int pass = 0; pass < 3; pass++) {
+		if (bind_passes[pass].size == 0)
+			continue;
+
+		const uint8_t* p = (const uint8_t*)fileoff_to_mem(rs, bind_passes[pass].off);
+		const uint8_t* end = p + bind_passes[pass].size;
+		if (!p) {
+			fprintf(stderr, "resolver: cannot map %s data at offset 0x%x\n",
+					bind_passes[pass].name, bind_passes[pass].off);
+			return -1;
+		}
+
+		int seg_index = 0;
+		uint64_t seg_offset = 0;
+		int lib_ordinal = 0;
+		const char* sym_name = "";
+		int sym_flags = 0;
+		int64_t addend = 0;
+		bool done = false;
+
+		while (p < end && !done) {
+			uint8_t byte = *p++;
+			uint8_t opcode = byte & BIND_OPCODE_MASK;
+			uint8_t imm = byte & BIND_IMMEDIATE_MASK;
+			uint64_t uleb_val;
+			int64_t sleb_val;
+
+			switch (opcode) {
+			case BIND_OPCODE_DONE:
+				/* For lazy binds, DONE separates entries; for others, it terminates */
+				if (pass != 2) /* not lazy_bind */
+					done = true;
+				break;
+			case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+				lib_ordinal = imm;
+				break;
+			case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
+				p += read_uleb128(p, end, &uleb_val);
+				lib_ordinal = (int)uleb_val;
+				break;
+			case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
+				if (imm == 0)
+					lib_ordinal = 0;
+				else
+					lib_ordinal = (int8_t)(BIND_OPCODE_MASK | imm); /* sign-extend 4-bit */
+				break;
+			case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM:
+				sym_flags = imm;
+				sym_name = (const char*)p;
+				p += strlen(sym_name) + 1;
+				break;
+			case BIND_OPCODE_SET_TYPE_IMM:
+				/* type = imm; only BIND_TYPE_POINTER for arm64 */
+				break;
+			case BIND_OPCODE_SET_ADDEND_SLEB:
+				p += read_sleb128(p, end, &sleb_val);
+				addend = sleb_val;
+				break;
+			case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+				seg_index = imm;
+				p += read_uleb128(p, end, &seg_offset);
+				break;
+			case BIND_OPCODE_ADD_ADDR_ULEB:
+				p += read_uleb128(p, end, &uleb_val);
+				seg_offset += uleb_val;
+				break;
+			case BIND_OPCODE_DO_BIND: {
+				int weak = (sym_flags & BIND_SYMBOL_FLAGS_WEAK_IMPORT) != 0;
+				do_bind_one(rs, seg_index, seg_offset, lib_ordinal, sym_name, weak, addend);
+				seg_offset += 8;
+				break;
+			}
+			case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB: {
+				int weak = (sym_flags & BIND_SYMBOL_FLAGS_WEAK_IMPORT) != 0;
+				do_bind_one(rs, seg_index, seg_offset, lib_ordinal, sym_name, weak, addend);
+				p += read_uleb128(p, end, &uleb_val);
+				seg_offset += uleb_val + 8;
+				break;
+			}
+			case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED: {
+				int weak = (sym_flags & BIND_SYMBOL_FLAGS_WEAK_IMPORT) != 0;
+				do_bind_one(rs, seg_index, seg_offset, lib_ordinal, sym_name, weak, addend);
+				seg_offset += ((uint64_t)imm * 8) + 8;
+				break;
+			}
+			case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB: {
+				uint64_t count, skip;
+				p += read_uleb128(p, end, &count);
+				p += read_uleb128(p, end, &skip);
+				int weak = (sym_flags & BIND_SYMBOL_FLAGS_WEAK_IMPORT) != 0;
+				for (uint64_t i = 0; i < count; i++) {
+					do_bind_one(rs, seg_index, seg_offset, lib_ordinal, sym_name, weak, addend);
+					seg_offset += skip + 8;
+				}
+				break;
+			}
+			default:
+				fprintf(stderr, "resolver: unknown bind opcode 0x%x in %s\n",
+						opcode, bind_passes[pass].name);
+				return -1;
+			}
+		}
+	}
+
+	/* Restore segment protections */
+	for (int i = 0; i < rs->nsegments; i++) {
+		struct seg_info* seg = &rs->segments[i];
+		if (seg->vmsize == 0) continue;
+		uintptr_t addr = seg->vmaddr + rs->slide;
+		mprotect((void*)addr, seg->vmsize, seg->prot);
 	}
 
 	return 0;

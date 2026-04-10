@@ -106,6 +106,23 @@ struct mach_header_64 {
 #define LC_SOURCE_VERSION    0x2A
 #define LC_REEXPORT_DYLIB    (0x1f | LC_REQ_DYLD)
 
+/* --- LC_DYLD_INFO / LC_DYLD_INFO_ONLY --- */
+
+struct dyld_info_command {
+	uint32_t cmd;		/* LC_DYLD_INFO or LC_DYLD_INFO_ONLY */
+	uint32_t cmdsize;
+	uint32_t rebase_off;	/* file offset to rebase opcodes */
+	uint32_t rebase_size;
+	uint32_t bind_off;	/* file offset to bind opcodes */
+	uint32_t bind_size;
+	uint32_t weak_bind_off;
+	uint32_t weak_bind_size;
+	uint32_t lazy_bind_off;
+	uint32_t lazy_bind_size;
+	uint32_t export_off;	/* file offset to export trie */
+	uint32_t export_size;
+};
+
 struct load_command {
 	uint32_t cmd;
 	uint32_t cmdsize;
@@ -178,6 +195,10 @@ struct section_64 {
 	uint32_t reserved2;
 	uint32_t reserved3;
 };
+
+/* Section attribute flags (from section_64.flags) */
+#define S_ATTR_PURE_INSTRUCTIONS  0x80000000
+#define S_ATTR_SOME_INSTRUCTIONS  0x00000400
 
 /* --- Dylib command --- */
 

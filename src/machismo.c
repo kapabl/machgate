@@ -219,23 +219,35 @@ int main(int argc, char** argv, char** envp)
 				struct segment_command_64* seg = (struct segment_command_64*)lc;
 				if (seg->maxprot & VM_PROT_EXECUTE) {
 					uint32_t* code = (uint32_t*)(seg->vmaddr + machismo_load_results.slide);
-					size_t count = seg->vmsize / 4;
 					/* Make writable for patching */
 					mprotect(code, seg->vmsize, PROT_READ | PROT_WRITE | PROT_EXEC);
 
-					/* RCPC: in-place downgrade */
-					for (size_t j = 0; j < count; j++) {
-						if ((code[j] & 0x3FFFFC00) == 0x38BFC000) {
-							code[j] = (code[j] & 0xC00003FF) | 0x08DFFC00;
-							rcpc_fixed++;
-						}
-					}
+					/* Only patch actual code sections (__text), NOT data
+					 * sections like __cstring, __const, __gcc_except_tab, etc.
+					 * Data sections can contain byte patterns that look like
+					 * LSE/RCPC instructions but are really string constants. */
+					struct section_64* sect = (struct section_64*)(seg + 1);
+					for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+						if (!(sect->flags & S_ATTR_SOME_INSTRUCTIONS) &&
+						    !(sect->flags & S_ATTR_PURE_INSTRUCTIONS))
+							continue;
+						uint32_t* scode = (uint32_t*)(sect->addr + machismo_load_results.slide);
+						size_t scount = sect->size / 4;
 
-					/* LSE: replace with B to island */
-					if (lse_pool_cur) {
-						int n = lse_emul_patch(code, seg->vmsize,
-						                       &lse_pool_cur, lse_pool_end);
-						lse_total += n;
+						/* RCPC: in-place downgrade */
+						for (size_t j = 0; j < scount; j++) {
+							if ((scode[j] & 0x3FFFFC00) == 0x38BFC000) {
+								scode[j] = (scode[j] & 0xC00003FF) | 0x08DFFC00;
+								rcpc_fixed++;
+							}
+						}
+
+						/* LSE: replace with B to island */
+						if (lse_pool_cur) {
+							int n = lse_emul_patch(scode, sect->size,
+							                       &lse_pool_cur, lse_pool_end);
+							lse_total += n;
+						}
 					}
 
 					mprotect(code, seg->vmsize, native_prot(seg->initprot));
@@ -885,6 +897,20 @@ static void run_init_offsets(struct load_results* lr) {
 						func();
 					}
 					fprintf(stderr, "machismo: static initializers complete\n");
+				}
+				/* S_MOD_INIT_FUNC_POINTERS = 0x09 */
+				if ((sect->flags & 0xff) == 0x09) {
+					uintptr_t* funcs = (uintptr_t*)(sect->addr + lr->slide);
+					int count = sect->size / sizeof(uintptr_t);
+					fprintf(stderr, "machismo: running %d static constructors from __mod_init_func\n", count);
+					typedef void (*init_func_t)(void);
+					extern int machismo_verbose;
+					for (int j = 0; j < count; j++) {
+						if (machismo_verbose)
+							fprintf(stderr, "machismo: mod_init[%d/%d] at 0x%lx\n", j, count, funcs[j]);
+						((init_func_t)funcs[j])();
+					}
+					fprintf(stderr, "machismo: __mod_init_func constructors complete\n");
 				}
 			}
 		}

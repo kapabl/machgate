@@ -5,11 +5,13 @@
 # (_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT) so Mach-O binaries compiled
 # against Apple's libc++ get the correct memory layout.
 #
-# Patches for macOS pthread compatibility (mutex/condvar signature
-# detection) are applied automatically from patches/.
+# Uses bmdhacks/llvm-project fork (darwin-abi-compat branch) which
+# includes Darwin ABI compatibility patches:
+#   - pthread_mutex_t padded to 64 bytes (matching macOS)
+#   - Darwin mutex/condvar signature detection and reinitialization
+#   - fpos<mbstate_t> padded to 136 bytes (macOS mbstate_t = 128 bytes)
 #
 # Compiler auto-detection: uses clang if available (>= 15), falls back to GCC.
-# Always builds against LLVM 15.0.7 (works with both clang and GCC).
 #
 # Usage: ./scripts/build-libcxx.sh
 # Output: build-libcxx/lib/libc++.so.1
@@ -21,7 +23,6 @@ cd "$(dirname "$0")/.."
 
 BUILD_DIR=build-libcxx
 SRC_DIR=extern/llvm-project
-PATCH_DIR=patches
 
 if [ ! -d "$SRC_DIR/libcxx" ]; then
     echo "Error: $SRC_DIR/libcxx not found. Run: git submodule update --init extern/llvm-project"
@@ -46,26 +47,11 @@ else
     echo "Using GCC (clang not found)"
 fi
 
-# Pin to LLVM 15.0.7 — builds with both clang and GCC
-LLVM_REV="8dfdcc7b7bf66834a761bd8de445840ef68e4d1a"
-CURRENT=$(cd "$SRC_DIR" && git rev-parse HEAD)
-if [ "$CURRENT" != "$LLVM_REV" ]; then
-    echo "Fetching LLVM 15.0.7..."
-    (cd "$SRC_DIR" && git fetch --depth 1 origin "$LLVM_REV" && git checkout -f "$LLVM_REV")
-fi
-
-# Apply macOS pthread compatibility patches (idempotent)
-PATCH="$(pwd)/$PATCH_DIR/libcxx-darwin-pthread-compat.patch"
-if [ -f "$PATCH" ]; then
-    if (cd "$SRC_DIR" && git apply --check --reverse "$PATCH" 2>/dev/null); then
-        echo "Patch already applied, skipping."
-    elif (cd "$SRC_DIR" && git apply --check "$PATCH" 2>/dev/null); then
-        echo "Applying macOS pthread compatibility patch..."
-        (cd "$SRC_DIR" && git apply "$PATCH")
-    else
-        echo "Warning: patch does not apply cleanly — may need updating for this LLVM version."
-        echo "Continuing anyway (patches may already be applied manually)."
-    fi
+# Verify we're on the darwin-abi-compat branch (not upstream LLVM)
+BRANCH=$(cd "$SRC_DIR" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
+if [ "$BRANCH" != "darwin-abi-compat" ]; then
+    echo "Switching to darwin-abi-compat branch..."
+    (cd "$SRC_DIR" && git checkout darwin-abi-compat)
 fi
 
 echo "Configuring Apple-ABI libc++ build..."
@@ -77,7 +63,7 @@ cmake -G Ninja -S "$SRC_DIR/runtimes" -B "$BUILD_DIR" \
     -DCMAKE_C_COMPILER="$CC_TO_USE" \
     -DCMAKE_CXX_COMPILER="$CXX_TO_USE" \
     -DLIBCXX_ABI_VERSION=1 \
-    -DLIBCXX_ABI_DEFINES="_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT" \
+    -DLIBCXX_ABI_DEFINES="_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT;_LIBCPP_ABI_DARWIN_MBSTATE_COMPAT" \
     -DLIBCXX_ENABLE_SHARED=ON \
     -DLIBCXX_ENABLE_STATIC=OFF \
     -DLIBCXX_INCLUDE_TESTS=OFF \

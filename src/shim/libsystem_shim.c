@@ -245,30 +245,88 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize)
 /* ===== Apple locale / ctype ===== */
 
 /* _DefaultRuneLocale — Apple's locale data structure.
- * Games typically don't use it directly; it's referenced by the ctype macros.
- * Provide a minimal stub that won't crash if accessed. */
+ * The __runetype[] table is indexed by character value; each entry is a
+ * bitmask of character class flags.
+ *
+ * Apple _CTYPE bit definitions (from <ctype.h>):
+ *   0x0001 _CTYPE_A  alpha        0x0002 _CTYPE_C  control
+ *   0x0004 _CTYPE_D  digit        0x0008 _CTYPE_G  graph (visible)
+ *   0x0010 _CTYPE_L  lowercase    0x0020 _CTYPE_P  punctuation
+ *   0x0040 _CTYPE_S  space        0x0080 _CTYPE_U  uppercase
+ *   0x0100 _CTYPE_X  hex digit    0x0200 _CTYPE_B  blank
+ *   0x0400 _CTYPE_D2 decimal      0x0800 _CTYPE_N  number
+ *
+ * On macOS, _DefaultRuneLocale is the struct itself (not a pointer).
+ * Game code accesses it as:  *(uint32_t*)(_DefaultRuneLocale + ch*4 + 0x3c)
+ * where 0x3c is the byte offset from the struct start to __runetype[]. */
+
 struct _RuneLocale {
-	char __magic[8];
-	char __encoding[32];
-	/* Followed by large lookup tables — we zero-fill */
+	char __pad[0x3c];        /* magic + encoding + other fields */
 	uint32_t __runetype[256];
 	int32_t  __maplower[256];
 	int32_t  __mapupper[256];
 };
 
-static struct _RuneLocale _default_rune_locale;
+struct _RuneLocale _DefaultRuneLocale;
 
-/* Export as the Apple symbol name */
-struct _RuneLocale* _DefaultRuneLocale = &_default_rune_locale;
+/* Apple ctype flag bits */
+#define _CTYPE_A  0x0001
+#define _CTYPE_C  0x0002
+#define _CTYPE_D  0x0004
+#define _CTYPE_G  0x0008
+#define _CTYPE_L  0x0010
+#define _CTYPE_P  0x0020
+#define _CTYPE_S  0x0040
+#define _CTYPE_U  0x0080
+#define _CTYPE_X  0x0100
+#define _CTYPE_B  0x0200
+#define _CTYPE_D2 0x0400
+#define _CTYPE_N  0x0800
+
+__attribute__((constructor))
+static void init_rune_locale(void)
+{
+	memcpy(_DefaultRuneLocale.__pad, "RuneMagi", 8);
+
+	for (int c = 0; c <= 0x1F; c++)
+		_DefaultRuneLocale.__runetype[c] = _CTYPE_C;
+	_DefaultRuneLocale.__runetype[0x7F] = _CTYPE_C;
+
+	_DefaultRuneLocale.__runetype[' ']  = _CTYPE_S | _CTYPE_B;
+	_DefaultRuneLocale.__runetype['\t'] = _CTYPE_S | _CTYPE_B;
+	_DefaultRuneLocale.__runetype['\n'] = _CTYPE_S;
+	_DefaultRuneLocale.__runetype['\r'] = _CTYPE_S;
+	_DefaultRuneLocale.__runetype['\f'] = _CTYPE_S;
+	_DefaultRuneLocale.__runetype['\v'] = _CTYPE_S;
+
+	for (int c = '0'; c <= '9'; c++)
+		_DefaultRuneLocale.__runetype[c] = _CTYPE_D | _CTYPE_D2 | _CTYPE_N | _CTYPE_G | _CTYPE_X;
+
+	for (int c = 'A'; c <= 'Z'; c++)
+		_DefaultRuneLocale.__runetype[c] = _CTYPE_A | _CTYPE_U | _CTYPE_G;
+	for (int c = 'A'; c <= 'F'; c++)
+		_DefaultRuneLocale.__runetype[c] |= _CTYPE_X;
+
+	for (int c = 'a'; c <= 'z'; c++)
+		_DefaultRuneLocale.__runetype[c] = _CTYPE_A | _CTYPE_L | _CTYPE_G;
+	for (int c = 'a'; c <= 'f'; c++)
+		_DefaultRuneLocale.__runetype[c] |= _CTYPE_X;
+
+	const char* punct = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+	for (int i = 0; punct[i]; i++)
+		_DefaultRuneLocale.__runetype[(unsigned char)punct[i]] = _CTYPE_P | _CTYPE_G;
+
+	for (int c = 0; c < 256; c++) {
+		_DefaultRuneLocale.__maplower[c] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+		_DefaultRuneLocale.__mapupper[c] = (c >= 'a' && c <= 'z') ? c - 32 : c;
+	}
+}
 
 /* ___maskrune — Apple's character classification */
 int __maskrune(int c, unsigned long mask)
 {
-	/* Map to standard C iswctype where possible.
-	 * For basic ASCII this is good enough. */
-	(void)mask;
-	if (c < 0 || c > 127) return 0;
-	return isascii(c) ? (int)(mask & 0) : 0; /* conservative: return 0 */
+	if (c < 0 || c > 255) return 0;
+	return (int)(_DefaultRuneLocale.__runetype[c] & mask);
 }
 
 /* ___tolower / ___toupper — Apple exports these as function pointers */
@@ -1432,12 +1490,39 @@ struct dirent *shim_readdir_r(DIR *dirp, void *entry, void **result)
 	return (struct dirent *)(intptr_t)ret;
 }
 
+/* ===== mmap flag translation ===== */
+
+/* macOS and Linux use different values for mmap flags.
+ * macOS MAP_ANON = 0x1000, Linux MAP_ANONYMOUS = 0x0020.
+ * Without translation, LuaJIT's allocator (and any other code using
+ * mmap with MAP_ANON) silently fails on Linux. */
+
+#include <sys/mman.h>
+
+#define DARWIN_MAP_ANON  0x1000
+#define DARWIN_MAP_JIT   0x0800
+
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+	static void *(*real_mmap)(void*, size_t, int, int, int, off_t) = NULL;
+	if (!real_mmap)
+		real_mmap = dlsym(RTLD_NEXT, "mmap");
+
+	/* Translate macOS MAP_ANON (0x1000) → Linux MAP_ANONYMOUS (0x0020) */
+	if (flags & DARWIN_MAP_ANON) {
+		flags &= ~DARWIN_MAP_ANON;
+		flags |= MAP_ANONYMOUS;
+	}
+	/* Strip macOS-only MAP_JIT (0x0800) */
+	flags &= ~DARWIN_MAP_JIT;
+
+	return real_mmap(addr, length, prot, flags, fd, offset);
+}
+
 /* ===== mmap registry ===== */
 
 /* Track mmap'd regions so shim_free can munmap instead of free.
  * Used by game function replacements (e.g., DataStream::preloadFile → mmap). */
-
-#include <sys/mman.h>
 
 #define MMAP_REGISTRY_MAX 16
 
@@ -1470,6 +1555,51 @@ static size_t mmap_registry_remove(void *addr)
 		}
 	}
 	return 0;
+}
+
+/* ===== dlopen interception ===== */
+
+/* Redirect Apple framework dlopen calls to native Linux libraries.
+ * Game code (e.g., GLEW's NSGLGetProcAddress) does:
+ *   dlopen("/System/Library/Frameworks/OpenGL.framework/...", RTLD_LAZY)
+ * We intercept and redirect to the native GL library (gl4es or Mesa). */
+
+static void* (*real_dlopen)(const char*, int) = NULL;
+
+void* dlopen(const char* path, int flags)
+{
+	if (!real_dlopen)
+		real_dlopen = dlsym(RTLD_NEXT, "dlopen");
+
+	if (path && strstr(path, "OpenGL.framework")) {
+		/* Redirect to gl4es (or native Mesa GL) — search LD_LIBRARY_PATH */
+		void* handle = real_dlopen("libGL.so.1", flags);
+		if (handle) {
+			fprintf(stderr, "libsystem_shim: redirected dlopen('%s') → libGL.so.1\n", path);
+			return handle;
+		}
+		/* Fallback to GLES if no desktop GL */
+		handle = real_dlopen("libGLESv2.so.2", flags);
+		if (handle) {
+			fprintf(stderr, "libsystem_shim: redirected dlopen('%s') → libGLESv2.so.2\n", path);
+			return handle;
+		}
+		fprintf(stderr, "libsystem_shim: WARNING: failed to redirect dlopen('%s')\n", path);
+	}
+
+	return real_dlopen(path, flags);
+}
+
+/* ===== Darwin assert ===== */
+
+/* macOS __assert_rtn(func, file, line, expr) → Linux __assert_fail(expr, file, line, func) */
+extern void __assert_fail(const char *, const char *, unsigned int, const char *)
+	__attribute__((noreturn));
+
+__attribute__((noreturn))
+void __assert_rtn(const char *func, const char *file, int line, const char *expr)
+{
+	__assert_fail(expr, file, (unsigned)line, func);
 }
 
 /* ===== Heap allocation wrappers ===== */

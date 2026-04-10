@@ -13,8 +13,9 @@
 	url = https://github.com/SFML/SFML.git
 [submodule "extern/llvm-project"]
 	path = extern/llvm-project
-	url = https://github.com/llvm/llvm-project.git
+	url = https://github.com/bmdhacks/llvm-project.git
 	ignore = dirty
+	branch = darwin-abi-compat
 [submodule "extern/LuaJIT"]
 	path = extern/LuaJIT
 	url = https://github.com/LuaJIT/LuaJIT.git

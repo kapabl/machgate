@@ -20,4 +20,11 @@
  */
 int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file);
 
+/*
+ * Look up a symbol in a loaded Mach-O binary's nlist symbol table.
+ * The name should include the Mach-O leading underscore (e.g. "_main").
+ * Returns the address (with slide applied) or 0 if not found.
+ */
+uintptr_t resolver_lookup_symbol(void* mh, uintptr_t slide, const char* name);
+
 #endif /* _RESOLVER_H_ */
