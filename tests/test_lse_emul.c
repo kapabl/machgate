@@ -1,12 +1,12 @@
 /*
  * Test harness for ARMv8.1 LSE atomic instruction emulation.
  *
- * Generates each LSE instruction variant, patches it with lse_emul_patch,
+ * Generates each LSE instruction variant, patches it with isa_emul_patch,
  * executes the patched island, and verifies results against a reference
  * implementation.
  *
  * Build: gcc -O2 -g -D_GNU_SOURCE -I../src -o test_lse_emul \
- *            test_lse_emul.c ../src/lse_emul.c
+ *            test_lse_emul.c ../src/isa_emul.c
  * Run:   ./test_lse_emul
  */
 
@@ -16,7 +16,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <sys/mman.h>
-#include "lse_emul.h"
+#include "isa_emul.h"
 
 /* ================================================================
  * ARM64 instruction encoding helpers (for test function generation)
@@ -77,7 +77,7 @@ static uint32_t enc_str_uoff(int rt, int rn, int uimm)
 
 
 /* ================================================================
- * LSE instruction encoder (inverse of decode_lse in lse_emul.c)
+ * LSE instruction encoder (inverse of decode_lse in isa_emul.c)
  * ================================================================ */
 
 enum lse_op {
@@ -252,7 +252,7 @@ static int generate_test_fn(uint32_t *code, int rs_reg, int rt_reg, int rn_reg,
 		 * For CAS Rt==Rn test, skip loading rt_val — use whatever is in Rn. */
 	}
 
-	/* The LSE instruction — this gets patched by lse_emul_patch */
+	/* The LSE instruction — this gets patched by isa_emul_patch */
 	lse_offset = n;
 	code[n++] = lse_insn;
 
@@ -324,9 +324,9 @@ static bool run_one_test(int op, int size, int acquire, int release,
 
 	/* Patch the LSE instruction */
 	uint32_t *lse_ptr = &fn_code[lse_off];
-	int patched = lse_emul_patch(lse_ptr, 4, &pool_cur, pool_end);
+	int patched = isa_emul_patch(lse_ptr, 4, &pool_cur, pool_end);
 	if (patched != 1) {
-		fprintf(stderr, "FAIL: %s — lse_emul_patch returned %d (expected 1)\n",
+		fprintf(stderr, "FAIL: %s — isa_emul_patch returned %d (expected 1)\n",
 		        label, patched);
 		tests_failed++;
 		code_offset += fn_size;
@@ -600,7 +600,7 @@ static void test_contention(void)
 	/* Actually, use generate_test_fn's return value */
 	int fn_size2;
 	int lse_off = generate_test_fn(fn_code, STD_RS, STD_RT, STD_RN, insn, &fn_size2);
-	lse_emul_patch(&fn_code[lse_off], 4, &pool_cur, pool_end);
+	isa_emul_patch(&fn_code[lse_off], 4, &pool_cur, pool_end);
 	__builtin___clear_cache((char *)fn_code, (char *)(fn_code + fn_size2));
 	__builtin___clear_cache((char *)pool_cur - POOL_SIZE, (char *)pool_cur);
 	code_offset += fn_size2;
@@ -701,7 +701,7 @@ static void test_nzcv_preservation(void)
 				int fn_size;
 				int lse_off = generate_nzcv_test_fn(fn_code,
 				    STD_RS, STD_RT, STD_RN, insn, &fn_size);
-				lse_emul_patch(&fn_code[lse_off], 4, &pool_cur, pool_end);
+				isa_emul_patch(&fn_code[lse_off], 4, &pool_cur, pool_end);
 				__builtin___clear_cache((char *)fn_code,
 				    (char *)(fn_code + fn_size));
 				__builtin___clear_cache((char *)pool_cur - POOL_SIZE,

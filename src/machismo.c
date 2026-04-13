@@ -38,7 +38,7 @@
 #include "bgfx_shim.h"
 #include "eh_frame.h"
 #include "dylib_loader.h"
-#include "lse_emul.h"
+#include "isa_emul.h"
 #include <sys/resource.h>
 #include <pthread.h>
 
@@ -244,7 +244,7 @@ int main(int argc, char** argv, char** envp)
 
 						/* LSE: replace with B to island */
 						if (lse_pool_cur) {
-							int n = lse_emul_patch(scode, sect->size,
+							int n = isa_emul_patch(scode, sect->size,
 							                       &lse_pool_cur, lse_pool_end);
 							lse_total += n;
 						}
@@ -354,7 +354,7 @@ int main(int argc, char** argv, char** envp)
 							}
 						}
 						if (dylib_lse_cur) {
-							int ln = lse_emul_patch(code, dseg->vmsize,
+							int ln = isa_emul_patch(code, dseg->vmsize,
 							                        &dylib_lse_cur, dylib_lse_end);
 							dln += ln;
 							lse_total += ln;

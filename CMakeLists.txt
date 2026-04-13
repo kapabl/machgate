@@ -20,7 +20,7 @@ set(MACHISMO_SOURCES
     src/bgfx_shim.c
     src/eh_frame.c
     src/dylib_loader.c
-    src/lse_emul.c
+    src/isa_emul.c
     src/lua_entity_opt.c
     src/elfcalls/elfcalls.c
     src/elfcalls/threads.c
@@ -78,7 +78,7 @@ endif()
 # --- test_lse_emul ---
 
 if(BUILD_TESTS)
-    add_executable(test_lse_emul tests/test_lse_emul.c src/lse_emul.c)
+    add_executable(test_lse_emul tests/test_lse_emul.c src/isa_emul.c)
     target_include_directories(test_lse_emul PRIVATE src)
     target_compile_options(test_lse_emul PRIVATE -Wall -O2 -g)
     target_compile_definitions(test_lse_emul PRIVATE _GNU_SOURCE)

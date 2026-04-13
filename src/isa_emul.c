@@ -1,17 +1,16 @@
 /*
- * ARMv8.1 LSE atomic instruction emulation via branch islands.
+ * ISA extension emulation via branch islands.
  *
- * Replaces each LSE instruction with B to an island containing
- * an equivalent LDXR/STXR (load-linked/store-conditional) loop.
+ * Emulates instructions from ARMv8.1+ and ARMv8.2+ ISA extensions
+ * that Apple Silicon uses but ARMv8.0 cores (Cortex-A35/A53/A55) lack.
  *
  * Supported instruction families:
- *   LDADD, LDCLR, LDEOR, LDSET (and ST variants when Rt=XZR)
- *   LDSMAX, LDSMIN, LDUMAX, LDUMIN
- *   SWP
- *   CAS
+ *   LSE atomics (ARMv8.1): LDADD, LDCLR, LDEOR, LDSET, SWP, CAS,
+ *     LDSMAX, LDSMIN, LDUMAX, LDUMIN (and ST variants when Rt=XZR)
+ *   SHA3 (ARMv8.2): BCAX
  */
 
-#include "lse_emul.h"
+#include "isa_emul.h"
 #include <stdio.h>
 
 /* ARM64 instruction encoding helpers */
@@ -361,7 +360,94 @@ static int emit_island(struct lse_decoded *d, uint32_t *island,
 	return n;
 }
 
-int lse_emul_patch(uint32_t *code, size_t code_size,
+/* --- ARMv8.2 SHA3: BCAX emulation ---
+ *
+ * BCAX Vd.16B, Vn.16B, Vm.16B, Va.16B
+ *   Vd = Vn XOR (NOT(Va) AND Vm)  =  Vn XOR BIC(Vm, Va)
+ *
+ * Encoding: 0xCE200000 | Vm[20:16] | Va[14:10] | Vn[9:5] | Vd[4:0]
+ * Mask:     0xFFE08000 == 0xCE200000
+ *
+ * Emulated with two NEON instructions in an island:
+ *   BIC Vtmp.16B, Vm.16B, Va.16B    ; Vtmp = Vm AND NOT(Va)
+ *   EOR Vd.16B, Vn.16B, Vtmp.16B    ; Vd = Vn XOR Vtmp
+ *
+ * When Va == Vd (common pattern), Vd itself is the temp:
+ *   BIC Vd.16B, Vm.16B, Vd.16B      ; Vd = Vm AND NOT(old Vd)
+ *   EOR Vd.16B, Vn.16B, Vd.16B      ; Vd = Vn XOR Vd
+ *   (No scratch register needed — ARM reads sources before writing.)
+ *
+ * Otherwise we need a scratch NEON register saved/restored on stack.
+ */
+
+/* NEON BIC Vd.16B, Vn.16B, Vm.16B: 0x4E601C00 | Rm<<16 | Rn<<5 | Rd */
+static inline uint32_t enc_neon_bic(int vd, int vn, int vm)
+{
+	return 0x4E601C00 | (vm << 16) | (vn << 5) | vd;
+}
+
+/* NEON EOR Vd.16B, Vn.16B, Vm.16B: 0x6E201C00 | Rm<<16 | Rn<<5 | Rd */
+static inline uint32_t enc_neon_eor(int vd, int vn, int vm)
+{
+	return 0x6E201C00 | (vm << 16) | (vn << 5) | vd;
+}
+
+/* STR Qt, [SP, #-16]! (pre-index, 128-bit NEON save) */
+static inline uint32_t enc_str_q_pre(int vt)
+{
+	return 0x3C9F0FE0 | vt;
+}
+
+/* LDR Qt, [SP], #16 (post-index, 128-bit NEON restore) */
+static inline uint32_t enc_ldr_q_post(int vt)
+{
+	return 0x3CC107E0 | vt;
+}
+
+/* Detect BCAX: top bits 1100_1110_001 , bit 15 = 0 */
+static int decode_bcax(uint32_t instr, int *vd, int *vn, int *vm, int *va)
+{
+	if ((instr & 0xFFE08000) != 0xCE200000)
+		return 0;
+	*vd = instr & 0x1F;
+	*vn = (instr >> 5) & 0x1F;
+	*va = (instr >> 10) & 0x1F;
+	*vm = (instr >> 16) & 0x1F;
+	return 1;
+}
+
+/* Emit BCAX island. Returns number of words written. */
+static int emit_bcax_island(int vd, int vn, int vm, int va,
+                            uint32_t *island, uint32_t *orig_addr)
+{
+	int n = 0;
+
+	if (va == vd) {
+		/* Va == Vd: use Vd as implicit temp, no save/restore needed.
+		 * BIC Vd, Vm, Vd  (reads old Vd as Va before writing)
+		 * EOR Vd, Vn, Vd */
+		island[n++] = enc_neon_bic(vd, vm, vd);
+		island[n++] = enc_neon_eor(vd, vn, vd);
+	} else {
+		/* General case: pick a scratch NEON register.
+		 * Avoid Vd, Vn, Vm, Va. */
+		uint32_t used = (1U << vd) | (1U << vn) | (1U << vm) | (1U << va);
+		int vtmp = 31;
+		for (int r = 31; r >= 0; r--) {
+			if (!(used & (1U << r))) { vtmp = r; break; }
+		}
+		island[n++] = enc_str_q_pre(vtmp);
+		island[n++] = enc_neon_bic(vtmp, vm, va);
+		island[n++] = enc_neon_eor(vd, vn, vtmp);
+		island[n++] = enc_ldr_q_post(vtmp);
+	}
+
+	int32_t off = (int32_t)(orig_addr + 1 - &island[n]);
+	island[n++] = enc_b(off);
+	return n;
+}
+
+int isa_emul_patch(uint32_t *code, size_t code_size,
                    uint32_t **pool_ptr, uint32_t *pool_end)
 {
 	size_t count = code_size / 4;
@@ -369,32 +455,46 @@ int lse_emul_patch(uint32_t *code, size_t code_size,
 	int patched = 0;
 
 	for (size_t i = 0; i < count; i++) {
+		/* Try LSE atomics first */
 		struct lse_decoded d;
-		if (!decode_lse(code[i], &d))
+		if (decode_lse(code[i], &d)) {
+			if (island + 24 > pool_end) {
+				fprintf(stderr, "isa_emul: island pool exhausted after %d patches\n", patched);
+				break;
+			}
+			int64_t offset = (int64_t)(island - &code[i]);
+			if (offset > 0x01FFFFFF || offset < -0x02000000) {
+				fprintf(stderr, "isa_emul: island out of B range at %p\n", (void*)&code[i]);
+				continue;
+			}
+			int words = emit_island(&d, island, &code[i]);
+			if (words <= 0)
+				continue;
+			code[i] = enc_b((int32_t)(island - &code[i]));
+			island += words;
+			patched++;
 			continue;
-
-		/* Check pool space (max island ~96 bytes = 24 words) */
-		if (island + 24 > pool_end) {
-			fprintf(stderr, "lse_emul: island pool exhausted after %d patches\n", patched);
-			break;
 		}
 
-		/* Check branch range: B has ±128MB range */
-		int64_t offset = (int64_t)(island - &code[i]);
-		if (offset > 0x01FFFFFF || offset < -0x02000000) {
-			fprintf(stderr, "lse_emul: island out of B range at %p\n", (void*)&code[i]);
+		/* Try BCAX (SHA3) */
+		int vd, vn, vm, va;
+		if (decode_bcax(code[i], &vd, &vn, &vm, &va)) {
+			/* Island is at most 5 words (general case) */
+			if (island + 5 > pool_end) {
+				fprintf(stderr, "isa_emul: island pool exhausted after %d patches\n", patched);
+				break;
+			}
+			int64_t offset = (int64_t)(island - &code[i]);
+			if (offset > 0x01FFFFFF || offset < -0x02000000) {
+				fprintf(stderr, "isa_emul: island out of B range at %p\n", (void*)&code[i]);
+				continue;
+			}
+			int words = emit_bcax_island(vd, vn, vm, va, island, &code[i]);
+			code[i] = enc_b((int32_t)(island - &code[i]));
+			island += words;
+			patched++;
 			continue;
 		}
-
-		int words = emit_island(&d, island, &code[i]);
-		if (words <= 0)
-			continue;
-
-		/* Replace original instruction with B to island */
-		code[i] = enc_b((int32_t)(island - &code[i]));
-
-		island += words;
-		patched++;
 	}
 
 	*pool_ptr = island;
