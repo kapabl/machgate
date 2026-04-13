@@ -23,6 +23,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <unistd.h>
 
 /* macOS malloc returns zero-initialized pages for most allocations.
  * Game code depends on operator new returning zeroed memory.
@@ -433,19 +434,21 @@ static int (*g_real_SDL_GL_SetAttribute)(int, int) = NULL;
 static uintptr_t alloc_return0_stub(void);
 static void resolver_complete_deferred(void);
 
-/* SDL_video.h constants for GL attribute overrides */
-#define MACHISMO_SDL_GL_CONTEXT_MAJOR_VERSION 17
-#define MACHISMO_SDL_GL_CONTEXT_MINOR_VERSION 18
-#define MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK  21
+/* SDL_video.h constants for GL attribute overrides.
+ * SDL3 removed SDL_GL_CONTEXT_EGL (was enum 19), shifting PROFILE_MASK
+ * from 21 (SDL2) to 20 (SDL3).  Handle both so gl4es works with either. */
+#define MACHISMO_SDL_GL_CONTEXT_MAJOR_VERSION      17
+#define MACHISMO_SDL_GL_CONTEXT_MINOR_VERSION      18
+#define MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK_SDL2   21
+#define MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK_SDL3   20
 #define MACHISMO_SDL_GL_CONTEXT_PROFILE_ES    0x0004
 
-/* Force GLES 2.0 profile when using gl4es on GLES-only hardware.
- * Without this, the game requests desktop GL 3.2 Core and SDL's KMSDRM
- * backend fails because EGL can't create a desktop GL context. */
+/* Force GLES 2.0 profile when using gl4es on GLES-only hardware. */
 static int wrapped_SDL_GL_SetAttribute(int attr, int value)
 {
 	switch (attr) {
-	case MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK:
+	case MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK_SDL2:
+	case MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK_SDL3:
 		value = MACHISMO_SDL_GL_CONTEXT_PROFILE_ES;
 		break;
 	case MACHISMO_SDL_GL_CONTEXT_MAJOR_VERSION:
@@ -495,7 +498,6 @@ static void* wrapped_SDL_GL_CreateContext(void* window)
  * most callers save the pointer before calling the constructor anyway.
  */
 
-#include <unistd.h>
 
 /* Pool of executable trampoline memory */
 static uint8_t* ctor_tramp_pool = NULL;

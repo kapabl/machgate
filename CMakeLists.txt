@@ -112,6 +112,7 @@ set_target_properties(necrodancer_patches PROPERTIES
 add_library(sugar_patches SHARED
     examples/sugar/src/game_patches.c
     examples/sugar/src/ogg_cache.c
+    examples/sugar/src/sugar_flip.c
 )
 target_include_directories(sugar_patches PRIVATE
     src                      # for stubs/apple_abi.h

@@ -8,6 +8,10 @@
 # The unstripped binary lets perf show named LuaJIT internal functions
 # (lj_vmeta_tgetv, lj_gc_step, etc.) instead of hex addresses.
 #
+# -DLUAJIT_USE_PERFTOOLS makes LuaJIT write /tmp/perf-<PID>.map on every
+# trace compile so perf report resolves JIT'd trace addresses to names
+# like TRACE_42::file.lua:123.
+#
 # Submodule: extern/LuaJIT (v2.1 branch)
 #
 # Usage: ./scripts/build-luajit.sh
@@ -46,7 +50,7 @@ make -C "$SRC_DIR" clean 2>/dev/null || true
 echo "=== Building LuaJIT ==="
 make -C "$SRC_DIR" -j$(nproc) \
     CC="$CC" \
-    CCOPT="-O2 -fomit-frame-pointer $CPU_FLAGS" \
+    CCOPT="-O2 -fomit-frame-pointer $CPU_FLAGS -DLUAJIT_USE_PERFTOOLS" \
     CCOPT_arm64="$CPU_FLAGS" \
     CCDEBUG="-g" \
     BUILDMODE=dynamic \
