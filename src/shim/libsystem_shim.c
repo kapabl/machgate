@@ -1524,7 +1524,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 /* Track mmap'd regions so shim_free can munmap instead of free.
  * Used by game function replacements (e.g., DataStream::preloadFile → mmap). */
 
-#define MMAP_REGISTRY_MAX 16
+#define MMAP_REGISTRY_MAX 512
 
 static struct {
 	void *addr;

@@ -107,6 +107,23 @@ set_target_properties(necrodancer_patches PROPERTIES
     PREFIX "lib"
 )
 
+# --- libsugar_patches.so (Sugar engine function replacements) ---
+
+add_library(sugar_patches SHARED
+    examples/sugar/src/game_patches.c
+    examples/sugar/src/ogg_cache.c
+)
+target_include_directories(sugar_patches PRIVATE
+    src                      # for stubs/apple_abi.h
+    examples/sugar/src       # for ogg_cache.h
+)
+target_compile_options(sugar_patches PRIVATE -Wall -O2 -g)
+target_link_libraries(sugar_patches PRIVATE dl pthread)
+set_target_properties(sugar_patches PROPERTIES
+    OUTPUT_NAME "sugar_patches"
+    PREFIX "lib"
+)
+
 # --- install ---
 
 install(TARGETS machismo RUNTIME DESTINATION bin)
