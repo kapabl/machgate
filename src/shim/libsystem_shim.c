@@ -242,6 +242,35 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize)
 	return 0;
 }
 
+/* ===== NSSearchPathEnumeration =====
+ *
+ * Apple's API for enumerating well-known user directories. Sugar's
+ * sugar::file::desktop_path uses it to locate ~/Library/Application Support.
+ * We redirect to the rewritten HOME so saves land under MACHISMO_HOME.
+ *
+ * Real semantics:
+ *   state = NSStartSearchPathEnumeration(key, domainMask);
+ *   while ((state = NSGetNextSearchPathEnumeration(state, path))) { ... }
+ * Callers check the return value — a zero return means "don't use buffer".
+ */
+unsigned int NSStartSearchPathEnumeration(unsigned int key, unsigned int domain_mask)
+{
+	(void)key; (void)domain_mask;
+	return 1;
+}
+
+unsigned int NSGetNextSearchPathEnumeration(unsigned int state, char *path)
+{
+	if (!state || !path) return 0;
+	/* One entry, then done. State isn't tracked across calls — the only
+	 * in-game caller (sugar::file::desktop_path) invokes this once.
+	 * Buffer is a macOS PATH_MAX (1024) stack allocation. Truncate the
+	 * fake_home prefix so "/Library/Application Support" always fits. */
+	const char *home = get_fake_home();
+	snprintf(path, 1024, "%.980s/Library/Application Support", home);
+	return 0x80000000u; /* nonzero so caller uses the buffer */
+}
+
 /* ===== Apple locale / ctype ===== */
 
 /* _DefaultRuneLocale — Apple's locale data structure.
