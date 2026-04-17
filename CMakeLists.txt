@@ -108,10 +108,11 @@ set_target_properties(necrodancer_patches PROPERTIES
 )
 
 # --- libsugar_patches_sdl2.so (SDL2 Sugar builds, e.g. Wratch's Den) ---
-# _mp3_fromfile PCM cache.
+# _mp3_fromdata PCM cache + _shader_flip → _flip bypass for gl4es.
 
 add_library(sugar_patches_sdl2 SHARED
     examples/sugar/src/sugar_audio_sdl2.c
+    examples/sugar/src/sugar_shader_bypass_sdl2.c
     examples/sugar/src/audio_cache.c
     examples/sugar/src/ogg_cache.c
 )
