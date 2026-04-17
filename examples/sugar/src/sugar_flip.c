@@ -56,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 typedef struct SDL_Texture  SDL_Texture;
 typedef struct SDL_Renderer SDL_Renderer;
@@ -255,59 +256,9 @@ static void flip_body(void *window)
 	p_SDL_RenderPresent(renderer);
 }
 
-/* FPS + time-breakdown logger wrapper.
- *
- * Per 60-flip window we report:
- *   fps      — flips per second (wall clock)
- *   inflip   — avg ms spent inside _flip (our render work + SDL + Mali)
- *   between  — avg ms spent outside _flip (Sugar update + Lua)
- *
- * The split tells us where to look next: if inflip dominates, GPU / our
- * override is the bottleneck; if between dominates, game logic is. */
 MACHO_FUNC(_ZN5sugar3gfx5_flipEPNS0_8window_tE, void, void *window)
 {
-	static int frames = 0;
-	static struct timespec t0 = {0, 0};
-	static struct timespec last_exit = {0, 0};
-	static uint64_t inflip_ns  = 0;
-	static uint64_t between_ns = 0;
-
-	struct timespec entry;
-	clock_gettime(CLOCK_MONOTONIC, &entry);
-	if (last_exit.tv_sec != 0) {
-		between_ns +=
-			(uint64_t)(entry.tv_sec  - last_exit.tv_sec)  * 1000000000ull +
-			(uint64_t)(entry.tv_nsec - last_exit.tv_nsec);
-	}
-
 	flip_body(window);
-
-	struct timespec exit_;
-	clock_gettime(CLOCK_MONOTONIC, &exit_);
-	inflip_ns +=
-		(uint64_t)(exit_.tv_sec  - entry.tv_sec)  * 1000000000ull +
-		(uint64_t)(exit_.tv_nsec - entry.tv_nsec);
-	last_exit = exit_;
-
-	if (++frames >= 60) {
-		if (t0.tv_sec != 0) {
-			double elapsed =
-				(double)(exit_.tv_sec  - t0.tv_sec) +
-				(double)(exit_.tv_nsec - t0.tv_nsec) * 1e-9;
-			if (elapsed > 0.0) {
-				fprintf(stderr,
-					"sugar_patches: fps=%.1f  inflip=%.2fms  between=%.2fms  (%d flips in %.2fs)\n",
-					(double)frames / elapsed,
-					(double)inflip_ns  / frames / 1e6,
-					(double)between_ns / frames / 1e6,
-					frames, elapsed);
-			}
-		}
-		t0 = exit_;
-		frames = 0;
-		inflip_ns = 0;
-		between_ns = 0;
-	}
 }
 
 /*----------------------------------------------------------------------
