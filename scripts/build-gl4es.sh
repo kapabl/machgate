@@ -26,6 +26,10 @@ mkdir -p "$BUILD_DIR"
 if [ ! -d "$GL4ES_SRC" ]; then
     echo "Cloning gl4es..."
     git clone --depth 1 https://github.com/ptitSeb/gl4es.git "$GL4ES_SRC"
+    # Teach pixel_convert's color map about GL_RED_INTEGER / GL_RG_INTEGER so
+    # Sugar-engine palette-indexed framebuffer uploads (usampler2D textures)
+    # don't bail in swizzle_texture with "pixel conversion, anticipated abort".
+    (cd "$GL4ES_SRC" && patch -p1 < "$MACHISMO_DIR/patches/gl4es-red-integer.patch")
 fi
 
 # Build

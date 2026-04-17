@@ -1,0 +1,49 @@
+diff --git a/src/gl/enum_info.h b/src/gl/enum_info.h
+index 934ccc4..0751b0a 100644
+--- a/src/gl/enum_info.h
++++ b/src/gl/enum_info.h
+@@ -100,6 +100,7 @@ static const GLsizei pixel_sizeof(GLenum format, GLenum type) {
+     switch (format) {
+         case GL_R:
+         case GL_RED:
++        case 0x8D94: /* GL_RED_INTEGER */
+ 		case GL_ALPHA:
+ 		case GL_LUMINANCE:
+         case GL_DEPTH_COMPONENT:
+@@ -108,17 +109,21 @@ static const GLsizei pixel_sizeof(GLenum format, GLenum type) {
+             width = 1;
+             break;
+         case GL_RG:
++        case 0x8228: /* GL_RG_INTEGER */
+ 		case GL_LUMINANCE_ALPHA:
+             width = 2;
+             break;
+         case GL_RGB:
+         case GL_BGR:
+         case GL_RGB8:
++        case 0x8D98: /* GL_RGB_INTEGER */
+             width = 3;
+             break;
+         case GL_RGBA:
+         case GL_BGRA:
+         case GL_RGBA8:
++        case 0x8D99: /* GL_RGBA_INTEGER */
++        case 0x8D9A: /* GL_BGRA_INTEGER */
+             width = 4;
+             break;
+         default:
+diff --git a/src/gl/pixel.c b/src/gl/pixel.c
+index 34f00db..ad86e6e 100644
+--- a/src/gl/pixel.c
++++ b/src/gl/pixel.c
+@@ -41,8 +41,10 @@ static const colorlayout_t *get_color_map(GLenum format) {
+         return &layout; }
+     switch (format) {
+         map(GL_RED, 0, -1, -1, -1, 0);
++        map(0x8D94 /* GL_RED_INTEGER */, 0, -1, -1, -1, 0);
+         map(GL_R,   0, -1, -1, -1, 0);
+         map(GL_RG,  0,  1, -1, -1, 0);
++        map(0x8228 /* GL_RG_INTEGER */,  0,  1, -1, -1, 0);
+         map(GL_RGBA,0,  1, 2, 3, 3);
+         map(GL_RGB, 0,  1, 2, -1, 2);
+         map(GL_BGRA,2,  1, 0, 3, 3);
