@@ -27,4 +27,14 @@ int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file);
  */
 uintptr_t resolver_lookup_symbol(void* mh, uintptr_t slide, const char* name);
 
+/*
+ * Find the slid memory extent of a named symbol.
+ * On success sets *out_start to the symbol's slid address and *out_end to
+ * the slid address of the next N_SECT symbol in the text (or the end of
+ * that symbol's containing section if it's the last one).
+ * Returns 0 on success, -1 if the symbol wasn't found.
+ */
+int resolver_symbol_extent(void* mh, uintptr_t slide, const char* name,
+                           uintptr_t* out_start, uintptr_t* out_end);
+
 #endif /* _RESOLVER_H_ */

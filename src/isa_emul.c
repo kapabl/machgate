@@ -11,15 +11,10 @@
  */
 
 #include "isa_emul.h"
+#include "arm64_enc.h"
 #include <stdio.h>
 
 /* ARM64 instruction encoding helpers */
-
-/* B (unconditional branch): offset in words, ±128MB */
-static inline uint32_t enc_b(int32_t word_offset)
-{
-	return 0x14000000 | (word_offset & 0x03FFFFFF);
-}
 
 /* CBNZ Wt, offset (offset in words from this instruction) */
 static inline uint32_t enc_cbnz_w(int rt, int32_t word_offset)

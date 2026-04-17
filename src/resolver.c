@@ -820,6 +820,138 @@ uintptr_t resolver_lookup_symbol(void* mh_ptr, uintptr_t slide, const char* name
 	return lookup_macho_symbol(&rs, name);
 }
 
+/* ---- Symbol extent (sorted N_SECT cache) ---- */
+
+struct sym_entry { uint64_t vmaddr; uint32_t n_strx; uint8_t n_sect; };
+
+struct extent_cache {
+	struct mach_header_64* mh;
+	struct sym_entry* syms;    /* sorted by vmaddr */
+	size_t nsyms;
+	char* strtab;
+	size_t strsize;
+	uint64_t* section_ends;    /* vmaddr + size per n_sect index (1-based) */
+	size_t nsects;
+};
+
+static struct extent_cache g_extent_cache;
+
+static int sym_cmp(const void* a, const void* b)
+{
+	uint64_t va = ((const struct sym_entry*)a)->vmaddr;
+	uint64_t vb = ((const struct sym_entry*)b)->vmaddr;
+	if (va < vb) return -1;
+	if (va > vb) return 1;
+	return 0;
+}
+
+static int build_extent_cache(struct mach_header_64* mh, uintptr_t slide)
+{
+	if (g_extent_cache.mh == mh && g_extent_cache.syms)
+		return 0;
+
+	free(g_extent_cache.syms);
+	free(g_extent_cache.section_ends);
+	memset(&g_extent_cache, 0, sizeof(g_extent_cache));
+
+	uint8_t* cmds = (uint8_t*)(mh + 1);
+	struct symtab_command* symtab = NULL;
+
+	/* First pass: count sections and find symtab */
+	uint32_t p = 0;
+	size_t total_sects = 0;
+	for (uint32_t i = 0; i < mh->ncmds && p < mh->sizeofcmds; i++) {
+		struct load_command* lc = (struct load_command*)&cmds[p];
+		if (lc->cmd == LC_SYMTAB)
+			symtab = (struct symtab_command*)lc;
+		else if (lc->cmd == LC_SEGMENT_64)
+			total_sects += ((struct segment_command_64*)lc)->nsects;
+		p += lc->cmdsize;
+	}
+	if (!symtab) return -1;
+
+	/* Allocate section_ends (1-based: index 1..total_sects) */
+	g_extent_cache.nsects = total_sects + 1;
+	g_extent_cache.section_ends = calloc(g_extent_cache.nsects, sizeof(uint64_t));
+	if (!g_extent_cache.section_ends) return -1;
+
+	/* Second pass: locate symtab/strtab via __LINKEDIT, fill section_ends */
+	struct nlist_64* syms_mem = NULL;
+	char* strtab = NULL;
+	p = 0;
+	uint32_t sect_idx = 1;
+	for (uint32_t i = 0; i < mh->ncmds && p < mh->sizeofcmds; i++) {
+		struct load_command* lc = (struct load_command*)&cmds[p];
+		if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			if (symtab->symoff >= seg->fileoff &&
+			    symtab->symoff < seg->fileoff + seg->filesize) {
+				uintptr_t base = seg->vmaddr + slide;
+				syms_mem = (struct nlist_64*)(base + (symtab->symoff - seg->fileoff));
+				strtab = (char*)(base + (symtab->stroff - seg->fileoff));
+			}
+			struct section_64* sects = (struct section_64*)(seg + 1);
+			for (uint32_t j = 0; j < seg->nsects && sect_idx < g_extent_cache.nsects; j++)
+				g_extent_cache.section_ends[sect_idx++] = sects[j].addr + sects[j].size;
+		}
+		p += lc->cmdsize;
+	}
+	if (!syms_mem || !strtab) return -1;
+
+	g_extent_cache.strtab = strtab;
+	g_extent_cache.strsize = symtab->strsize;
+
+	/* Collect all N_SECT entries into a sortable array */
+	struct sym_entry* arr = malloc(symtab->nsyms * sizeof(*arr));
+	if (!arr) return -1;
+	size_t n = 0;
+	for (uint32_t i = 0; i < symtab->nsyms; i++) {
+		struct nlist_64* nl = &syms_mem[i];
+		if (nl->n_type & N_STAB) continue;
+		if ((nl->n_type & N_TYPE) != N_SECT) continue;
+		if (nl->n_strx >= symtab->strsize) continue;
+		arr[n].vmaddr = nl->n_value;
+		arr[n].n_strx = nl->n_strx;
+		arr[n].n_sect = nl->n_sect;
+		n++;
+	}
+	qsort(arr, n, sizeof(*arr), sym_cmp);
+	g_extent_cache.syms = arr;
+	g_extent_cache.nsyms = n;
+	g_extent_cache.mh = mh;
+	return 0;
+}
+
+int resolver_symbol_extent(void* mh_ptr, uintptr_t slide, const char* name,
+                           uintptr_t* out_start, uintptr_t* out_end)
+{
+	struct mach_header_64* mh = (struct mach_header_64*)mh_ptr;
+	if (build_extent_cache(mh, slide) != 0)
+		return -1;
+
+	for (size_t i = 0; i < g_extent_cache.nsyms; i++) {
+		const char* s = g_extent_cache.strtab + g_extent_cache.syms[i].n_strx;
+		if (strcmp(s, name) != 0) continue;
+
+		uint64_t start = g_extent_cache.syms[i].vmaddr;
+		uint8_t sect = g_extent_cache.syms[i].n_sect;
+		uint64_t end = 0;
+		/* Next symbol in the same section gives the tightest bound. */
+		for (size_t j = i + 1; j < g_extent_cache.nsyms; j++) {
+			if (g_extent_cache.syms[j].n_sect != sect) continue;
+			end = g_extent_cache.syms[j].vmaddr;
+			break;
+		}
+		if (!end && sect < g_extent_cache.nsects)
+			end = g_extent_cache.section_ends[sect];
+		if (end <= start) return -1;
+		*out_start = (uintptr_t)start + slide;
+		*out_end = (uintptr_t)end + slide;
+		return 0;
+	}
+	return -1;
+}
+
 /* ---- ULEB128 / SLEB128 decoders ----
  * Based on libiberty (FSF) — used by dyld for LC_DYLD_INFO opcode streams. */
 

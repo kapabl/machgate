@@ -542,9 +542,16 @@ int main(int argc, char** argv, char** envp)
 		                       g_macho_dylibs[i].slide);
 	}
 
-	/* Apply game-specific binary patches */
+	/* Apply game-specific binary patches. Any failure (missing symbol,
+	 * unique pattern drift, expect mismatch) is fatal — better to crash
+	 * at startup than to run the game with random memory corruption. */
 	if (cfg.patches) {
-		patcher_apply(cfg.patches, machismo_load_results.slide);
+		if (patcher_apply(cfg.patches,
+		                  (void*)machismo_load_results.mh,
+		                  machismo_load_results.slide) < 0) {
+			fprintf(stderr, "machismo: patcher failed — aborting\n");
+			abort();
+		}
 	}
 
 	/* Set up the Mach-O stack layout */
