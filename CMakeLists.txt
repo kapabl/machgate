@@ -91,65 +91,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_necrolevel_rng PRIVATE dl m)
 endif()
 
-# --- libgame_patches.so (NecroDancer-specific function replacements) ---
-
-add_library(necrodancer_patches SHARED
-    examples/necrodancer/src/game_patches.c
-)
-target_include_directories(necrodancer_patches PRIVATE
-    src                          # for stubs/apple_abi.h
-    examples/necrodancer/src     # for stubs/datastream.h
-)
-target_compile_options(necrodancer_patches PRIVATE -Wall -O2 -g)
-target_link_libraries(necrodancer_patches PRIVATE dl)
-set_target_properties(necrodancer_patches PROPERTIES
-    OUTPUT_NAME "game_patches"
-    PREFIX "lib"
-)
-
-# --- libsugar_patches_sdl2.so (SDL2 Sugar builds, e.g. Wratch's Den) ---
-# _mp3_fromdata PCM cache + _shader_flip → _flip bypass for gl4es.
-
-add_library(sugar_patches_sdl2 SHARED
-    examples/sugar/src/sugar_audio_sdl2.c
-    examples/sugar/src/sugar_shader_bypass_sdl2.c
-    examples/sugar/src/audio_cache.c
-    examples/sugar/src/ogg_cache.c
-)
-target_include_directories(sugar_patches_sdl2 PRIVATE
-    src                      # for stubs/apple_abi.h
-    examples/sugar/src       # for audio_cache.h, ogg_cache.h
-)
-target_compile_options(sugar_patches_sdl2 PRIVATE -Wall -O2 -g)
-target_link_libraries(sugar_patches_sdl2 PRIVATE dl pthread)
-set_target_properties(sugar_patches_sdl2 PROPERTIES
-    OUTPUT_NAME "sugar_patches_sdl2"
-    PREFIX "lib"
-)
-
-# --- libsugar_patches_sdl3.so (SDL3 Sugar builds, e.g. Shotgun King) ---
-# _load_ogg PCM cache + NEON palette→RGBA _flip (needs SDL_RenderTexture).
-
-add_library(sugar_patches_sdl3 SHARED
-    examples/sugar/src/sugar_audio_sdl3.c
-    examples/sugar/src/sugar_flip.c
-    examples/sugar/src/audio_cache.c
-    examples/sugar/src/ogg_cache.c
-)
-target_include_directories(sugar_patches_sdl3 PRIVATE
-    src
-    examples/sugar/src
-)
-target_compile_options(sugar_patches_sdl3 PRIVATE -Wall -O2 -g)
-target_link_libraries(sugar_patches_sdl3 PRIVATE dl pthread)
-set_target_properties(sugar_patches_sdl3 PROPERTIES
-    OUTPUT_NAME "sugar_patches_sdl3"
-    PREFIX "lib"
-)
-
-# --- pcm_cache_write (Sugar PCM cache writer for install-time warmup) ---
-add_executable(pcm_cache_write examples/sugar/tools/pcm_cache_write.c)
-target_compile_options(pcm_cache_write PRIVATE -Wall -O2)
+# --- per-game shim libraries (libgame_patches, libsugar_patches_*, pcm_cache_write) ---
+# Moved OUT of machismo into the machismo-ports umbrella repo. machismo proper
+# builds only the loader + generic shims; the game-specific override libraries
+# are built by the umbrella CMake against machismo's headers.
+# See ../ports/ and ../CMakeLists.txt in the machismo-ports workspace.
 
 # --- install ---
 
