@@ -18,6 +18,7 @@ set(MACHISMO_SOURCES
     src/patcher.c
     src/config.c
     src/bgfx_shim.c
+    src/sdl_window_shim.c
     src/eh_frame.c
     src/dylib_loader.c
     src/isa_emul.c

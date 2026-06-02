@@ -36,12 +36,19 @@ int trampoline_patch_lib(void* mh, uintptr_t slide,
 /*
  * Patch Mach-O functions by exact symbol match against an override .so.
  *
- * For each N_SECT|N_EXT symbol in __TEXT, strips one leading underscore
+ * For each defined N_SECT symbol in __TEXT, strips one leading underscore
  * and calls dlsym(override_handle, name). If found, writes a trampoline.
+ *
+ * By default only N_EXT (exported) symbols are considered. Set match_local
+ * to also detour LOCAL defined symbols — required for hooking internal,
+ * hidden-visibility engine methods (e.g. the Gothic RHI) that are present in
+ * an unstripped binary's symtab but not exported. Matching is still by exact
+ * mangled name, so only symbols the override .so actually exports are touched.
  *
  * Returns number of functions patched, or -1 on error.
  */
-int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle);
+int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle,
+                               int match_local);
 
 /*
  * Legacy API — reads MACHISMO_TRAMPOLINE_LIB and MACHISMO_TRAMPOLINE_PREFIX env vars.

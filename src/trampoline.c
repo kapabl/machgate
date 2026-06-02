@@ -501,7 +501,8 @@ int trampoline_patch_lib(void* mh, uintptr_t slide,
 	return patched;
 }
 
-int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle)
+int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle,
+                               int match_local)
 {
 	struct mach_header_64* header = (struct mach_header_64*)mh;
 	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
@@ -540,7 +541,7 @@ int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle)
 		struct nlist_64* sym = &nlist_arr[i];
 
 		if ((sym->n_type & N_TYPE) != N_SECT) continue;
-		if (!(sym->n_type & N_EXT)) continue;
+		if (!match_local && !(sym->n_type & N_EXT)) continue;
 		if (sym->n_type & N_STAB) continue;
 		if (sym->n_strx >= symtab->strsize) continue;
 
@@ -567,7 +568,8 @@ int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle)
 
 	restore_text_protection();
 
-	fprintf(stderr, "trampoline: override: %d functions replaced\n", patched);
+	fprintf(stderr, "trampoline: override: %d functions replaced%s\n",
+	        patched, match_local ? " (incl. local symbols)" : "");
 	return patched;
 }
 

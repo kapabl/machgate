@@ -36,6 +36,7 @@
 #include "patcher.h"
 #include "config.h"
 #include "bgfx_shim.h"
+#include "sdl_window_shim.h"
 #include "eh_frame.h"
 #include "dylib_loader.h"
 #include "isa_emul.h"
@@ -424,7 +425,8 @@ int main(int argc, char** argv, char** envp)
 				if (oh) {
 					trampoline_patch_overrides(
 						(void*)machismo_load_results.mh,
-						machismo_load_results.slide, oh);
+						machismo_load_results.slide, oh,
+						tc->match_local);
 				} else {
 					fprintf(stderr, "machismo: warning: cannot load override lib %s: %s\n",
 					        tc->override_lib, dlerror());
@@ -733,8 +735,10 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  * signatures at those addresses and zero-initialize them for Linux.
  */
 
-#define DARWIN_MUTEX_SIG      0x32AAABA7L
-#define DARWIN_RMUTEX_SIG     0x32AAABA1L
+#define DARWIN_MUTEX_SIG      0x32AAABA7L  /* normal     PTHREAD_MUTEX_INITIALIZER */
+#define DARWIN_RMUTEX_SIG     0x32AAABA1L  /* errorcheck PTHREAD_ERRORCHECK_MUTEX_INITIALIZER */
+#define DARWIN_RECURSIVE_MUTEX_SIG 0x32AAABA2L /* recursive PTHREAD_RECURSIVE_MUTEX_INITIALIZER */
+#define DARWIN_FIRSTFIT_MUTEX_SIG  0x32AAABA3L /* firstfit */
 #define DARWIN_COND_SIG       0x3CB0B1BBL
 #define DARWIN_RWLOCK_SIG     0x2DA8B3B4L
 #define DARWIN_ONCE_SIG       0x30B1BCBAL
@@ -745,7 +749,9 @@ static int try_fixup_pthread_at(uintptr_t addr) {
 	long *sig = (long *)addr;
 	switch (*sig) {
 	case DARWIN_MUTEX_SIG:
-	case DARWIN_RMUTEX_SIG: {
+	case DARWIN_RMUTEX_SIG:
+	case DARWIN_RECURSIVE_MUTEX_SIG:
+	case DARWIN_FIRSTFIT_MUTEX_SIG: {
 		/* Initialize as recursive mutex for macOS compatibility.
 		 * macOS game code may re-lock from the same thread. */
 		pthread_mutexattr_t attr;

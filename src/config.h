@@ -32,6 +32,7 @@ typedef struct {
 	int init_wrapper;                        /* intercept bgfx init */
 	char* renderer;                          /* force renderer type */
 	char* override_lib;                      /* .so with exact-symbol replacements */
+	int match_local;                         /* override pass also matches LOCAL (non-N_EXT) defined symbols */
 } machismo_trampoline_config_t;
 
 typedef struct {

@@ -55,6 +55,41 @@ int mach_timebase_info(struct mach_timebase_info_data *info)
 	return 0; /* KERN_SUCCESS */
 }
 
+/*
+ * clock_gettime_nsec_np(clockid_t) — Darwin's nanosecond clock accessor.
+ *
+ * Returns the named clock as a uint64 nanosecond count. The Darwin clock ids
+ * differ from Linux's, so translate: CLOCK_REALTIME(0) → REALTIME; the per-CPU
+ * accounting clocks → their Linux equivalents; everything else (the various
+ * MONOTONIC/UPTIME_RAW flavors, incl. CLOCK_UPTIME_RAW=8 used by the Gothic game
+ * thread's frame pacing) → CLOCK_MONOTONIC. Without this the import binds to the
+ * return-0 stub, the frame delta is always 0, and the fixed-update loop never
+ * ticks. Returns 0 on error, matching Darwin.
+ */
+uint64_t clock_gettime_nsec_np(int clock_id)
+{
+	clockid_t linux_clk;
+	switch (clock_id) {
+	case 0:  /* CLOCK_REALTIME */
+		linux_clk = CLOCK_REALTIME;
+		break;
+	case 12: /* CLOCK_PROCESS_CPUTIME_ID */
+		linux_clk = CLOCK_PROCESS_CPUTIME_ID;
+		break;
+	case 16: /* CLOCK_THREAD_CPUTIME_ID */
+		linux_clk = CLOCK_THREAD_CPUTIME_ID;
+		break;
+	default: /* MONOTONIC / MONOTONIC_RAW / UPTIME_RAW (+APPROX) */
+		linux_clk = CLOCK_MONOTONIC;
+		break;
+	}
+
+	struct timespec ts;
+	if (clock_gettime(linux_clk, &ts) != 0)
+		return 0;
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 /* ===== Mach ports / task info (stubs) ===== */
 
 /* mach_task_self_ is a global variable in libSystem, not a function */
@@ -447,6 +482,17 @@ void memset_pattern16(void *dst, const void *pattern, size_t len)
 
 #define DARWIN_PTHREAD_MUTEX_SIG 0x32AAABA7L
 #define DARWIN_PTHREAD_RMUTEX_SIG 0x32AAABA1L
+/*
+ * All Apple pthread_mutex static initializers share the prefix 0x32AAABA0 with
+ * the mutex type encoded in the low nibble: A7=normal, A1=errorcheck,
+ * A2=recursive, A3=firstfit. Detect by mask (as Apple's own
+ * _PTHREAD_MUTEX_SIG_CMP does) rather than enumerating exact values — missing a
+ * type (e.g. A2 = PTHREAD_RECURSIVE_MUTEX_INITIALIZER, written by Mina's
+ * ycTempString.cpp ctor) leaves the signature in place, and glibc then reads it
+ * as a locked __lock and deadlocks in __lll_lock_wait on the first lock.
+ */
+#define DARWIN_PTHREAD_MUTEX_SIG_MASK 0xFFFFFFF0L
+#define DARWIN_PTHREAD_MUTEX_SIG_CMP  0x32AAABA0L
 #define DARWIN_PTHREAD_COND_SIG 0x3CB0B1BBL
 
 /*
@@ -504,7 +550,7 @@ static void init_pthread_wrappers(void)
 static inline void fixup_mutex(pthread_mutex_t *mutex)
 {
 	long *sig = (long *)mutex;
-	if (*sig == DARWIN_PTHREAD_MUTEX_SIG || *sig == DARWIN_PTHREAD_RMUTEX_SIG) {
+	if ((*sig & DARWIN_PTHREAD_MUTEX_SIG_MASK) == DARWIN_PTHREAD_MUTEX_SIG_CMP) {
 		pthread_mutexattr_t attr;
 		pthread_mutexattr_init(&attr);
 		pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
@@ -664,14 +710,73 @@ int pthread_threadid_np(pthread_t thread, uint64_t *thread_id)
 
 /* ===== sysctl ===== */
 
-/* Minimal sysctl stub — games typically use it for CPU info.
- * Returns ENOTSUP for everything. */
+/* Apple <sys/sysctl.h> MIB constants we answer (CTL_HW family). */
+#define DARWIN_CTL_HW       6
+#define DARWIN_HW_NCPU      3
+#define DARWIN_HW_PHYSMEM   5
+#define DARWIN_HW_PAGESIZE  7
+#define DARWIN_HW_MEMSIZE   24
+#define DARWIN_HW_AVAILCPU  25
+
+static int shim_hw_ncpu(void)
+{
+	long n = sysconf(_SC_NPROCESSORS_ONLN);
+	return (n < 1) ? 1 : (int)n;
+}
+
+static uint64_t shim_hw_memsize(void)
+{
+	long pages = sysconf(_SC_PHYS_PAGES);
+	long psize = sysconf(_SC_PAGESIZE);
+	if (pages < 1 || psize < 1)
+		return 0;
+	return (uint64_t)pages * (uint64_t)psize;
+}
+
+/* sysctl — answer the hardware MIBs games actually read.
+ *
+ * CRITICAL: returning -1 without writing *oldp leaves the caller reading
+ * uninitialized stack. Mina's startup does exactly this: it asks for
+ * {CTL_HW, HW_AVAILCPU} (then {CTL_HW, HW_NCPU}) to size its job-queue worker
+ * pool and does NOT check the return value — a stub that skips *oldp yields a
+ * garbage core count and an unbounded thread-spawn loop. So we write real values
+ * for the CPU/memory/page MIBs and only fall through to ENOTSUP for the rest. */
 int sysctl(const int *name, unsigned int namelen,
            void *oldp, size_t *oldlenp,
            const void *newp, size_t newlen)
 {
-	(void)name; (void)namelen; (void)oldp; (void)oldlenp;
 	(void)newp; (void)newlen;
+
+	if (name && namelen >= 2 && name[0] == DARWIN_CTL_HW) {
+		switch (name[1]) {
+		case DARWIN_HW_NCPU:
+		case DARWIN_HW_AVAILCPU:
+			if (oldp && oldlenp && *oldlenp >= sizeof(int)) {
+				*(int *)oldp = shim_hw_ncpu();
+				*oldlenp = sizeof(int);
+				return 0;
+			}
+			if (oldlenp) { *oldlenp = sizeof(int); return 0; }
+			break;
+		case DARWIN_HW_PAGESIZE:
+			if (oldp && oldlenp && *oldlenp >= sizeof(int)) {
+				*(int *)oldp = (int)sysconf(_SC_PAGESIZE);
+				*oldlenp = sizeof(int);
+				return 0;
+			}
+			break;
+		case DARWIN_HW_MEMSIZE:
+		case DARWIN_HW_PHYSMEM:
+			if (oldp && oldlenp && *oldlenp >= sizeof(uint64_t)) {
+				*(uint64_t *)oldp = shim_hw_memsize();
+				*oldlenp = sizeof(uint64_t);
+				return 0;
+			}
+			break;
+		default:
+			break;
+		}
+	}
 	errno = ENOTSUP;
 	return -1;
 }
@@ -679,8 +784,35 @@ int sysctl(const int *name, unsigned int namelen,
 int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
                  const void *newp, size_t newlen)
 {
-	(void)name; (void)oldp; (void)oldlenp;
 	(void)newp; (void)newlen;
+
+	if (name) {
+		if (!strcmp(name, "hw.ncpu")        || !strcmp(name, "hw.activecpu")  ||
+		    !strcmp(name, "hw.logicalcpu")  || !strcmp(name, "hw.logicalcpu_max") ||
+		    !strcmp(name, "hw.physicalcpu") || !strcmp(name, "hw.physicalcpu_max") ||
+		    !strcmp(name, "hw.availcpu")    ||
+		    !strcmp(name, "machdep.cpu.core_count") ||
+		    !strcmp(name, "machdep.cpu.thread_count")) {
+			if (oldp && oldlenp && *oldlenp >= sizeof(int)) {
+				*(int *)oldp = shim_hw_ncpu();
+				*oldlenp = sizeof(int);
+				return 0;
+			}
+			if (oldlenp) { *oldlenp = sizeof(int); return 0; }
+		} else if (!strcmp(name, "hw.memsize")) {
+			if (oldp && oldlenp && *oldlenp >= sizeof(uint64_t)) {
+				*(uint64_t *)oldp = shim_hw_memsize();
+				*oldlenp = sizeof(uint64_t);
+				return 0;
+			}
+		} else if (!strcmp(name, "hw.pagesize")) {
+			if (oldp && oldlenp && *oldlenp >= sizeof(int)) {
+				*(int *)oldp = (int)sysconf(_SC_PAGESIZE);
+				*oldlenp = sizeof(int);
+				return 0;
+			}
+		}
+	}
 	errno = ENOTSUP;
 	return -1;
 }
@@ -731,6 +863,7 @@ void _Block_object_dispose(const void *obj, int flags)
 
 #define DISPATCH_OBJ_SEMAPHORE 1
 #define DISPATCH_OBJ_QUEUE     2
+#define DISPATCH_OBJ_DATA      3
 
 struct dispatch_object {
 	int type;
@@ -891,11 +1024,38 @@ uint64_t dispatch_walltime(const struct timespec *when, int64_t delta)
 
 /* ---- Dispatch data (stub) ---- */
 
+struct dispatch_data_obj {
+	int          type;       /* DISPATCH_OBJ_DATA */
+	int          refcount;
+	const void  *buf;
+	size_t       size;
+};
+
 void* dispatch_data_create(const void *buffer, size_t size,
                            void *queue, void *destructor)
 {
-	(void)buffer; (void)size; (void)queue; (void)destructor;
-	return NULL;
+	(void)queue; (void)destructor;
+	/* Carry the (buffer,size) so consumers (e.g. the Gothic objc shim's
+	 * newLibraryWithData:) can recover the bytes; the old stub returned NULL,
+	 * which discarded them. The buffer is borrowed (engine-owned), not copied. */
+	struct dispatch_data_obj *o = (struct dispatch_data_obj *)calloc(1, sizeof(*o));
+	if (!o) return NULL;
+	o->type = DISPATCH_OBJ_DATA;
+	o->refcount = 1;
+	o->buf = buffer;
+	o->size = size;
+	return o;
+}
+
+/* Recover the bytes from a dispatch_data created above; NULL if `dd` is not one
+ * of ours. Exported (loader is -rdynamic) for the Gothic shim to dlsym. */
+const void *machismo_dispatch_data_bytes(void *dd, size_t *out_size)
+{
+	if (!dd) return NULL;
+	struct dispatch_data_obj *o = (struct dispatch_data_obj *)dd;
+	if (o->type != DISPATCH_OBJ_DATA) return NULL;
+	if (out_size) *out_size = o->size;
+	return o->buf;
 }
 
 /* ---- Retain/release ---- */
@@ -1344,8 +1504,31 @@ static void linux_to_darwin_stat(const struct stat *ls, struct darwin_stat *ds)
  * would call ourselves.
  */
 
+/*
+ * Hide files that must not exist from the Mach-O binary's point of view.
+ *
+ * A macOS libsteam_api.dylib can never function under machismo on Linux (it
+ * talks to the macOS Steam client, which isn't here), and machismo already
+ * STUBs the Steamworks API to return 0. Games decide "am I a Steam build?" by
+ * stat()'ing the dylib — e.g. Mina the Hollower (_global.c) does
+ * `s_isSteamBuild = stat("libsteam_api.dylib")==0`, then refuses to boot
+ * (MessagePromptManager::CheckSystemError → never calls Game::PostLoad) once
+ * SteamAPI_Init fails. Returning ENOENT makes such games take their normal
+ * non-Steam path. Matched by basename so the "../MacOS/libsteam_api.dylib"
+ * fallback probe is covered too.
+ */
+static int path_is_hidden(const char *path)
+{
+	if (!path)
+		return 0;
+	const char *base = strrchr(path, '/');
+	base = base ? base + 1 : path;
+	return strcmp(base, "libsteam_api.dylib") == 0;
+}
+
 int stat_darwin(const char *path, void *buf)
 {
+	if (path_is_hidden(path)) { errno = ENOENT; return -1; }
 	struct stat ls;
 	int ret = syscall(SYS_newfstatat, AT_FDCWD, path, &ls, 0);
 	if (ret == 0)
@@ -1368,6 +1551,7 @@ int fstat_darwin(int fd, void *buf)
 
 int lstat_darwin(const char *path, void *buf)
 {
+	if (path_is_hidden(path)) { errno = ENOENT; return -1; }
 	struct stat ls;
 	int ret = syscall(SYS_newfstatat, AT_FDCWD, path, &ls, AT_SYMLINK_NOFOLLOW);
 	if (ret == 0)
@@ -1379,6 +1563,7 @@ int lstat_darwin(const char *path, void *buf)
 
 int fstatat_darwin(int dirfd, const char *path, void *buf, int flags)
 {
+	if (path_is_hidden(path)) { errno = ENOENT; return -1; }
 	struct stat ls;
 	int ret = syscall(SYS_newfstatat, dirfd, path, &ls, flags);
 	if (ret == 0)

@@ -40,13 +40,10 @@ uint32_t bgfx_frame_wrapper(bool capture);
  * Logs dimensions for debugging coordinate mismatches. */
 void bgfx_reset_wrapper(uint32_t width, uint32_t height, uint32_t flags, uint8_t format);
 
-/* SDL_CreateWindow wrapper — captures the window pointer for bgfx.
- * Use as trampoline override target for _SDL_CreateWindow. */
-void* sdl_create_window_wrapper(const char* title, int x, int y, int w, int h, unsigned int flags);
-
-/* SDL_SetWindowFullscreen wrapper — passes through to real SDL, then resets
- * bgfx to match the new drawable size. */
-int sdl_set_window_fullscreen_wrapper(void* window, unsigned int flags);
+/* NOTE: the SDL window wrappers (sdl_create_window_wrapper,
+ * sdl_set_window_fullscreen_wrapper) and the captured-window accessor now live
+ * in sdl_window_shim.h — they are renderer-neutral and shared with the Sugar
+ * and Gothic ports. machismo installs them for every `_SDL_` trampoline. */
 
 /* --- Diagnostic wrappers for camera/rendering offset investigation --- */
 

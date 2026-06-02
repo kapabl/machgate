@@ -79,6 +79,8 @@ int config_load(const char* path, machismo_config_t* cfg)
 			} else if (strcmp(key, "override_lib") == 0) {
 				free(cur_tramp->override_lib);
 				cur_tramp->override_lib = strdup(val);
+			} else if (strcmp(key, "match_local") == 0) {
+				cur_tramp->match_local = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
 			}
 		} else {
 			/* [general] section or before any section */
