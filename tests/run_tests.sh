@@ -3,7 +3,7 @@
 cd "$(dirname "$0")/.."
 
 export MACHISMO_ROOT="$(pwd)"
-export BUILD_DIR="$MACHISMO_ROOT/build"
+export BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
 
 PASS=0
 FAIL=0

@@ -3,9 +3,13 @@ machismo
 wrapgen
 libsystem_shim.so
 *.o
+.cache/
+.history/
+docs/DARWIN_SYSCALL_TABLE_STATUS.tsv
 
 # CMake
 build/
+build-arm64/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -23,6 +27,22 @@ build-sfml/
 tests/fixtures/exit42
 tests/fixtures/exit0
 tests/fixtures/hello_write
+tests/fixtures/darwin_exit42
+tests/fixtures/darwin_write_stdout
+tests/fixtures/darwin_read_close
+tests/fixtures/darwin_open_lseek
+tests/fixtures/darwin_fstat
+tests/fixtures/darwin_mmap_protect
+tests/fixtures/darwin_range_000_099
+tests/fixtures/darwin_range_100_199
+tests/fixtures/darwin_range_200_399
+tests/fixtures/darwin_range_400_plus
+tests/fixtures/range_*.copyfile
+tests/fixtures/range_*.done
+tests/fixtures/range_*.exchange_a
+tests/fixtures/range_*.exchange_b
+tests/fixtures/range_*.sendfile
+tests/fixtures/range_*.tmp
 tests/fixtures/fat_binary
 tests/fixtures/fat_stub_x86
 tests/fixtures/with_lc_main

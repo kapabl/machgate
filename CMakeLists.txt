@@ -22,6 +22,11 @@ set(MACHISMO_SOURCES
     src/eh_frame.c
     src/dylib_loader.c
     src/isa_emul.c
+    src/syscall/syscall_gate.c
+    src/syscall/syscall_range_000_099.c
+    src/syscall/syscall_range_100_199.c
+    src/syscall/syscall_range_200_399.c
+    src/syscall/syscall_range_400_plus.c
     src/lua_entity_opt.c
     src/elfcalls/elfcalls.c
     src/elfcalls/threads.c

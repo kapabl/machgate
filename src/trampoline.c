@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <ucontext.h>
 
 /* arm64 trampoline island approach:
  *
@@ -603,16 +604,30 @@ static struct {
 } guarded_pages[MAX_GUARDED_PAGES];
 static int num_guarded_pages = 0;
 
+static uintptr_t ucontext_pc(const void* ucontext)
+{
+	const ucontext_t* uc = (const ucontext_t*)ucontext;
+
+#ifdef __aarch64__
+	return uc->uc_mcontext.pc;
+#elif defined(__x86_64__)
+	return uc->uc_mcontext.gregs[REG_RIP];
+#else
+	(void)uc;
+	return 0;
+#endif
+}
+
 static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 {
+	(void)sig;
 	uintptr_t fault_addr = (uintptr_t)info->si_addr;
 
 	/* Check if fault is in a guarded page */
 	for (int i = 0; i < num_guarded_pages; i++) {
 		if (fault_addr >= guarded_pages[i].base &&
 		    fault_addr < guarded_pages[i].base + guarded_pages[i].size) {
-			ucontext_t* uc = (ucontext_t*)ucontext;
-			uintptr_t pc = uc->uc_mcontext.pc;
+			uintptr_t pc = ucontext_pc(ucontext);
 			fprintf(stderr,
 				"\nFATAL: stale Mach-O data access at %p from PC=%p\n"
 				"This means un-trampolined or inlined code is accessing\n"

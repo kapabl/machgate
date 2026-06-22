@@ -8,7 +8,19 @@ BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
 tmpdir=$(mktemp -d)
 trap "rm -rf $tmpdir" EXIT
 
-"$BUILD_DIR/wrapgen" /usr/lib64/libz.so "$tmpdir/wrapper.c" "$tmpdir/wrapper.h"
+LIBZ="${LIBZ:-}"
+if [ -z "$LIBZ" ]; then
+    for candidate in /usr/lib64/libz.so /usr/lib/aarch64-linux-gnu/libz.so /lib/aarch64-linux-gnu/libz.so /usr/lib/x86_64-linux-gnu/libz.so /lib/x86_64-linux-gnu/libz.so; do
+        if [ -f "$candidate" ]; then
+            LIBZ="$candidate"
+            break
+        fi
+    done
+fi
+
+[ -n "$LIBZ" ] || { echo "libz.so not found" >&2; exit 1; }
+
+"$BUILD_DIR/wrapgen" "$LIBZ" "$tmpdir/wrapper.c" "$tmpdir/wrapper.h"
 
 # Output file should exist and contain C code
 [ -f "$tmpdir/wrapper.c" ]

@@ -40,6 +40,7 @@
 #include "eh_frame.h"
 #include "dylib_loader.h"
 #include "isa_emul.h"
+#include "syscall/syscall_gate.h"
 #include <sys/resource.h>
 #include <pthread.h>
 
@@ -556,6 +557,13 @@ int main(int argc, char** argv, char** envp)
 		}
 	}
 
+	if (machismo_load_results.mh) {
+		if (syscall_gate_patch(&machismo_load_results) < 0) {
+			fprintf(stderr, "machismo: syscall gate patching failed — aborting\n");
+			abort();
+		}
+	}
+
 	/* Set up the Mach-O stack layout */
 	setup_stack64(filename, &machismo_load_results);
 
@@ -988,4 +996,3 @@ static void start_thread(struct load_results* lr) {
 #       error Unsupported platform!
 #endif
 }
-
