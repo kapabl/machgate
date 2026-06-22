@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to package, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux-arm64:
+    name: Linux ARM64 release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build ARM64 toolchain image
+        run: |
+          docker build \
+            --platform linux/arm64 \
+            -t machgate-arm64-toolchain \
+            -f .github/docker/arm64-toolchain.Dockerfile \
+            .
+
+      - name: Build, test, and stage release
+        run: |
+          rm -rf dist package
+          mkdir -p dist package
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/work" \
+            -w /work \
+            machgate-arm64-toolchain \
+            bash -lc '
+              set -euo pipefail
+              export LLVM_MC="$(command -v llvm-mc-18 || command -v llvm-mc)"
+              export LD64_LLD="$(command -v ld64.lld-18 || command -v ld64.lld)"
+              export LLVM_LIPO="$(command -v llvm-lipo-18 || command -v llvm-lipo)"
+              cmake -S . -B build-arm64-release -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/opt/machgate
+              cmake --build build-arm64-release --verbose -j1
+              BUILD_DIR=/work/build-arm64-release bash tests/fixtures/build_fixtures.sh
+              BUILD_DIR=/work/build-arm64-release bash tests/run_tests.sh
+              DESTDIR=/work/package cmake --install build-arm64-release
+              mkdir -p /work/package/opt/machgate/share/doc/machgate
+              cp README.md /work/package/opt/machgate/share/doc/machgate/
+              cp docs/APPLE_OPEN_SOURCE_REFERENCES.md \
+                 docs/DARWIN_SYSCALL_TABLE_STATUS.md \
+                 docs/SYSCALL_TRANSLATION_PLAN.md \
+                 /work/package/opt/machgate/share/doc/machgate/
+            '
+          version="${RELEASE_TAG#v}"
+          tar -C package/opt -czf "dist/machgate-${version}-linux-arm64.tar.gz" machgate
+          sha256sum "dist/machgate-${version}-linux-arm64.tar.gz" > "dist/machgate-${version}-linux-arm64.tar.gz.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: machgate-linux-arm64-${{ env.RELEASE_TAG }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: MachGate ${{ env.RELEASE_TAG }}
+          draft: false
+          prerelease: false
+          files: dist/*

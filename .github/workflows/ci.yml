@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm64-linux:
+    name: ARM64 Linux Docker/QEMU
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build ARM64 toolchain image
+        run: |
+          docker build \
+            --platform linux/arm64 \
+            -t machgate-arm64-toolchain \
+            -f .github/docker/arm64-toolchain.Dockerfile \
+            .
+
+      - name: Build and test ARM64 MachGate
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/work" \
+            -w /work \
+            machgate-arm64-toolchain \
+            bash -lc '
+              set -euo pipefail
+              export LLVM_MC="$(command -v llvm-mc-18 || command -v llvm-mc)"
+              export LD64_LLD="$(command -v ld64.lld-18 || command -v ld64.lld)"
+              export LLVM_LIPO="$(command -v llvm-lipo-18 || command -v llvm-lipo)"
+              cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+              cmake --build build-arm64 --verbose -j1
+              BUILD_DIR=/work/build-arm64 bash tests/fixtures/build_fixtures.sh
+              BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh
+              git diff --check
+            '
