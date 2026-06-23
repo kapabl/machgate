@@ -683,6 +683,7 @@ static const struct variadic_info variadic_functions[] = {
 	/* va_list passthrough — same glibc function, converted va_list.
 	 * source_reg = register holding macOS va_list (char*) */
 	{"vsnprintf",       "vsnprintf",        3, 1, 3},
+	{"vfprintf",        "vfprintf",         2, 1, 2},
 	{"vsscanf",         "vsscanf",          2, 1, 2},
 	{"__vsnprintf_chk", "__vsnprintf_chk",  5, 1, 5},
 	{NULL, NULL, 0, 0, 0}

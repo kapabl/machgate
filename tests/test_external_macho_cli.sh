@@ -17,27 +17,40 @@ WORK_DIR="${MACHGATE_EXTERNAL_WORK:-$MACHISMO_ROOT/tests/external/work}"
 LOG_DIR="${MACHGATE_EXTERNAL_LOGS:-$MACHISMO_ROOT/tests/external/logs}"
 TIMEOUT="${MACHGATE_EXTERNAL_TIMEOUT:-10}"
 CONFIG_DIR="$WORK_DIR/config"
+LIBCXX_DYLIB="${MACHGATE_EXTERNAL_LIBCXX:-}"
+
+if [ -z "$LIBCXX_DYLIB" ] && [ "${MACHGATE_EXTERNAL_MAP_LIBCXX:-0}" = "1" ]; then
+    LIBCXX_DYLIB="$MACHISMO_ROOT/build-libcxx/lib/libc++.so.1"
+fi
 
 mkdir -p "$CACHE_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR"
 
 [ -x "$BUILD_DIR/machismo" ] || { echo "machismo not found at $BUILD_DIR/machismo" >&2; exit 1; }
 [ -f "$MANIFEST" ] || { echo "manifest not found: $MANIFEST" >&2; exit 1; }
 
-export LD_LIBRARY_PATH="$BUILD_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ -n "$LIBCXX_DYLIB" ]; then
+    [ -f "$LIBCXX_DYLIB" ] || { echo "libc++ mapping target not found: $LIBCXX_DYLIB" >&2; exit 1; }
+    LIBCXX_DIR="$(cd "$(dirname "$LIBCXX_DYLIB")" && pwd)"
+    LIBCXX_DYLIB="$LIBCXX_DIR/$(basename "$LIBCXX_DYLIB")"
+    export LD_LIBRARY_PATH="$BUILD_DIR:$LIBCXX_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+    export LD_LIBRARY_PATH="$BUILD_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 cat > "$CONFIG_DIR/dylib_map.conf" <<EOF
 libSystem.B = $BUILD_DIR/libsystem_shim.so
 libz.1 = libz.so
 libobjc = STUB
 CoreFoundation = $BUILD_DIR/libsystem_shim.so
-libiconv = SKIP
+$(if [ -n "$LIBCXX_DYLIB" ]; then echo "libc++.1 = $LIBCXX_DYLIB"; fi)
+libiconv = libc.so.6
 libresolv = SKIP
 Security = SKIP
 Foundation = SKIP
 IOKit = SKIP
 SystemConfiguration = SKIP
 AppKit = SKIP
-CoreServices = SKIP
+CoreServices = libm.so.6
 OpenDirectory = SKIP
 EOF
 

@@ -3,7 +3,7 @@
 # Format:
 # name|url|sha256|binary path inside archive or "." for direct binary|argv
 kubectl|https://dl.k8s.io/release/v1.36.2/bin/darwin/arm64/kubectl|4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d|.|version --client
-helm|https://get.helm.sh/helm-v4.2.2-darwin-arm64.tar.gz|5410a0dae3d5d91f45653b161260d9301aabc4ae80ae50a6605d66884b6df8ea|darwin-arm64/helm|version --client
+helm|https://get.helm.sh/helm-v4.2.2-darwin-arm64.tar.gz|5410a0dae3d5d91f45653b161260d9301aabc4ae80ae50a6605d66884b6df8ea|darwin-arm64/helm|version
 k9s|https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Darwin_arm64.tar.gz|9b8c0e8f461e5d33aeee43a67f5ef4aff646a008a786887b8266cbb153c610cc|k9s|version
 kind|https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-darwin-arm64|dca67911095a110c2b5c36e26df6cac860c602033e456c0db47be498cdef1ebb|.|version
 minikube|https://github.com/kubernetes/minikube/releases/download/v1.38.1/minikube-darwin-arm64|f9b0c70bb7daf38c683c0b6e46dc1b612600247ae826bf74576807746a919ee8|.|version

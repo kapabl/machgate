@@ -466,6 +466,189 @@ void CCHmacFinal(void* context, void* mac_out)
 		memset(mac_out, 0, 64);
 }
 
+struct cc_sha256_ctx {
+	uint32_t count[2];
+	uint32_t hash[8];
+	uint32_t wbuf[16];
+};
+
+static uint32_t cc_sha256_rotr(uint32_t value, unsigned int bits)
+{
+	return (value >> bits) | (value << (32 - bits));
+}
+
+static uint32_t cc_sha256_load_be32(const uint8_t* bytes)
+{
+	return ((uint32_t)bytes[0] << 24) |
+	       ((uint32_t)bytes[1] << 16) |
+	       ((uint32_t)bytes[2] << 8) |
+	       (uint32_t)bytes[3];
+}
+
+static void cc_sha256_store_be32(uint8_t* bytes, uint32_t value)
+{
+	bytes[0] = (uint8_t)(value >> 24);
+	bytes[1] = (uint8_t)(value >> 16);
+	bytes[2] = (uint8_t)(value >> 8);
+	bytes[3] = (uint8_t)value;
+}
+
+static void cc_sha256_transform(struct cc_sha256_ctx* context,
+                                const uint8_t block[64])
+{
+	static const uint32_t constants[64] = {
+		0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
+		0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
+		0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
+		0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U,
+		0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU,
+		0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
+		0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U,
+		0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,
+		0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U,
+		0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
+		0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U,
+		0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
+		0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U,
+		0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
+		0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
+		0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U
+	};
+
+	uint32_t words[64];
+	for (int index = 0; index < 16; index++)
+		words[index] = cc_sha256_load_be32(block + index * 4);
+	for (int index = 16; index < 64; index++) {
+		uint32_t s0 = cc_sha256_rotr(words[index - 15], 7) ^
+		              cc_sha256_rotr(words[index - 15], 18) ^
+		              (words[index - 15] >> 3);
+		uint32_t s1 = cc_sha256_rotr(words[index - 2], 17) ^
+		              cc_sha256_rotr(words[index - 2], 19) ^
+		              (words[index - 2] >> 10);
+		words[index] = words[index - 16] + s0 + words[index - 7] + s1;
+	}
+
+	uint32_t a = context->hash[0];
+	uint32_t b = context->hash[1];
+	uint32_t c = context->hash[2];
+	uint32_t d = context->hash[3];
+	uint32_t e = context->hash[4];
+	uint32_t f = context->hash[5];
+	uint32_t g = context->hash[6];
+	uint32_t h = context->hash[7];
+
+	for (int index = 0; index < 64; index++) {
+		uint32_t s1 = cc_sha256_rotr(e, 6) ^ cc_sha256_rotr(e, 11) ^
+		              cc_sha256_rotr(e, 25);
+		uint32_t choice = (e & f) ^ (~e & g);
+		uint32_t temp1 = h + s1 + choice + constants[index] + words[index];
+		uint32_t s0 = cc_sha256_rotr(a, 2) ^ cc_sha256_rotr(a, 13) ^
+		              cc_sha256_rotr(a, 22);
+		uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+		uint32_t temp2 = s0 + majority;
+
+		h = g;
+		g = f;
+		f = e;
+		e = d + temp1;
+		d = c;
+		c = b;
+		b = a;
+		a = temp1 + temp2;
+	}
+
+	context->hash[0] += a;
+	context->hash[1] += b;
+	context->hash[2] += c;
+	context->hash[3] += d;
+	context->hash[4] += e;
+	context->hash[5] += f;
+	context->hash[6] += g;
+	context->hash[7] += h;
+}
+
+int CC_SHA256_Init(struct cc_sha256_ctx* context)
+{
+	if (!context)
+		return 0;
+
+	context->count[0] = 0;
+	context->count[1] = 0;
+	context->hash[0] = 0x6a09e667U;
+	context->hash[1] = 0xbb67ae85U;
+	context->hash[2] = 0x3c6ef372U;
+	context->hash[3] = 0xa54ff53aU;
+	context->hash[4] = 0x510e527fU;
+	context->hash[5] = 0x9b05688cU;
+	context->hash[6] = 0x1f83d9abU;
+	context->hash[7] = 0x5be0cd19U;
+	memset(context->wbuf, 0, sizeof(context->wbuf));
+	return 1;
+}
+
+int CC_SHA256_Update(struct cc_sha256_ctx* context, const void* data,
+                     uint32_t length)
+{
+	if (!context)
+		return 0;
+	if (!data && length)
+		return 0;
+
+	const uint8_t* bytes = data;
+	uint64_t bit_count = ((uint64_t)context->count[1] << 32) |
+	                     context->count[0];
+	size_t used = (size_t)((bit_count >> 3) & 63);
+	bit_count += (uint64_t)length << 3;
+	context->count[0] = (uint32_t)bit_count;
+	context->count[1] = (uint32_t)(bit_count >> 32);
+
+	if (used) {
+		size_t available = 64 - used;
+		if (length < available) {
+			memcpy((uint8_t*)context->wbuf + used, bytes, length);
+			return 1;
+		}
+		memcpy((uint8_t*)context->wbuf + used, bytes, available);
+		cc_sha256_transform(context, (const uint8_t*)context->wbuf);
+		bytes += available;
+		length -= (uint32_t)available;
+	}
+
+	while (length >= 64) {
+		cc_sha256_transform(context, bytes);
+		bytes += 64;
+		length -= 64;
+	}
+
+	if (length)
+		memcpy(context->wbuf, bytes, length);
+	return 1;
+}
+
+int CC_SHA256_Final(uint8_t* digest, struct cc_sha256_ctx* context)
+{
+	if (!context || !digest)
+		return 0;
+
+	uint8_t padding[64] = { 0x80 };
+	uint8_t length_bytes[8];
+	uint64_t bit_count = ((uint64_t)context->count[1] << 32) |
+	                     context->count[0];
+	size_t used = (size_t)((bit_count >> 3) & 63);
+	size_t pad_length = used < 56 ? 56 - used : 120 - used;
+
+	for (int index = 0; index < 8; index++)
+		length_bytes[7 - index] = (uint8_t)(bit_count >> (index * 8));
+
+	CC_SHA256_Update(context, padding, (uint32_t)pad_length);
+	CC_SHA256_Update(context, length_bytes, sizeof(length_bytes));
+
+	for (int index = 0; index < 8; index++)
+		cc_sha256_store_be32(digest + index * 4, context->hash[index]);
+	memset(context, 0, sizeof(*context));
+	return 1;
+}
+
 int CCKeyDerivationPBKDF(uint32_t algorithm, const char* password,
                          size_t password_length, const uint8_t* salt,
                          size_t salt_length, uint32_t prf,
@@ -502,7 +685,18 @@ typedef const void* CFErrorRef;
 typedef const void* CFStringRef;
 typedef const void* CFTimeZoneRef;
 typedef const void* CFDictionaryRef;
+typedef void* CFMutableDictionaryRef;
 typedef double CFAbsoluteTime;
+typedef unsigned long CFTypeID;
+
+enum {
+	CF_TYPE_ID_STRING = 1,
+	CF_TYPE_ID_ARRAY = 2,
+	CF_TYPE_ID_DATA = 3,
+	CF_TYPE_ID_DICTIONARY = 4,
+	CF_TYPE_ID_BOOLEAN = 5,
+	CF_TYPE_ID_NUMBER = 6,
+};
 
 struct cf_range {
 	CFIndex location;
@@ -510,39 +704,149 @@ struct cf_range {
 };
 
 struct cf_array {
+	CFTypeID type_id;
 	CFIndex count;
 	CFIndex capacity;
 	const void** values;
 };
 
 struct cf_data {
+	CFTypeID type_id;
 	CFIndex length;
 	uint8_t bytes[];
 };
 
 struct cf_dictionary {
+	CFTypeID type_id;
 	CFIndex count;
 	const void** keys;
 	const void** values;
 };
 
+struct cf_number {
+	CFTypeID type_id;
+	int type;
+	int64_t signed_value;
+	double double_value;
+};
+
+struct cf_array_callbacks {
+	CFIndex version;
+	const void* (*retain)(CFAllocatorRef allocator, const void* value);
+	void (*release)(CFAllocatorRef allocator, const void* value);
+	CFStringRef (*copy_description)(const void* value);
+	uint8_t (*equal)(const void* value_a, const void* value_b);
+};
+
+struct cf_dictionary_key_callbacks {
+	CFIndex version;
+	const void* (*retain)(CFAllocatorRef allocator, const void* value);
+	void (*release)(CFAllocatorRef allocator, const void* value);
+	CFStringRef (*copy_description)(const void* value);
+	uint8_t (*equal)(const void* value_a, const void* value_b);
+	unsigned long (*hash)(const void* value);
+};
+
+struct cf_dictionary_value_callbacks {
+	CFIndex version;
+	const void* (*retain)(CFAllocatorRef allocator, const void* value);
+	void (*release)(CFAllocatorRef allocator, const void* value);
+	CFStringRef (*copy_description)(const void* value);
+	uint8_t (*equal)(const void* value_a, const void* value_b);
+};
+
 CFDataRef CFDataCreate(CFAllocatorRef allocator, const uint8_t* bytes,
                        CFIndex length);
+CFDictionaryRef CFDictionaryCreate(CFAllocatorRef allocator,
+                                   const void** keys,
+                                   const void** values,
+                                   CFIndex number_of_values,
+                                   const void* key_callbacks,
+                                   const void* value_callbacks);
+
+static const void* cf_callback_retain(CFAllocatorRef allocator,
+                                      const void* value)
+{
+	(void)allocator;
+	return value;
+}
+
+static void cf_callback_release(CFAllocatorRef allocator, const void* value)
+{
+	(void)allocator;
+	(void)value;
+}
+
+static CFStringRef cf_callback_copy_description(const void* value)
+{
+	return value;
+}
+
+static uint8_t cf_callback_equal(const void* value_a, const void* value_b)
+{
+	return value_a == value_b;
+}
+
+static unsigned long cf_callback_hash(const void* value)
+{
+	uintptr_t bits = (uintptr_t)value;
+	return (unsigned long)(bits ^ (bits >> 32));
+}
 
 static const char cf_timezone_name[] = "UTC";
 static const char cf_timezone_object[] = "MachGate/UTC";
 static const char cf_error_description[] = "MachGate CoreFoundation error";
-static const char cf_allocator_default_object[] = "MachGate/CFAllocatorDefault";
+static const char cf_allocator_null_object[] = "MachGate/CFAllocatorNull";
 static const char cf_boolean_true_object[] = "MachGate/kCFBooleanTrue";
-static const char cf_type_array_callbacks_object[] = "MachGate/kCFTypeArrayCallBacks";
-static const char cf_type_dictionary_key_callbacks_object[] = "MachGate/kCFTypeDictionaryKeyCallBacks";
-static const char cf_type_dictionary_value_callbacks_object[] = "MachGate/kCFTypeDictionaryValueCallBacks";
+static const char cf_run_loop_default_mode_object[] = "kCFRunLoopDefaultMode";
+static const char cf_url_volume_available_capacity_important_key[] = "NSURLVolumeAvailableCapacityForImportantUsageKey";
+static const char cf_url_volume_available_capacity_key[] = "NSURLVolumeAvailableCapacityKey";
+static const char cf_url_volume_is_browsable_key[] = "NSURLVolumeIsBrowsableKey";
+static const char cf_url_volume_is_ejectable_key[] = "NSURLVolumeIsEjectableKey";
+static const char cf_url_volume_is_internal_key[] = "NSURLVolumeIsInternalKey";
+static const char cf_url_volume_is_local_key[] = "NSURLVolumeIsLocalKey";
+static const char cf_url_volume_is_removable_key[] = "NSURLVolumeIsRemovableKey";
+static const char cf_url_volume_name_key[] = "NSURLVolumeNameKey";
+static const char cf_url_volume_total_capacity_key[] = "NSURLVolumeTotalCapacityKey";
+static const char cf_url_volume_uuid_string_key[] = "NSURLVolumeUUIDStringKey";
 
-const void* kCFAllocatorDefault = cf_allocator_default_object;
+const double kCFAbsoluteTimeIntervalSince1970 = 978307200.0;
+const void* kCFAllocatorDefault = NULL;
+const void* kCFAllocatorNull = cf_allocator_null_object;
 const void* kCFBooleanTrue = cf_boolean_true_object;
-const void* kCFTypeArrayCallBacks = cf_type_array_callbacks_object;
-const void* kCFTypeDictionaryKeyCallBacks = cf_type_dictionary_key_callbacks_object;
-const void* kCFTypeDictionaryValueCallBacks = cf_type_dictionary_value_callbacks_object;
+const void* kCFRunLoopDefaultMode = cf_run_loop_default_mode_object;
+const void* kCFURLVolumeAvailableCapacityForImportantUsageKey = cf_url_volume_available_capacity_important_key;
+const void* kCFURLVolumeAvailableCapacityKey = cf_url_volume_available_capacity_key;
+const void* kCFURLVolumeIsBrowsableKey = cf_url_volume_is_browsable_key;
+const void* kCFURLVolumeIsEjectableKey = cf_url_volume_is_ejectable_key;
+const void* kCFURLVolumeIsInternalKey = cf_url_volume_is_internal_key;
+const void* kCFURLVolumeIsLocalKey = cf_url_volume_is_local_key;
+const void* kCFURLVolumeIsRemovableKey = cf_url_volume_is_removable_key;
+const void* kCFURLVolumeNameKey = cf_url_volume_name_key;
+const void* kCFURLVolumeTotalCapacityKey = cf_url_volume_total_capacity_key;
+const void* kCFURLVolumeUUIDStringKey = cf_url_volume_uuid_string_key;
+const struct cf_array_callbacks kCFTypeArrayCallBacks = {
+	0,
+	cf_callback_retain,
+	cf_callback_release,
+	cf_callback_copy_description,
+	cf_callback_equal,
+};
+const struct cf_dictionary_key_callbacks kCFTypeDictionaryKeyCallBacks = {
+	0,
+	cf_callback_retain,
+	cf_callback_release,
+	cf_callback_copy_description,
+	cf_callback_equal,
+	cf_callback_hash,
+};
+const struct cf_dictionary_value_callbacks kCFTypeDictionaryValueCallBacks = {
+	0,
+	cf_callback_retain,
+	cf_callback_release,
+	cf_callback_copy_description,
+	cf_callback_equal,
+};
 
 CFTimeZoneRef CFTimeZoneCopySystem(void)
 {
@@ -569,6 +873,11 @@ CFIndex CFStringGetLength(CFStringRef string)
 	if (!string)
 		return 0;
 	return (CFIndex)strlen((const char*)string);
+}
+
+CFStringEncoding CFStringGetSystemEncoding(void)
+{
+	return 0;
 }
 
 const char* CFStringGetCStringPtr(CFStringRef string, CFStringEncoding encoding)
@@ -657,6 +966,168 @@ CFStringRef CFStringCreateWithBytes(CFAllocatorRef allocator,
 	return string;
 }
 
+CFStringRef CFStringCreateWithBytesNoCopy(CFAllocatorRef allocator,
+                                          const uint8_t* bytes,
+                                          CFIndex number_of_bytes,
+                                          CFStringEncoding encoding,
+                                          uint8_t is_external_representation,
+                                          CFAllocatorRef contents_deallocator)
+{
+	(void)contents_deallocator;
+	return CFStringCreateWithBytes(allocator, bytes, number_of_bytes,
+	                               encoding, is_external_representation);
+}
+
+CFStringRef CFStringCreateWithCString(CFAllocatorRef allocator,
+                                      const char* string,
+                                      CFStringEncoding encoding)
+{
+	if (!string)
+		return NULL;
+	return CFStringCreateWithBytes(allocator, (const uint8_t*)string,
+	                               (CFIndex)strlen(string), encoding, 0);
+}
+
+CFStringRef CFStringCreateCopy(CFAllocatorRef allocator, CFStringRef string)
+{
+	return CFStringCreateWithCString(allocator, (const char*)string, 0);
+}
+
+int CFStringCompare(CFStringRef string_a, CFStringRef string_b,
+                    unsigned long options)
+{
+	(void)options;
+
+	if (string_a == string_b)
+		return 0;
+	if (!string_a)
+		return -1;
+	if (!string_b)
+		return 1;
+
+	int result = strcmp((const char*)string_a, (const char*)string_b);
+	if (result < 0)
+		return -1;
+	if (result > 0)
+		return 1;
+	return 0;
+}
+
+CFStringRef CFURLCreateFromFileSystemRepresentation(CFAllocatorRef allocator,
+                                                    const uint8_t* buffer,
+                                                    CFIndex buffer_length,
+                                                    uint8_t is_directory)
+{
+	(void)is_directory;
+	return CFStringCreateWithBytes(allocator, buffer, buffer_length, 0, 0);
+}
+
+CFStringRef CFURLCreateFilePathURL(CFAllocatorRef allocator, CFStringRef url,
+                                   void* error)
+{
+	(void)error;
+	return CFStringCreateCopy(allocator, url);
+}
+
+CFStringRef CFURLCreateFileReferenceURL(CFAllocatorRef allocator,
+                                        CFStringRef url, void* error)
+{
+	(void)error;
+	return CFStringCreateCopy(allocator, url);
+}
+
+CFStringRef CFURLCopyAbsoluteURL(CFStringRef url)
+{
+	return CFStringCreateCopy(NULL, url);
+}
+
+CFStringRef CFURLCopyFileSystemPath(CFStringRef url, int path_style)
+{
+	(void)path_style;
+	return CFStringCreateCopy(NULL, url);
+}
+
+CFStringRef CFURLCopyLastPathComponent(CFStringRef url)
+{
+	if (!url)
+		return NULL;
+
+	const char* path = (const char*)url;
+	const char* last_slash = strrchr(path, '/');
+	const char* component = last_slash ? last_slash + 1 : path;
+	return CFStringCreateWithCString(NULL, component, 0);
+}
+
+CFStringRef CFURLCreateCopyAppendingPathComponent(CFAllocatorRef allocator,
+                                                  CFStringRef url,
+                                                  CFStringRef path_component,
+                                                  uint8_t is_directory)
+{
+	(void)is_directory;
+
+	if (!url)
+		return CFStringCreateCopy(allocator, path_component);
+	if (!path_component)
+		return CFStringCreateCopy(allocator, url);
+
+	const char* base = (const char*)url;
+	const char* component = (const char*)path_component;
+	size_t base_length = strlen(base);
+	size_t component_length = strlen(component);
+	int needs_slash = base_length > 0 && base[base_length - 1] != '/';
+	char* path = malloc(base_length + (size_t)needs_slash +
+	                    component_length + 1);
+	if (!path)
+		return NULL;
+
+	memcpy(path, base, base_length);
+	if (needs_slash)
+		path[base_length++] = '/';
+	memcpy(path + base_length, component, component_length);
+	path[base_length + component_length] = '\0';
+	return path;
+}
+
+CFStringRef CFURLCreateCopyDeletingLastPathComponent(CFAllocatorRef allocator,
+                                                     CFStringRef url)
+{
+	(void)allocator;
+
+	if (!url)
+		return NULL;
+
+	const char* path = (const char*)url;
+	const char* last_slash = strrchr(path, '/');
+	if (!last_slash)
+		return CFStringCreateWithCString(NULL, "", 0);
+	if (last_slash == path)
+		return CFStringCreateWithCString(NULL, "/", 0);
+
+	return CFStringCreateWithBytes(NULL, (const uint8_t*)path,
+	                               (CFIndex)(last_slash - path), 0, 0);
+}
+
+uint8_t CFURLResourceIsReachable(CFStringRef url, void* error)
+{
+	(void)error;
+
+	if (!url)
+		return 0;
+	return access((const char*)url, F_OK) == 0;
+}
+
+CFDictionaryRef CFURLCopyResourcePropertiesForKeys(CFStringRef url,
+                                                   CFArrayRef keys,
+                                                   void* error)
+{
+	(void)url;
+	(void)keys;
+	(void)error;
+	return CFDictionaryCreate(NULL, NULL, NULL, 0,
+	                          &kCFTypeDictionaryKeyCallBacks,
+	                          &kCFTypeDictionaryValueCallBacks);
+}
+
 CFDataRef CFStringCreateExternalRepresentation(CFAllocatorRef allocator,
                                                CFStringRef string,
                                                CFStringEncoding encoding,
@@ -689,6 +1160,7 @@ CFDataRef CFDataCreate(CFAllocatorRef allocator, const uint8_t* bytes,
 	if (!data)
 		return NULL;
 
+	data->type_id = CF_TYPE_ID_DATA;
 	data->length = length;
 	if (length > 0)
 		memcpy(data->bytes, bytes, (size_t)length);
@@ -709,6 +1181,23 @@ CFIndex CFDataGetLength(CFDataRef data)
 	return ((const struct cf_data*)data)->length;
 }
 
+void CFDataGetBytes(CFDataRef data, struct cf_range range, uint8_t* buffer)
+{
+	if (!data || !buffer)
+		return;
+	if (range.location < 0 || range.length < 0)
+		return;
+
+	const struct cf_data* cf_data = data;
+	if (range.location > cf_data->length)
+		return;
+
+	CFIndex available = cf_data->length - range.location;
+	CFIndex copied = range.length < available ? range.length : available;
+	if (copied > 0)
+		memcpy(buffer, cf_data->bytes + range.location, (size_t)copied);
+}
+
 CFMutableArrayRef CFArrayCreateMutable(CFAllocatorRef allocator,
                                        CFIndex capacity,
                                        const void* callbacks)
@@ -723,12 +1212,29 @@ CFMutableArrayRef CFArrayCreateMutable(CFAllocatorRef allocator,
 	if (!array)
 		return NULL;
 
+	array->type_id = CF_TYPE_ID_ARRAY;
 	array->capacity = capacity > 0 ? capacity : 4;
 	array->values = calloc((size_t)array->capacity, sizeof(*array->values));
 	if (!array->values) {
 		free(array);
 		return NULL;
 	}
+	return array;
+}
+
+CFArrayRef CFArrayCreate(CFAllocatorRef allocator, const void** values,
+                         CFIndex number_of_values, const void* callbacks)
+{
+	CFMutableArrayRef array_ref = CFArrayCreateMutable(allocator,
+	                                                  number_of_values,
+	                                                  callbacks);
+	struct cf_array* array = array_ref;
+	if (!array)
+		return NULL;
+
+	for (CFIndex index = 0; index < number_of_values; index++)
+		array->values[index] = values ? values[index] : NULL;
+	array->count = number_of_values;
 	return array;
 }
 
@@ -751,6 +1257,41 @@ void CFArrayAppendValue(CFMutableArrayRef array_ref, const void* value)
 
 	array->values[array->count] = value;
 	array->count++;
+}
+
+void CFArrayInsertValueAtIndex(CFMutableArrayRef array_ref, CFIndex index,
+                               const void* value)
+{
+	struct cf_array* array = array_ref;
+	if (!array || index < 0 || index > array->count)
+		return;
+
+	if (array->count == array->capacity) {
+		CFIndex new_capacity = array->capacity * 2;
+		const void** values = realloc(array->values,
+		                              (size_t)new_capacity *
+		                              sizeof(*array->values));
+		if (!values)
+			return;
+		array->values = values;
+		array->capacity = new_capacity;
+	}
+
+	memmove(array->values + index + 1, array->values + index,
+	        (size_t)(array->count - index) * sizeof(*array->values));
+	array->values[index] = value;
+	array->count++;
+}
+
+void CFArrayRemoveValueAtIndex(CFMutableArrayRef array_ref, CFIndex index)
+{
+	struct cf_array* array = array_ref;
+	if (!array || index < 0 || index >= array->count)
+		return;
+
+	memmove(array->values + index, array->values + index + 1,
+	        (size_t)(array->count - index - 1) * sizeof(*array->values));
+	array->count--;
 }
 
 void CFArraySetValueAtIndex(CFMutableArrayRef array_ref, CFIndex index,
@@ -818,6 +1359,7 @@ CFDictionaryRef CFDictionaryCreate(CFAllocatorRef allocator,
 	if (!dictionary)
 		return NULL;
 
+	dictionary->type_id = CF_TYPE_ID_DICTIONARY;
 	dictionary->count = number_of_values;
 	if (number_of_values == 0)
 		return dictionary;
@@ -868,10 +1410,167 @@ const void* CFDictionaryGetValue(CFDictionaryRef dictionary_ref,
 	return NULL;
 }
 
+void CFDictionaryAddValue(CFMutableDictionaryRef dictionary_ref,
+                          const void* key, const void* value)
+{
+	struct cf_dictionary* dictionary = dictionary_ref;
+	if (!dictionary)
+		return;
+
+	for (CFIndex index = 0; index < dictionary->count; index++) {
+		if (CFEqual(dictionary->keys[index], key)) {
+			dictionary->values[index] = value;
+			return;
+		}
+	}
+
+	CFIndex new_count = dictionary->count + 1;
+	const void** keys = realloc(dictionary->keys,
+	                            (size_t)new_count * sizeof(*keys));
+	if (!keys)
+		return;
+	dictionary->keys = keys;
+
+	const void** values = realloc(dictionary->values,
+	                              (size_t)new_count * sizeof(*values));
+	if (!values)
+		return;
+	dictionary->values = values;
+
+	dictionary->keys[dictionary->count] = key;
+	dictionary->values[dictionary->count] = value;
+	dictionary->count = new_count;
+}
+
+uint8_t CFDictionaryGetValueIfPresent(CFDictionaryRef dictionary_ref,
+                                      const void* key, const void** value)
+{
+	const void* result = CFDictionaryGetValue(dictionary_ref, key);
+	if (!result)
+		return 0;
+	if (value)
+		*value = result;
+	return 1;
+}
+
+CFTypeID CFStringGetTypeID(void)
+{
+	return CF_TYPE_ID_STRING;
+}
+
+CFTypeID CFArrayGetTypeID(void)
+{
+	return CF_TYPE_ID_ARRAY;
+}
+
+CFTypeID CFDataGetTypeID(void)
+{
+	return CF_TYPE_ID_DATA;
+}
+
+CFTypeID CFDictionaryGetTypeID(void)
+{
+	return CF_TYPE_ID_DICTIONARY;
+}
+
+CFTypeID CFBooleanGetTypeID(void)
+{
+	return CF_TYPE_ID_BOOLEAN;
+}
+
+CFTypeID CFNumberGetTypeID(void)
+{
+	return CF_TYPE_ID_NUMBER;
+}
+
+CFTypeID CFGetTypeID(const void* object)
+{
+	if (!object)
+		return 0;
+	if (object == kCFBooleanTrue)
+		return CF_TYPE_ID_BOOLEAN;
+
+	CFTypeID type_id = *(const CFTypeID*)object;
+	if (type_id == CF_TYPE_ID_ARRAY || type_id == CF_TYPE_ID_DATA ||
+	    type_id == CF_TYPE_ID_DICTIONARY || type_id == CF_TYPE_ID_NUMBER)
+		return type_id;
+	return CF_TYPE_ID_STRING;
+}
+
+uint8_t CFBooleanGetValue(const void* boolean)
+{
+	return boolean == kCFBooleanTrue;
+}
+
+const void* CFRetain(const void* object)
+{
+	return object;
+}
+
+CFArrayRef CFLocaleCopyPreferredLanguages(void)
+{
+	static const void* languages[] = { "en-US" };
+	return CFArrayCreate(NULL, languages, 1, &kCFTypeArrayCallBacks);
+}
+
+uint8_t LocaleRefGetPartString(void* locale, uint32_t part_mask,
+                               int max_string_len, uint16_t* part_string)
+{
+	(void)locale;
+	(void)part_mask;
+
+	if (part_string && max_string_len > 0)
+		part_string[0] = 0;
+	return 0;
+}
+
+void* CFRunLoopGetCurrent(void)
+{
+	static int run_loop;
+	return &run_loop;
+}
+
+uint8_t CFRunLoopIsWaiting(void* run_loop)
+{
+	(void)run_loop;
+	return 0;
+}
+
+void CFRunLoopRun(void)
+{
+}
+
+void CFRunLoopStop(void* run_loop)
+{
+	(void)run_loop;
+}
+
+void CFRunLoopWakeUp(void* run_loop)
+{
+	(void)run_loop;
+}
+
+const void* CFNumberCreate(CFAllocatorRef allocator, int type,
+                           const void* value)
+{
+	(void)allocator;
+
+	if (!value)
+		return NULL;
+
+	struct cf_number* number = calloc(1, sizeof(*number));
+	if (!number)
+		return NULL;
+
+	number->type_id = CF_TYPE_ID_NUMBER;
+	number->type = type;
+	number->signed_value = *(const int64_t*)value;
+	number->double_value = (double)number->signed_value;
+	return number;
+}
+
 uint8_t CFNumberGetValue(const void* number, int type, void* value)
 {
-	(void)type;
-
 	if (!number || !value)
 		return 0;
 
@@ -880,8 +1579,33 @@ uint8_t CFNumberGetValue(const void* number, int type, void* value)
 		return 1;
 	}
 
-	*(int*)value = 0;
-	return 0;
+	if (CFGetTypeID(number) != CF_TYPE_ID_NUMBER)
+		return 0;
+
+	const struct cf_number* cf_number = number;
+	switch (type) {
+	case 16:
+	case 17:
+	case 18:
+	case 19:
+		*(double*)value = cf_number->double_value;
+		break;
+	case 7:
+	case 8:
+	case 9:
+	case 10:
+	case 11:
+	case 12:
+	case 13:
+	case 14:
+	case 15:
+		*(int64_t*)value = cf_number->signed_value;
+		break;
+	default:
+		*(int*)value = (int)cf_number->signed_value;
+		break;
+	}
+	return 1;
 }
 
 const void* CFDateCreate(CFAllocatorRef allocator, CFAbsoluteTime at)
@@ -1045,15 +1769,19 @@ int sysctlnametomib(const char* name, int* mib, size_t* mib_length)
 		size_t length;
 	};
 
-	static const struct mib_entry entries[] = {
-		{ "kern.ostype", { 1, 1 }, 2 },
-		{ "kern.osrelease", { 1, 2 }, 2 },
-		{ "kern.version", { 1, 4 }, 2 },
-		{ "kern.argmax", { 1, 8 }, 2 },
-		{ "hw.machine", { 6, 1 }, 2 },
-		{ "hw.model", { 6, 2 }, 2 },
-		{ "hw.ncpu", { 6, 3 }, 2 },
-		{ "hw.byteorder", { 6, 4 }, 2 },
+static const struct mib_entry entries[] = {
+	{ "kern.ostype", { 1, 1 }, 2 },
+	{ "kern.osrelease", { 1, 2 }, 2 },
+	{ "kern.version", { 1, 4 }, 2 },
+	{ "kern.argmax", { 1, 8 }, 2 },
+	{ "kern.hostname", { 1, 10 }, 2 },
+	{ "kern.osversion", { 1, 65 }, 2 },
+	{ "kern.osproductversion", { 1, 140 }, 2 },
+	{ "kern.osproductversioncompat", { 1, 141 }, 2 },
+	{ "hw.machine", { 6, 1 }, 2 },
+	{ "hw.model", { 6, 2 }, 2 },
+	{ "hw.ncpu", { 6, 3 }, 2 },
+	{ "hw.byteorder", { 6, 4 }, 2 },
 		{ "hw.memsize", { 6, 24 }, 2 },
 		{ "hw.pagesize", { 6, 7 }, 2 },
 		{ "hw.logicalcpu", { 6, 103 }, 2 },
@@ -1530,6 +2258,36 @@ static int (*real_pthread_rwlock_rdlock)(pthread_rwlock_t *);
 static int (*real_pthread_rwlock_wrlock)(pthread_rwlock_t *);
 static int (*real_pthread_rwlock_unlock)(pthread_rwlock_t *);
 
+static int shim_trace_enabled(void);
+static int darwin_signal_to_linux(int darwin_signal);
+
+#define DARWIN_TSD_FIRST_KEY 128
+#define DARWIN_TSD_LAST_KEY 511
+#define DARWIN_TSD_KEY_COUNT (DARWIN_TSD_LAST_KEY - DARWIN_TSD_FIRST_KEY + 1)
+
+static unsigned int next_darwin_tsd_key = DARWIN_TSD_FIRST_KEY;
+static void (*darwin_tsd_destructors[DARWIN_TSD_KEY_COUNT])(void *);
+static __thread void *darwin_tsd_values[DARWIN_TSD_KEY_COUNT];
+
+static inline uintptr_t *darwin_tsd_mirror_base(void)
+{
+#if defined(__aarch64__)
+	uintptr_t *result;
+	__asm__ volatile("mrs %0, tpidr_el0" : "=r"(result));
+	return result;
+#else
+	return NULL;
+#endif
+}
+
+static inline int darwin_tsd_key_index(pthread_key_t key)
+{
+	unsigned int value = (unsigned int)key;
+	if (value < DARWIN_TSD_FIRST_KEY || value > DARWIN_TSD_LAST_KEY)
+		return -1;
+	return (int)(value - DARWIN_TSD_FIRST_KEY);
+}
+
 __attribute__((constructor(101)))
 static void init_pthread_wrappers(void)
 {
@@ -1620,6 +2378,55 @@ int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
 int pthread_mutex_destroy(pthread_mutex_t *mutex)
 {
 	return real_pthread_mutex_destroy(mutex);
+}
+
+int pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
+{
+	unsigned int value;
+	int index;
+
+	value = __sync_fetch_and_add(&next_darwin_tsd_key, 1);
+	if (value > DARWIN_TSD_LAST_KEY)
+		return EAGAIN;
+
+	index = (int)(value - DARWIN_TSD_FIRST_KEY);
+	darwin_tsd_destructors[index] = destructor;
+	darwin_tsd_values[index] = NULL;
+	*key = (pthread_key_t)value;
+
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_key_create -> %u\n", value);
+
+	return 0;
+}
+
+int pthread_setspecific(pthread_key_t key, const void *value)
+{
+	uintptr_t *mirror_base;
+	int index = darwin_tsd_key_index(key);
+
+	if (index < 0)
+		return EINVAL;
+
+	darwin_tsd_values[index] = (void *)value;
+	mirror_base = darwin_tsd_mirror_base();
+	if (mirror_base)
+		mirror_base[(unsigned int)key] = (uintptr_t)value;
+
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_setspecific(%u, %p)\n",
+		        (unsigned int)key, value);
+
+	return 0;
+}
+
+void *pthread_getspecific(pthread_key_t key)
+{
+	int index = darwin_tsd_key_index(key);
+
+	if (index < 0)
+		return NULL;
+	return darwin_tsd_values[index];
 }
 
 static int shim_trace_enabled(void)
@@ -1767,6 +2574,25 @@ int pthread_create(pthread_t* thread, const pthread_attr_t* attr,
 		        start_routine, arg, attr, slot ? (void*)&slot->native : NULL);
 	return real_pthread_create(thread, slot ? &slot->native : attr,
 	                           start_routine, arg);
+}
+
+int pthread_kill(pthread_t thread, int signum)
+{
+	static int (*real_pthread_kill)(pthread_t, int) = NULL;
+	int linux_signal = darwin_signal_to_linux(signum);
+
+	if (signum == 16) {
+		if (shim_trace_enabled())
+			fprintf(stderr, "libsystem_shim: pthread_kill(%lu, %d->%d) ignored\n",
+			        (unsigned long)thread, signum, linux_signal);
+		return 0;
+	}
+
+	if (!real_pthread_kill)
+		real_pthread_kill = dlsym(RTLD_NEXT, "pthread_kill");
+	if (!real_pthread_kill)
+		return ENOSYS;
+	return real_pthread_kill(thread, linux_signal);
 }
 
 void* pthread_get_stackaddr_np(pthread_t thread)
@@ -2139,6 +2965,7 @@ static int darwin_signal_to_linux(int darwin_signal)
 	case 13: return SIGPIPE;
 	case 14: return SIGALRM;
 	case 15: return SIGTERM;
+	case 16: return SIGURG;
 	case 17: return SIGSTOP;
 	case 18: return SIGTSTP;
 	case 19: return SIGCONT;
@@ -2172,6 +2999,7 @@ static int linux_signal_to_darwin(int linux_signal)
 	case SIGPIPE: return 13;
 	case SIGALRM: return 14;
 	case SIGTERM: return 15;
+	case SIGURG: return 16;
 	case SIGSTOP: return 17;
 	case SIGTSTP: return 18;
 	case SIGCONT: return 19;
@@ -2423,13 +3251,35 @@ int sigwait(const sigset_t *set, int *sig)
 
 /* ===== sysctl ===== */
 
-/* Apple <sys/sysctl.h> MIB constants we answer (CTL_HW family). */
+/* Apple <sys/sysctl.h> MIB constants we answer. */
+#define DARWIN_CTL_KERN     1
 #define DARWIN_CTL_HW       6
+#define DARWIN_KERN_OSTYPE  1
+#define DARWIN_KERN_OSRELEASE 2
+#define DARWIN_KERN_VERSION 4
+#define DARWIN_KERN_ARGMAX  8
+#define DARWIN_KERN_HOSTNAME 10
+#define DARWIN_KERN_OSVERSION 65
+#define DARWIN_KERN_OSPRODUCTVERSION 140
+#define DARWIN_KERN_OSPRODUCTVERSION_COMPAT 141
+#define DARWIN_HW_MACHINE   1
+#define DARWIN_HW_MODEL     2
 #define DARWIN_HW_NCPU      3
+#define DARWIN_HW_BYTEORDER 4
 #define DARWIN_HW_PHYSMEM   5
 #define DARWIN_HW_PAGESIZE  7
 #define DARWIN_HW_MEMSIZE   24
 #define DARWIN_HW_AVAILCPU  25
+#define DARWIN_HW_PHYSICALCPU 101
+#define DARWIN_HW_LOGICALCPU 103
+
+static const char darwin_ostype[] = "Darwin";
+static const char darwin_osrelease[] = "24.6.0";
+static const char darwin_version[] = "Darwin Kernel Version 24.6.0: MachGate";
+static const char darwin_osversion[] = "24G84";
+static const char darwin_osproductversion[] = "15.6";
+static const char darwin_machine[] = "arm64";
+static const char darwin_model[] = "VirtualMac2,1";
 
 static int shim_hw_ncpu(void)
 {
@@ -2446,6 +3296,57 @@ static uint64_t shim_hw_memsize(void)
 	return (uint64_t)pages * (uint64_t)psize;
 }
 
+static int shim_sysctl_copy(const void* value, size_t value_size, void* oldp,
+                            size_t* oldlenp)
+{
+	if (!oldlenp) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (!oldp) {
+		*oldlenp = value_size;
+		return 0;
+	}
+
+	if (*oldlenp < value_size) {
+		*oldlenp = value_size;
+		errno = ENOMEM;
+		return -1;
+	}
+
+	memcpy(oldp, value, value_size);
+	*oldlenp = value_size;
+	return 0;
+}
+
+static int shim_sysctl_copy_int(int value, void* oldp, size_t* oldlenp)
+{
+	return shim_sysctl_copy(&value, sizeof(value), oldp, oldlenp);
+}
+
+static int shim_sysctl_copy_uint64(uint64_t value, void* oldp,
+                                   size_t* oldlenp)
+{
+	return shim_sysctl_copy(&value, sizeof(value), oldp, oldlenp);
+}
+
+static int shim_sysctl_copy_string(const char* value, void* oldp,
+                                   size_t* oldlenp)
+{
+	return shim_sysctl_copy(value, strlen(value) + 1, oldp, oldlenp);
+}
+
+static int shim_sysctl_copy_hostname(void* oldp, size_t* oldlenp)
+{
+	char hostname[256];
+
+	if (gethostname(hostname, sizeof(hostname)) != 0)
+		snprintf(hostname, sizeof(hostname), "%s", "machgate");
+	hostname[sizeof(hostname) - 1] = '\0';
+	return shim_sysctl_copy_string(hostname, oldp, oldlenp);
+}
+
 /* sysctl — answer the hardware MIBs games actually read.
  *
  * CRITICAL: returning -1 without writing *oldp leaves the caller reading
@@ -2460,37 +3361,61 @@ int sysctl(const int *name, unsigned int namelen,
 {
 	(void)newp; (void)newlen;
 
-	if (name && namelen >= 2 && name[0] == DARWIN_CTL_HW) {
+	if (name && namelen >= 2 && name[0] == DARWIN_CTL_KERN) {
 		switch (name[1]) {
-		case DARWIN_HW_NCPU:
-		case DARWIN_HW_AVAILCPU:
-			if (oldp && oldlenp && *oldlenp >= sizeof(int)) {
-				*(int *)oldp = shim_hw_ncpu();
-				*oldlenp = sizeof(int);
-				return 0;
-			}
-			if (oldlenp) { *oldlenp = sizeof(int); return 0; }
-			break;
-		case DARWIN_HW_PAGESIZE:
-			if (oldp && oldlenp && *oldlenp >= sizeof(int)) {
-				*(int *)oldp = (int)sysconf(_SC_PAGESIZE);
-				*oldlenp = sizeof(int);
-				return 0;
-			}
-			break;
-		case DARWIN_HW_MEMSIZE:
-		case DARWIN_HW_PHYSMEM:
-			if (oldp && oldlenp && *oldlenp >= sizeof(uint64_t)) {
-				*(uint64_t *)oldp = shim_hw_memsize();
-				*oldlenp = sizeof(uint64_t);
-				return 0;
-			}
-			break;
+		case DARWIN_KERN_OSTYPE:
+			return shim_sysctl_copy_string(darwin_ostype, oldp,
+			                               oldlenp);
+		case DARWIN_KERN_OSRELEASE:
+			return shim_sysctl_copy_string(darwin_osrelease, oldp,
+			                               oldlenp);
+		case DARWIN_KERN_VERSION:
+			return shim_sysctl_copy_string(darwin_version, oldp,
+			                               oldlenp);
+		case DARWIN_KERN_ARGMAX:
+			return shim_sysctl_copy_int(262144, oldp, oldlenp);
+		case DARWIN_KERN_HOSTNAME:
+			return shim_sysctl_copy_hostname(oldp, oldlenp);
+		case DARWIN_KERN_OSVERSION:
+			return shim_sysctl_copy_string(darwin_osversion, oldp,
+			                               oldlenp);
+		case DARWIN_KERN_OSPRODUCTVERSION:
+		case DARWIN_KERN_OSPRODUCTVERSION_COMPAT:
+			return shim_sysctl_copy_string(darwin_osproductversion,
+			                               oldp, oldlenp);
 		default:
 			break;
 		}
 	}
-	errno = ENOTSUP;
+
+	if (name && namelen >= 2 && name[0] == DARWIN_CTL_HW) {
+		switch (name[1]) {
+		case DARWIN_HW_MACHINE:
+			return shim_sysctl_copy_string(darwin_machine, oldp,
+			                               oldlenp);
+		case DARWIN_HW_MODEL:
+			return shim_sysctl_copy_string(darwin_model, oldp,
+			                               oldlenp);
+		case DARWIN_HW_NCPU:
+		case DARWIN_HW_AVAILCPU:
+		case DARWIN_HW_PHYSICALCPU:
+		case DARWIN_HW_LOGICALCPU:
+			return shim_sysctl_copy_int(shim_hw_ncpu(), oldp,
+			                            oldlenp);
+		case DARWIN_HW_BYTEORDER:
+			return shim_sysctl_copy_int(1234, oldp, oldlenp);
+		case DARWIN_HW_PAGESIZE:
+			return shim_sysctl_copy_int((int)sysconf(_SC_PAGESIZE),
+			                            oldp, oldlenp);
+		case DARWIN_HW_MEMSIZE:
+		case DARWIN_HW_PHYSMEM:
+			return shim_sysctl_copy_uint64(shim_hw_memsize(), oldp,
+			                               oldlenp);
+		default:
+			break;
+		}
+	}
+	errno = ENOENT;
 	return -1;
 }
 
@@ -2506,28 +3431,67 @@ int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
 		    !strcmp(name, "hw.availcpu")    ||
 		    !strcmp(name, "machdep.cpu.core_count") ||
 		    !strcmp(name, "machdep.cpu.thread_count")) {
-			if (oldp && oldlenp && *oldlenp >= sizeof(int)) {
-				*(int *)oldp = shim_hw_ncpu();
-				*oldlenp = sizeof(int);
-				return 0;
-			}
-			if (oldlenp) { *oldlenp = sizeof(int); return 0; }
+			return shim_sysctl_copy_int(shim_hw_ncpu(), oldp,
+			                            oldlenp);
 		} else if (!strcmp(name, "hw.memsize")) {
-			if (oldp && oldlenp && *oldlenp >= sizeof(uint64_t)) {
-				*(uint64_t *)oldp = shim_hw_memsize();
-				*oldlenp = sizeof(uint64_t);
-				return 0;
-			}
+			return shim_sysctl_copy_uint64(shim_hw_memsize(), oldp,
+			                               oldlenp);
 		} else if (!strcmp(name, "hw.pagesize")) {
-			if (oldp && oldlenp && *oldlenp >= sizeof(int)) {
-				*(int *)oldp = (int)sysconf(_SC_PAGESIZE);
-				*oldlenp = sizeof(int);
-				return 0;
-			}
+			return shim_sysctl_copy_int((int)sysconf(_SC_PAGESIZE),
+			                            oldp, oldlenp);
+		} else if (!strcmp(name, "hw.byteorder")) {
+			return shim_sysctl_copy_int(1234, oldp, oldlenp);
+		} else if (!strcmp(name, "hw.optional.arm64")) {
+			return shim_sysctl_copy_int(1, oldp, oldlenp);
+		} else if (!strcmp(name, "hw.machine")) {
+			return shim_sysctl_copy_string(darwin_machine, oldp,
+			                               oldlenp);
+		} else if (!strcmp(name, "hw.model")) {
+			return shim_sysctl_copy_string(darwin_model, oldp,
+			                               oldlenp);
+		} else if (!strcmp(name, "kern.ostype")) {
+			return shim_sysctl_copy_string(darwin_ostype, oldp,
+			                               oldlenp);
+		} else if (!strcmp(name, "kern.osrelease")) {
+			return shim_sysctl_copy_string(darwin_osrelease, oldp,
+			                               oldlenp);
+		} else if (!strcmp(name, "kern.version")) {
+			return shim_sysctl_copy_string(darwin_version, oldp,
+			                               oldlenp);
+		} else if (!strcmp(name, "kern.hostname")) {
+			return shim_sysctl_copy_hostname(oldp, oldlenp);
+		} else if (!strcmp(name, "kern.argmax")) {
+			return shim_sysctl_copy_int(262144, oldp, oldlenp);
+		} else if (!strcmp(name, "kern.osversion")) {
+			return shim_sysctl_copy_string(darwin_osversion, oldp,
+			                               oldlenp);
+		} else if (!strcmp(name, "kern.osproductversion") ||
+		           !strcmp(name, "kern.osproductversioncompat")) {
+			return shim_sysctl_copy_string(darwin_osproductversion,
+			                               oldp, oldlenp);
 		}
 	}
-	errno = ENOTSUP;
+	errno = ENOENT;
 	return -1;
+}
+
+int uname(void* buffer)
+{
+	char* bytes = buffer;
+
+	if (!bytes) {
+		errno = EFAULT;
+		return -1;
+	}
+
+	memset(bytes, 0, 256 * 5);
+	snprintf(bytes, 256, "%s", darwin_ostype);
+	if (gethostname(bytes + 256, 256) != 0)
+		snprintf(bytes + 256, 256, "%s", "machgate");
+	snprintf(bytes + 512, 256, "%s", darwin_osrelease);
+	snprintf(bytes + 768, 256, "%s", darwin_version);
+	snprintf(bytes + 1024, 256, "%s", darwin_machine);
+	return 0;
 }
 
 /* ===== Blocks runtime (stubs) ===== */
@@ -3674,12 +4638,167 @@ void *shim_realloc(void *ptr, size_t size)
 	return new_ptr;
 }
 
+void* malloc_zone_malloc(void* zone, size_t size)
+{
+	(void)zone;
+	return shim_malloc(size);
+}
+
+void* malloc_zone_realloc(void* zone, void* ptr, size_t size)
+{
+	(void)zone;
+	return shim_realloc(ptr, size);
+}
+
+void malloc_zone_free(void* zone, void* ptr)
+{
+	(void)zone;
+	shim_free(ptr);
+}
+
+size_t malloc_size(const void* ptr);
+
+static size_t malloc_zone_size(void* zone, const void* ptr)
+{
+	(void)zone;
+	return malloc_size(ptr);
+}
+
+static void* malloc_zone_calloc(void* zone, size_t count, size_t size)
+{
+	(void)zone;
+	return shim_calloc(count, size);
+}
+
+static void* malloc_zone_valloc(void* zone, size_t size)
+{
+	(void)zone;
+	size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+	void* result = NULL;
+
+	if (page_size == 0)
+		page_size = 4096;
+	if (posix_memalign(&result, page_size, size) != 0)
+		return NULL;
+	return result;
+}
+
+static void malloc_zone_destroy(void* zone)
+{
+	(void)zone;
+}
+
+static unsigned malloc_zone_batch_malloc(void* zone, size_t size,
+                                         void** results, unsigned count)
+{
+	unsigned index;
+
+	(void)zone;
+	for (index = 0; index < count; index++) {
+		results[index] = shim_malloc(size);
+		if (!results[index])
+			break;
+	}
+	return index;
+}
+
+static void malloc_zone_batch_free(void* zone, void** pointers,
+                                   unsigned count)
+{
+	(void)zone;
+	for (unsigned index = 0; index < count; index++)
+		shim_free(pointers[index]);
+}
+
+static void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
+{
+	void* result = NULL;
+
+	(void)zone;
+	if (alignment < sizeof(void*))
+		alignment = sizeof(void*);
+	if (posix_memalign(&result, alignment, size) != 0)
+		return NULL;
+	return result;
+}
+
+static void malloc_zone_free_definite_size(void* zone, void* ptr, size_t size)
+{
+	(void)size;
+	malloc_zone_free(zone, ptr);
+}
+
+static size_t malloc_zone_pressure_relief(void* zone, size_t goal)
+{
+	(void)zone;
+	(void)goal;
+	return 0;
+}
+
+static int malloc_zone_claimed_address(void* zone, void* ptr)
+{
+	(void)zone;
+	(void)ptr;
+	return 0;
+}
+
+static void* malloc_zone_malloc_with_options(void* zone, size_t alignment,
+                                             size_t size, unsigned options)
+{
+	(void)options;
+	if (alignment)
+		return malloc_zone_memalign(zone, alignment, size);
+	return malloc_zone_malloc(zone, size);
+}
+
 struct machgate_malloc_zone {
-	const char* name;
+	void* reserved1;
+	void* reserved2;
+	size_t (*size)(void* zone, const void* ptr);
+	void* (*malloc)(void* zone, size_t size);
+	void* (*calloc)(void* zone, size_t count, size_t size);
+	void* (*valloc)(void* zone, size_t size);
+	void (*free)(void* zone, void* ptr);
+	void* (*realloc)(void* zone, void* ptr, size_t size);
+	void (*destroy)(void* zone);
+	const char* zone_name;
+	unsigned (*batch_malloc)(void* zone, size_t size, void** results,
+	                         unsigned count);
+	void (*batch_free)(void* zone, void** pointers, unsigned count);
+	void* introspect;
+	unsigned version;
+	void* (*memalign)(void* zone, size_t alignment, size_t size);
+	void (*free_definite_size)(void* zone, void* ptr, size_t size);
+	size_t (*pressure_relief)(void* zone, size_t goal);
+	int (*claimed_address)(void* zone, void* ptr);
+	void (*try_free_default)(void* zone, void* ptr);
+	void* (*malloc_with_options)(void* zone, size_t alignment, size_t size,
+	                             unsigned options);
+	void* (*aligned_malloc)(void* zone, size_t alignment, size_t size);
 };
 
 static struct machgate_malloc_zone default_malloc_zone = {
-	"MachGate default malloc zone"
+	NULL,
+	NULL,
+	malloc_zone_size,
+	malloc_zone_malloc,
+	malloc_zone_calloc,
+	malloc_zone_valloc,
+	malloc_zone_free,
+	malloc_zone_realloc,
+	malloc_zone_destroy,
+	"MachGate default malloc zone",
+	malloc_zone_batch_malloc,
+	malloc_zone_batch_free,
+	NULL,
+	9,
+	malloc_zone_memalign,
+	malloc_zone_free_definite_size,
+	malloc_zone_pressure_relief,
+	malloc_zone_claimed_address,
+	malloc_zone_free,
+	malloc_zone_malloc_with_options,
+	malloc_zone_memalign
 };
 
 void* malloc_default_zone(void)
@@ -3699,25 +4818,7 @@ void malloc_set_zone_name(void* zone, const char* name)
 	struct machgate_malloc_zone* machgate_zone = zone;
 	if (!machgate_zone)
 		return;
-	machgate_zone->name = name;
-}
-
-void* malloc_zone_malloc(void* zone, size_t size)
-{
-	(void)zone;
-	return shim_malloc(size);
-}
-
-void* malloc_zone_realloc(void* zone, void* ptr, size_t size)
-{
-	(void)zone;
-	return shim_realloc(ptr, size);
-}
-
-void malloc_zone_free(void* zone, void* ptr)
-{
-	(void)zone;
-	shim_free(ptr);
+	machgate_zone->zone_name = name;
 }
 
 size_t malloc_size(const void* ptr)

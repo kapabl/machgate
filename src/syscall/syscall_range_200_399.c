@@ -351,6 +351,7 @@
 #define DARWIN_KERN_OSREV     3
 #define DARWIN_KERN_VERSION   4
 #define DARWIN_KERN_ARGMAX    8
+#define DARWIN_KERN_HOSTNAME  10
 
 #define DARWIN_HW_MACHINE      1
 #define DARWIN_HW_NCPU         3
@@ -1327,6 +1328,9 @@ static void handle_kern_sysctl(struct syscall_gate_state* state, int selector,
 	case DARWIN_KERN_ARGMAX:
 		finish_sysctl_int(state, 262144, oldp, oldlenp);
 		return;
+	case DARWIN_KERN_HOSTNAME:
+		finish_sysctl_string(state, "machgate", oldp, oldlenp);
+		return;
 	default:
 		set_enosys(state);
 		return;
@@ -1426,6 +1430,11 @@ static void handle_sysctlbyname(struct syscall_gate_state* state)
 
 	if (sysctl_name_matches(name, name_length, "kern.argmax")) {
 		finish_sysctl_int(state, 262144, oldp, oldlenp);
+		return;
+	}
+
+	if (sysctl_name_matches(name, name_length, "kern.hostname")) {
+		finish_sysctl_string(state, "machgate", oldp, oldlenp);
 		return;
 	}
 

@@ -58,6 +58,10 @@ static void fixup_darwin_pthread_data(struct load_results* lr);
 static void setup_tlv_image(struct load_results* lr);
 static int native_prot(int prot);
 static void setup_space(struct load_results* lr, bool is_64_bit);
+static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
+                                        uintptr_t text_end,
+                                        size_t pool_size,
+                                        struct load_results* lr);
 static void start_thread(struct load_results* lr);
 static void setup_stack64(const char* filepath, struct load_results* lr);
 static void lc_main_return(int status) __attribute__((noreturn));
@@ -73,6 +77,40 @@ void* __machismo_main_stack_top = NULL;
 size_t __machismo_main_stack_size = 0;
 int __machismo_guest_argc = 0;
 char** __machismo_guest_argv = NULL;
+
+static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
+                                        uintptr_t text_end,
+                                        size_t pool_size,
+                                        struct load_results* lr)
+{
+	if (text_begin && text_end > text_begin) {
+#ifdef MAP_FIXED_NOREPLACE
+		uintptr_t page_mask = (uintptr_t)PAGE_SIZE - 1;
+		uintptr_t aligned_size = (pool_size + page_mask) & ~page_mask;
+		uintptr_t span = text_end - text_begin;
+
+		if (span + aligned_size < 128 * 1024 * 1024) {
+			uintptr_t preferred = (text_begin - aligned_size) & ~page_mask;
+			void* mapped = mmap((void*)preferred, aligned_size,
+			                    PROT_READ | PROT_WRITE | PROT_EXEC,
+			                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+			                    -1, 0);
+			if (mapped != MAP_FAILED) {
+				fprintf(stderr, "machismo: LSE island pool at %p (before __TEXT)\n",
+				        mapped);
+				return (uint32_t*)mapped;
+			}
+		}
+#endif
+	}
+
+	uint32_t* result = (uint32_t*)machismo_pool_alloc(lr, pool_size);
+	if (result) {
+		fprintf(stderr, "machismo: LSE island pool at %p (adjacent to segments)\n",
+		        result);
+	}
+	return result;
+}
 
 int machismo_verbose = 0;
 
@@ -194,29 +232,32 @@ int main(int argc, char** argv, char** envp)
 		uint8_t* cmds = (uint8_t*)(mh + 1);
 		uint32_t p = 0;
 		int rcpc_fixed = 0;
+		int tpidr_fixed = 0;
 
-		/* Allocate island pool for LSE emulation (near __TEXT for B range).
-		 * Find the end of the last executable segment for placement. */
+		/* Allocate island pool for LSE emulation (near __TEXT for B range). */
+		uintptr_t text_begin = 0;
 		uintptr_t text_end = 0;
 		uint32_t lp = 0;
 		for (uint32_t li = 0; li < mh->ncmds && lp < mh->sizeofcmds; li++) {
 			struct load_command* llc = (struct load_command*)(cmds + lp);
 			if (llc->cmd == LC_SEGMENT_64) {
 				struct segment_command_64* lseg = (struct segment_command_64*)llc;
+				uintptr_t seg_start = lseg->vmaddr + machismo_load_results.slide;
 				uintptr_t seg_end = lseg->vmaddr + machismo_load_results.slide + lseg->vmsize;
-				if ((lseg->maxprot & VM_PROT_EXECUTE) && seg_end > text_end)
-					text_end = seg_end;
+				if (lseg->maxprot & VM_PROT_EXECUTE) {
+					if (!text_begin || seg_start < text_begin)
+						text_begin = seg_start;
+					if (seg_end > text_end)
+						text_end = seg_end;
+				}
 			}
 			lp += llc->cmdsize;
 		}
-		/* Carve LSE pool from the adjacent pool reserved by the loader */
 		size_t lse_pool_size = 2 * 1024 * 1024;
-		uint32_t* lse_pool = (uint32_t*)machismo_pool_alloc(
-			&machismo_load_results, lse_pool_size);
-		if (lse_pool) {
-			fprintf(stderr, "machismo: LSE island pool at %p (adjacent to segments)\n",
-			        lse_pool);
-		} else {
+		uint32_t* lse_pool = allocate_main_lse_pool(text_begin, text_end,
+		                                            lse_pool_size,
+		                                            &machismo_load_results);
+		if (!lse_pool) {
 			fprintf(stderr, "machismo: WARNING: LSE pool alloc failed — LSE atomics will SIGILL\n");
 		}
 
@@ -249,6 +290,10 @@ int main(int argc, char** argv, char** envp)
 								scode[j] = (scode[j] & 0xC00003FF) | 0x08DFFC00;
 								rcpc_fixed++;
 							}
+							if (scode[j] == 0xd53bd060u) {
+								scode[j] = 0xd53bd040u;
+								tpidr_fixed++;
+							}
 						}
 
 						/* LSE: replace with B to island */
@@ -269,6 +314,8 @@ int main(int argc, char** argv, char** envp)
 			__builtin___clear_cache((char*)lse_pool, (char*)lse_pool + lse_pool_size);
 		if (rcpc_fixed > 0)
 			fprintf(stderr, "machismo: downgraded %d ARMv8.3 RCPC instructions to ARMv8.0\n", rcpc_fixed);
+		if (tpidr_fixed > 0)
+			fprintf(stderr, "machismo: rewrote %d Darwin TPIDRRO reads to Linux TPIDR reads\n", tpidr_fixed);
 		if (lse_total > 0)
 			fprintf(stderr, "machismo: patched %d ARMv8.1 LSE atomics with LDXR/STXR islands\n", lse_total);
 	}
@@ -338,6 +385,7 @@ int main(int argc, char** argv, char** envp)
 			uint8_t *dcmds = (uint8_t*)(dmh + 1);
 			uint32_t dp = 0;
 			int dfix = 0;
+			int dtpidr = 0;
 
 			/* Use the dylib's preallocated adjacent pool for LSE islands */
 			size_t dylib_pool_size = mdi->pool_size;
@@ -361,6 +409,10 @@ int main(int argc, char** argv, char** envp)
 								code[dj] = (code[dj] & 0xC00003FF) | 0x08DFFC00;
 								dfix++;
 							}
+							if (code[dj] == 0xd53bd060u) {
+								code[dj] = 0xd53bd040u;
+								dtpidr++;
+							}
 						}
 						if (dylib_lse_cur) {
 							int ln = isa_emul_patch(code, dseg->vmsize,
@@ -380,6 +432,9 @@ int main(int argc, char** argv, char** envp)
 			if (dfix > 0)
 				fprintf(stderr, "machismo: downgraded %d RCPC instructions in dylib '%s'\n",
 				        dfix, mdi->path);
+			if (dtpidr > 0)
+				fprintf(stderr, "machismo: rewrote %d Darwin TPIDRRO reads in dylib '%s'\n",
+				        dtpidr, mdi->path);
 			if (dln > 0)
 				fprintf(stderr, "machismo: patched %d LSE atomics in dylib '%s' (pool at %p)\n",
 				        dln, mdi->path, dylib_lse_pool);

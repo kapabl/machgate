@@ -47,11 +47,12 @@ else
     echo "Using GCC (clang not found)"
 fi
 
-# Verify we're on the darwin-abi-compat branch (not upstream LLVM)
-BRANCH=$(cd "$SRC_DIR" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
-if [ "$BRANCH" != "darwin-abi-compat" ]; then
-    echo "Switching to darwin-abi-compat branch..."
-    (cd "$SRC_DIR" && git checkout darwin-abi-compat)
+# Verify this checkout has the Darwin ABI compatibility patches.
+if ! grep -q "_LIBCPP_ABI_DARWIN_MBSTATE_COMPAT" "$SRC_DIR/libcxx/include/__ios/fpos.h" ||
+   ! grep -q "_LIBCPP_DARWIN_MUTEX_SIZE" "$SRC_DIR/libcxx/include/__threading_support"; then
+    echo "Error: $SRC_DIR does not have the Darwin ABI compatibility libc++ patches"
+    echo "Run: git submodule update --init extern/llvm-project"
+    exit 1
 fi
 
 echo "Configuring Apple-ABI libc++ build..."
@@ -73,7 +74,10 @@ cmake -G Ninja -S "$SRC_DIR/runtimes" -B "$BUILD_DIR" \
     -DLIBCXXABI_INCLUDE_TESTS=OFF
 
 echo ""
-echo "Configuration complete. To build:"
-echo "  cd $BUILD_DIR && ninja cxx cxxabi"
+echo "Building Apple-ABI libc++..."
+cmake --build "$BUILD_DIR" --target cxx cxxabi --parallel
+
 echo ""
-echo "Output will be in $BUILD_DIR/lib/"
+echo "Output:"
+echo "  $BUILD_DIR/lib/libc++.so.1"
+echo "  $BUILD_DIR/lib/libc++abi.so.1"

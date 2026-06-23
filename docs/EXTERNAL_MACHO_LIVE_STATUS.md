@@ -1,174 +1,89 @@
 # External Mach-O Live Status
 
-This is the visible status board for the 50-binary external Mach-O expansion loop.
+This is the visible status board for the external ARM64 macOS CLI corpus.
 
 ## Current Snapshot
 
-- Agents launched: 5
-- Agents completed: 5
-- Agents still running: 0
-- Existing canonical rows: 10
-- New worker candidate rows: 47
-- Visible total before merge: 57
-- New worker candidates passing: 9 / 47
-- Original canonical passing at last run: 9 / 10
-- Total visible passing: 18 / 57
-- Total visible not passing yet: 39 / 57
-- Fix-loop agents launched: 5
-- Fix-loop agents completed: 5
-- Blocking classes fixed or reclassified: 8
+Last refreshed: 2026-06-23
 
-## Full 57-Binary Inventory
+Command:
 
-The 57 visible binaries are all accounted for:
+```sh
+docker run --rm --platform linux/arm64 \
+  -v /home/kapablanka/repos/machgate:/work \
+  -v /tmp/machgate-current-external-all.txt:/tmp/machgate-current-external-all.txt:ro \
+  -w /work machgate-arm64-toolchain bash -lc '
+    cmake --build build-arm64 --target machismo system_shim --parallel
+    MACHGATE_RUN_EXTERNAL=1 \
+    BUILD_DIR=/work/build-arm64 \
+    MACHGATE_EXTERNAL_MANIFEST=/tmp/machgate-current-external-all.txt \
+    MACHGATE_EXTERNAL_MAP_LIBCXX=1 \
+    MACHGATE_EXTERNAL_LOGS=/work/tests/external/logs/full-loop-2026-06-23-D-libcxx \
+    MACHGATE_EXTERNAL_WORK=/work/tests/external/work/full-loop-2026-06-23-D-libcxx \
+    MACHGATE_EXTERNAL_TIMEOUT=120 \
+    bash tests/test_external_macho_cli.sh'
+```
 
-| Group | Count | Status |
-| --- | ---: | --- |
-| Original canonical corpus | 10 | 9 pass, 1 fail (`yq`) |
-| New passing rows merged into canonical | 9 | 9 pass |
-| New worker rows not passing yet | 38 | classified/reclassified, not merged as passing |
-| Total visible corpus | 57 | 18 pass, 39 not passing |
+Result:
 
-The canonical manifest currently contains 19 rows:
+- Total visible unique external binaries: 57
+- Last full-corpus passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 48 / 57 (84.2%)
+- Last full-corpus not passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 9 / 57 (15.8%)
+- Last full-corpus passing without libc++ opt-in: 45 / 57 (78.9%)
+- Last full-corpus not passing without libc++ opt-in: 12 / 57 (21.1%)
+- Previous full corpus before the `sqlite3` fix: 44 / 57 (77.2%)
+- Canonical manifest: 19 / 19 passing
+- Go TLS/signal group: `yq`, `fzf`, `gum`, `shfmt` all passing
+- Full-corpus promoted fixes since the 45/57 baseline: `vault`, `duckdb`, and `node`.
+- Agent status: no active local Codex, Grok, or Claude helper agents in this loop.
 
-- original 10 rows
-- 9 newly passing rows
+## Passing Binaries
 
-Canonical suite result:
+`ripgrep`, `fd`, `hyperfine`, `bat`, `jq`, `yq`, `starship`, `delta`,
+`bottom`, `just`, `zoxide`, `sd`, `git-cliff`, `sccache`,
+`cargo-binstall`, `hexyl`, `pastel`, `atuin`, `ninja`, `procs`, `fzf`,
+`gh`, `lazygit`, `glow`, `gum`, `goreleaser`, `chezmoi`, `duf`, `shfmt`,
+`fx`, `kubectl`, `k9s`, `kind`, `minikube`, `argocd`, `flux`, `kubeseal`,
+`stern`, `helm`, `consul`, `boundary`, `tofu`, `terragrunt`, `pulumi`,
+`sqlite3`, `vault`, `duckdb`, `node`.
 
-- `18/19` pass
-- only canonical failure: `yq`
+## Current Non-Passing Binaries
 
-The remaining 38 new non-passing rows are tracked in the worker reports and classification sections below. They are not in the canonical passing manifest yet because they do not produce reproducible successful probes.
-
-## Worker Results
-
-| Worker | Agent | Scope | Candidates | Result | Status |
-| --- | --- | --- | ---: | --- | --- |
-| 1 | `Ohm` / `019ef2f7-a856-74f1-80ef-a93830120a39` | Rust terminal tools | 10 | 8 pass, 2 fail | complete |
-| 2 | `Carver` / `019ef2f7-c70b-7131-b4c0-4543d1da69f1` | Go terminal tools | 10 | 0 pass, 10 fail | complete |
-| 3 | `Archimedes` / `019ef2f7-edeb-79b2-8846-cca60912d595` | Kubernetes/cloud CLIs | 10 | 0 pass, 10 fail | complete |
-| 4 | `Wegener` / `019ef2f8-16b7-7450-8558-c19c475a2674` | HashiCorp/infra CLIs | 9 | 0 pass, 9 fail | complete |
-| 5 | `Schrodinger` / `019ef2f8-4553-7fc0-8b2d-79fbb4b075c0` | C/C++/Zig/single-binary utilities | 8 | environment block removed; 1 pass, 7 real failures | complete |
-
-Worker reports:
-
-- `docs/external-workers/worker-1.md`
-- `docs/external-workers/worker-2.md`
-- `docs/external-workers/worker-3.md`
-- `docs/external-workers/worker-4.md`
-- `docs/external-workers/worker-5.md`
-
-Worker manifests:
-
-- `tests/external/worker_manifests/worker-1.txt`
-- `tests/external/worker_manifests/worker-2.txt`
-- `tests/external/worker_manifests/worker-3.txt`
-- `tests/external/worker_manifests/worker-4.txt`
-- `tests/external/worker_manifests/worker-5.txt`
-
-## Passing New Candidates
-
-Worker 1 found 8 new ARM64 macOS CLI binaries that already pass:
-
-- `zoxide`
-- `sd`
-- `git-cliff`
-- `sccache`
-- `cargo-binstall`
-- `hexyl`
-- `pastel`
-- `atuin`
-
-Worker E converted Worker 5 from environment-blocked to real ARM64 Docker data and found 1 additional passing binary:
-
-- `ninja`
-
-## Failing New Candidates
-
-Current Worker 1 failures after fix loop:
-
-- `procs`: libproc/sysctl imports now resolve; still `SIGSEGV` after `_main`.
-- `nu`: LSE pool exhaustion fixed; still reaches `_main` and crashes later with missing remaining shim/startup issues.
-
-Current Worker 2 failures after fix loop:
-
-- `fzf`, `gum`, `shfmt`: reclassified with guest PC evidence; Go LC_MAIN pattern, `x0=NULL`, instruction `0x3980001b`.
-- `gh`, `lazygit`, `glow`, `goreleaser`, `chezmoi`: Worker D-owned CF/process imports now resolve; still `SIGSEGV` after `_main`.
-- `duf`: `getfsstat` now resolves; still `SIGSEGV` after `_main`.
-- `fx`: LSE island crash fixed; now reaches `_main` and joins startup/SIGSEGV bucket.
-
-Current Worker 3 failures after fix loop:
-
-- `kubectl`, `helm`, `kind`, `argocd`, `flux`, `stern`: Worker D-owned CF/process imports now resolve; still `SIGSEGV` after `_main`.
-- `k9s`: syscall island range fixed; reaches `_main`, then `SIGSEGV si_addr=NULL`.
-- `tilt`: syscall island range fixed; reclassified to startup `SIGSEGV si_addr=0x0000000179a548dc`.
-- `minikube`, `kubeseal`: LSE island crash fixed; now reach `_main` and join startup/SIGSEGV bucket.
-
-Current Worker 4 failures after fix loop:
-
-- `terraform`, `packer`, `terragrunt`: Worker D-owned CF/getfsstat imports now resolve; still `SIGSEGV` after `_main`.
-- `vault`, `consul`, `boundary`, `tofu`, `pulumi`: syscall island range fixed; reach `_main`, then `SIGSEGV si_addr=NULL`.
-- `nomad`: loader mmap failure fixed; reaches resolver, syscall patching, `_main`, then `SIGSEGV si_addr=NULL`.
-
-Current Worker 5 result after ARM64 Docker rerun:
-
-- `ninja`: PASS.
-- `cmake`: runs 326 constructors, then `SIGSEGV si_addr=NULL`.
-- `sqlite3`: reaches `_main`, exits with `Error: out of memory`; still has non-covered malloc-zone/fsctl/gethostuuid surface.
-- `duckdb`: reaches runtime startup, then `SIGSEGV`.
-- `node`: timeout; still has large-binary LSE range warnings and missing remaining CF symbols.
-- `bun`: runs one constructor, then `SIGSEGV si_addr=NULL`; missing CommonCrypto/Block symbols.
-- `protoc`: runs 5 constructors, then `SIGSEGV si_addr=0x10`.
-- `nvim`: crashes during EH-frame/runtime path; missing Mach/semaphore/spawn surface.
-
-## Problem Buckets Found
-
-1. Go `LC_MAIN` startup crash after entry.
-2. Broader post-`_main` startup/runtime `SIGSEGV` across Go/Rust/C++ binaries.
-3. Remaining non-covered shim surface: Security/libresolv/libiconv, CommonCrypto/Blocks, malloc-zone/fsctl/gethostuuid, Mach/semaphore/spawn.
-4. Large-binary LSE range warnings still visible for `node`.
-5. Rust TLV/signal/bootstrap crash path from the original `just` failure.
-
-## Error Classification
-
-The original 39 non-passing new worker rows have been reprocessed. The environment-blocked group is gone; Worker 5 now has real ARM64 Docker results. Current new-worker result is 9 passing and 38 failing.
-
-| Class | Count | Binaries | Meaning |
+| Class | Count | Binaries | Current evidence |
 | --- | ---: | --- | --- |
-| FIXED-PASS | 9 | `zoxide`, `sd`, `git-cliff`, `sccache`, `cargo-binstall`, `hexyl`, `pastel`, `atuin`, `ninja` | These new external binaries pass through MachGate. |
-| FIXED-RECLASSIFIED-LSE | 4 | `fx`, `minikube`, `kubeseal`, `nu` | LSE island crash/exhaustion is fixed; these now reach resolver and/or `_main` and fail later. |
-| FIXED-RECLASSIFIED-SYSCALL-ISLAND | 7 | `k9s`, `tilt`, `vault`, `consul`, `boundary`, `tofu`, `pulumi` | Syscall branch-island range abort is fixed; these now reach startup/runtime failure. |
-| FIXED-RECLASSIFIED-SHIM-IMPORTS | 16 | `gh`, `lazygit`, `glow`, `goreleaser`, `chezmoi`, `kubectl`, `helm`, `kind`, `argocd`, `flux`, `stern`, `terraform`, `packer`, `terragrunt`, `procs`, `duf` | Worker D-owned missing CF/process/libproc/getfsstat imports are fixed; these still crash after `_main`. |
-| FIXED-RECLASSIFIED-LOADER | 1 | `nomad` | Loader mmap range failure is fixed; it reaches `_main` and fails later. |
-| GO-LCMAIN-PC-EVIDENCE | 4 | `fzf`, `gum`, `shfmt`, original `yq` | Common Go LC_MAIN crash has concrete PC evidence: `x0=NULL`, instruction `0x3980001b`. |
-| RUST-STARTUP-PC-EVIDENCE | 1 | original `just` | Separate Rust startup/signal crash: `x8=NULL`, instruction `0xf940010a`. |
-| NEW-REAL-FAILURES-WORKER5 | 7 | `cmake`, `sqlite3`, `duckdb`, `node`, `bun`, `protoc`, `nvim` | Environment block is gone; these now have real failure logs and need classification in the next loop. |
+| SIGSEGV with missing shim/dylib surface | 5 | `nu`, `tilt`, `cmake`, `bun`, `protoc` | These crash with SIGSEGV and have unresolved or skipped dependency surface. `nu` improved from 92 to 43 failed binds after CF/CommonCrypto/libiconv/CoreServices work; `cmake`/`bun`/`protoc` now use opt-in libc++ mapping, but still need remaining shim/framework/runtime coverage. `tilt` still skips large framework/system surface. |
+| SIGSEGV after startup | 4 | `terraform`, `packer`, `nomad`, `nvim` | These reach `_main` and crash later. `terraform`/`packer` show NULL SIGSEGV after Go runtime startup; `nomad` no longer has missing `CFDictionaryAddValue`/`CFStringGetSystemEncoding`, but still crashes with skipped `IOKit`, `Security`, and `libresolv.9.dylib` surface plus LSE island range warnings; `nvim` now has 0 failed binds and crashes in libuv signal teardown. |
 
-Priority order after this fix loop:
+## Failure Details
 
-1. Investigate the Go LC_MAIN launch ABI: `x0=NULL`, instruction `0x3980001b`.
-2. Classify the broader post-`_main` startup crashes now that LSE/syscall/import blockers are gone.
-3. Add remaining non-owned shim surface for Security/libresolv/libiconv, CommonCrypto/Blocks, malloc-zone/fsctl/gethostuuid, Mach/semaphore/spawn.
-4. Investigate `node` LSE range warnings and timeout.
-5. Merge passing rows into canonical manifest and rerun full external suite.
+Logs for this refresh are under:
 
-## Trace Status
+- `tests/external/logs/full-loop-2026-06-23-A/`
+- `tests/external/work/full-loop-2026-06-23-A/`
+- `tests/external/logs/full-loop-2026-06-23-D-libcxx/`
+- `tests/external/work/full-loop-2026-06-23-D-libcxx/`
+- `tests/external/logs/sqlite3-variadic-vfprintf-attempt7/`
+- `tests/external/work/sqlite3-variadic-vfprintf-attempt7/`
 
-- Harness-generated `QEMU_STRACE=1` logs exist for every Worker 1-4 failing binary.
-- Worker 3 and Worker 4 also created per-binary `strace` log files, but some are empty in this container.
-- Worker 2 added representative trace-mode logs for `fzf`, `shfmt`, and `fx`.
-- Worker C added guest PC/register diagnostics for non-guard SIGSEGV.
-- Located trace-backed failures: many.
-- Source fixes made from this fix loop: LSE loader/pool, syscall island allocation, CF/process/libproc/getfsstat shims, loader zero-sized segment handling, signal diagnostics.
+Per-binary notes:
 
-## Active Main Thread Work
+- `nu`: `full-loop-2026-06-23-C` still `SIGSEGV` 139 after `_main` with 46 failed binds. The remaining bind blockers are 36 skipped/no-map framework/dylib instances (`AppKit` 1 pasteboard constant, `CoreServices` 6 FSEvents functions, `IOKit` 16 HID/registry/default-port symbols, `Security` 10 certificate/trust functions, `libiconv` 3 conversion functions) plus 10 mapped `libSystem` gaps (`copyfile_state_*`, `fclonefileat`, `fcopyfile`, `fsetattrlist`, `host_statistics64`, `proc_listallpids`, `proc_pidpath`, `pthread_set_qos_class_self_np`). `CoreGraphics` and `Foundation` are skipped in the load list but have no visible `nu` bind/lazy-bind symbols. Targeted `nu-classification-attempt4` with current libiconv/CoreServices mapping still fails with `SIGSEGV` at Rust thread-local initialization (`pc=0x1018fe474`, faulting `str xzr, [x8]`).
+- `tilt`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 after opt-in libc++ mapping. Resolver reports 204 binds resolved and 27 failed, with skipped `libresolv.9.dylib` and `Security` still visible.
+- `terraform`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 after `_main`. Resolver reports 133 binds resolved and 10 failed from skipped `libresolv.9.dylib` and `Security`.
+- `packer`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 after `_main`. Resolver reports 145 binds resolved and 10 failed from skipped `libresolv.9.dylib` and `Security`.
+- `vault`: PASS in full-loop `full-loop-2026-06-23-D-libcxx` after `libsystem_shim.c` sysctl/sysctlbyname/uname-style coverage; prints `Vault v2.0.3`.
+- `nomad`: `SIGSEGV` 139 in `shim-sysctl-cf-vault-nomad-attempt1`. `CFDictionaryAddValue` and `CFStringGetSystemEncoding` now resolve; remaining visible blockers are 34 failed binds from skipped `libresolv.9.dylib`, `IOKit`, and `Security`, plus LSE island out-of-B-range warnings. qemu trace ends with `SIGSEGV si_addr=NULL` then `si_addr=0x110`.
+- `cmake`: `full-loop-2026-06-23-D-libcxx` reaches `_main`, prints `CMake Error: Could not find CMAKE_ROOT !!!`, then `SIGSEGV` 139. Opt-in libc++ mapping is active; resolver reports 4437 binds resolved and 38 failed, including skipped `libcurl.4.dylib`, CommonCrypto hash symbols, CF bundle/URL/UUID helpers, `__mb_cur_max`, and `LSOpenCFURLRef`.
+- `duckdb`: PASS in full-loop `full-loop-2026-06-23-D-libcxx` with opt-in libc++ mapping.
+- `node`: PASS in full-loop `full-loop-2026-06-23-D-libcxx` with opt-in libc++ mapping; prints `v26.3.1`.
+- `bun`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 in the single C++ static initializer. Opt-in libc++ mapping is active, but `libicucore.A.dylib` is unmapped, the LSE island pool exhausts after 32774 patches, and resolver reports 817 binds resolved and 222 failed.
+- `protoc`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 during static constructors. Opt-in libc++ mapping is active; resolver reports 1655 binds resolved and only 1 failed bind, `sigsetjmp`.
+- `nvim`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 with skipped dylib surface cleared: `CoreServices` maps to `libm.so.6`, `libiconv.2.dylib` maps to `libc.so.6`, and resolver reports `414 resolved, 0 failed`. `nvim-trace-attempt4` shows `SIGSEGV si_addr=0x210` in `_uv_close` from `_signal_teardown`; `libutil.dylib` has no visible imported symbols.
+- `sqlite3`: targeted PASS in `sqlite3-variadic-vfprintf-attempt7` after Darwin-shaped malloc zone, `vfprintf` variadic adapter, and access wrappers.
 
-No agents are currently active. The last five-agent fix loop completed.
+## Next Fix Order
 
-Next fix loop order:
-
-1. Fix Go LC_MAIN startup ABI.
-2. Reclassify all post-`_main` startup/runtime crashes using the new PC diagnostics.
-3. Add remaining shim surface exposed by Worker 5 and skipped dylibs.
-4. Merge known passing rows into the canonical manifest until it reaches 50.
+1. Fix the narrowest remaining blocker first: add/verify `sigsetjmp` for `protoc`, rerun, and update the attempt count.
+2. Attack Go/runtime crashes: `terraform`, `packer`, `nomad`.
+3. Add focused shim/dylib surface for `nu`, `tilt`, `cmake`, `bun`, and `nvim`.
+4. Keep full-corpus reruns with `MACHGATE_EXTERNAL_MAP_LIBCXX=1` after any loader, shim, syscall, or mapping change.
