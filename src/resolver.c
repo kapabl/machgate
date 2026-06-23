@@ -701,7 +701,11 @@ static const struct variadic_info* lookup_variadic(const char* name)
 static uint8_t* variadic_pool = NULL;
 static size_t variadic_pool_used = 0;
 static size_t variadic_pool_capacity = 0;
+static uint8_t* stack_arg_pool = NULL;
+static size_t stack_arg_pool_used = 0;
+static size_t stack_arg_pool_capacity = 0;
 static int variadic_thunk_count = 0;
+static int stack_arg_thunk_count = 0;
 
 static uintptr_t create_variadic_thunk(uintptr_t v_func_addr,
                                        const struct variadic_info* vi)
@@ -756,6 +760,81 @@ static uintptr_t create_variadic_thunk(uintptr_t v_func_addr,
 	variadic_thunk_count++;
 
 	return (uintptr_t)t;
+}
+
+struct stack_arg3_thunk {
+	uint32_t stp;
+	uint32_t mov_fp;
+	uint32_t ldr_arg2;
+	uint32_t ldr_target;
+	uint32_t blr_target;
+	uint32_t ldp_restore;
+	uint32_t ret_instr;
+	uint32_t nop;
+	uint64_t target_addr;
+};
+
+static uintptr_t create_stack_arg3_thunk(uintptr_t func_addr)
+{
+	if (!stack_arg_pool) {
+		long page_size = sysconf(_SC_PAGESIZE);
+		stack_arg_pool_capacity = page_size;
+		stack_arg_pool = mmap(NULL, stack_arg_pool_capacity,
+		                      PROT_READ | PROT_WRITE | PROT_EXEC,
+		                      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+		if (stack_arg_pool == MAP_FAILED) {
+			fprintf(stderr, "resolver: failed to allocate stack-arg thunk pool\n");
+			stack_arg_pool = NULL;
+			return 0;
+		}
+	}
+
+	if (stack_arg_pool_used + sizeof(struct stack_arg3_thunk) > stack_arg_pool_capacity) {
+		fprintf(stderr, "resolver: stack-arg thunk pool exhausted\n");
+		return 0;
+	}
+
+	struct stack_arg3_thunk* t =
+		(struct stack_arg3_thunk*)(stack_arg_pool + stack_arg_pool_used);
+	stack_arg_pool_used += sizeof(struct stack_arg3_thunk);
+
+	t->stp = 0xA9BF7BFD;         /* stp x29, x30, [sp, #-16]! */
+	t->mov_fp = 0x910003FD;      /* mov x29, sp */
+	t->ldr_arg2 = 0xF9400BA2;    /* ldr x2, [x29, #16] */
+	t->ldr_target = 0x580000B0;  /* ldr x16, [pc, #20] */
+	t->blr_target = 0xD63F0200;  /* blr x16 */
+	t->ldp_restore = 0xA8C17BFD; /* ldp x29, x30, [sp], #16 */
+	t->ret_instr = 0xD65F03C0;   /* ret */
+	t->nop = 0xD503201F;
+	t->target_addr = func_addr;
+
+	__builtin___clear_cache((char*)t, (char*)(t + 1));
+	stack_arg_thunk_count++;
+
+	return (uintptr_t)t;
+}
+
+static uintptr_t wrap_fixed_stack_arg_symbol(const char* lookup_name,
+                                             uintptr_t result,
+                                             void* provider_handle)
+{
+	const char* fixed_target_name = NULL;
+
+	if (strcmp(lookup_name, "ioctl") == 0)
+		fixed_target_name = "machgate_darwin_ioctl_fixed";
+	else
+		return result;
+
+	void* fixed_target = NULL;
+	if (provider_handle)
+		fixed_target = dlsym(provider_handle, fixed_target_name);
+	if (!fixed_target)
+		fixed_target = dlsym(RTLD_DEFAULT, fixed_target_name);
+	if (!fixed_target)
+		return result;
+
+	uintptr_t thunk = create_stack_arg3_thunk((uintptr_t)fixed_target);
+	return thunk ? thunk : result;
 }
 
 /* ---- Mach-O symbol table lookup ----
@@ -1117,8 +1196,8 @@ int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file)
 		}
 	}
 
-	fprintf(stderr, "resolver: done — %d binds resolved, %d stubbed, %d failed, %d rebases, %d ctor/dtor ABI adapters, %d variadic thunks\n",
-			rs.binds_resolved, rs.binds_stubbed, rs.binds_failed, rs.rebases_applied, ctor_tramp_count, variadic_thunk_count);
+	fprintf(stderr, "resolver: done — %d binds resolved, %d stubbed, %d failed, %d rebases, %d ctor/dtor ABI adapters, %d variadic thunks, %d stack-arg thunks\n",
+			rs.binds_resolved, rs.binds_stubbed, rs.binds_failed, rs.rebases_applied, ctor_tramp_count, variadic_thunk_count, stack_arg_thunk_count);
 
 	/* Save dylib state for deferred completion (runs later from game thread) */
 	if (g_deferred.active && !g_deferred.resolved) {
@@ -1687,6 +1766,7 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 			uintptr_t result = (uintptr_t)addr + addend;
 			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
 				result = wrap_ctor_for_apple_abi(result);
+			result = wrap_fixed_stack_arg_symbol(lookup_name, result, NULL);
 			const struct variadic_info* vi = lookup_variadic(lookup_name);
 			if (vi) {
 				void* v_func = dlsym(RTLD_DEFAULT, vi->v_name);
@@ -1713,6 +1793,7 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 			uintptr_t result = (uintptr_t)addr + addend;
 			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
 				result = wrap_ctor_for_apple_abi(result);
+			result = wrap_fixed_stack_arg_symbol(lookup_name, result, NULL);
 			const struct variadic_info* vi = lookup_variadic(lookup_name);
 			if (vi) {
 				void* v_func = dlsym(RTLD_DEFAULT, vi->v_name);
@@ -1786,6 +1867,7 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 					result = wrap_ctor_for_apple_abi(result);
 				}
 			}
+			result = wrap_fixed_stack_arg_symbol(lookup_name, result, de->handle);
 			const struct variadic_info* vi = lookup_variadic(lookup_name);
 			if (vi) {
 				void* v_func = dlsym(RTLD_DEFAULT, vi->v_name);
@@ -2024,6 +2106,7 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 			uintptr_t result = (uintptr_t)addr + addend;
 			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
 				result = wrap_ctor_for_apple_abi(result);
+			result = wrap_fixed_stack_arg_symbol(lookup_name, result, NULL);
 			const struct variadic_info* vi = lookup_variadic(lookup_name);
 			if (vi) {
 				void* v_func = dlsym(RTLD_DEFAULT, vi->v_name);
@@ -2050,6 +2133,7 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 			uintptr_t result = (uintptr_t)addr + addend;
 			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
 				result = wrap_ctor_for_apple_abi(result);
+			result = wrap_fixed_stack_arg_symbol(lookup_name, result, NULL);
 			rs->binds_resolved++;
 			return result;
 		}
@@ -2080,6 +2164,7 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 				if (!ctor_has_stack_params(sym_name))
 					result = wrap_ctor_for_apple_abi(result);
 			}
+			result = wrap_fixed_stack_arg_symbol(lookup_name, result, de->handle);
 			const struct variadic_info* vi = lookup_variadic(lookup_name);
 			if (vi) {
 				void* v_func = dlsym(RTLD_DEFAULT, vi->v_name);

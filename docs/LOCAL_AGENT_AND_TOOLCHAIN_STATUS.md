@@ -10,13 +10,14 @@ As of the 2026-06-23 refresh:
 
 - Canonical external manifest is `19/19` passing.
 - Go TLS/signal targets `yq`, `fzf`, `gum`, and `shfmt` are passing.
-- Full visible unique external corpus is `48/57` passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`.
+- Full visible unique external corpus is `51/57` passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`.
 - Full visible unique external corpus is `45/57` passing without libc++ opt-in.
-- Current non-passing set is `nu`, `tilt`, `terraform`, `packer`, `nomad`, `cmake`, `bun`, `protoc`, and `nvim`.
-- No local Codex, Grok, or Claude helper agents are currently running for this loop.
-- Latest full run logs are in `tests/external/logs/full-loop-2026-06-23-D-libcxx/`.
-- Latest full run work dir is `tests/external/work/full-loop-2026-06-23-D-libcxx/`.
-- Latest promoted passes are `vault`, `duckdb`, and `node`.
+- Current full-corpus non-passing set is `nu`, `tilt`, `terraform`, `packer`, `nomad`, and `bun`.
+- Loop E Codex workers are complete; Grok report is collected; Claude hit the local session limit.
+- Active external report directory: `/tmp/machgate-agent-reports/loop-e/`.
+- Latest full run logs are in `tests/external/logs/full-loop-2026-06-23-K-loop-e-final/`.
+- Latest full run work dir is `tests/external/work/full-loop-2026-06-23-K-loop-e-final/`.
+- Latest promoted passes are `cmake` and `nvim`; `protoc` remains passing.
 
 The stale `yq` startup hypothesis below is retained as historical diagnosis only. It is no longer the active failure.
 

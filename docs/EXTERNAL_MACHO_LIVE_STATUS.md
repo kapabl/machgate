@@ -18,8 +18,8 @@ docker run --rm --platform linux/arm64 \
     BUILD_DIR=/work/build-arm64 \
     MACHGATE_EXTERNAL_MANIFEST=/tmp/machgate-current-external-all.txt \
     MACHGATE_EXTERNAL_MAP_LIBCXX=1 \
-    MACHGATE_EXTERNAL_LOGS=/work/tests/external/logs/full-loop-2026-06-23-D-libcxx \
-    MACHGATE_EXTERNAL_WORK=/work/tests/external/work/full-loop-2026-06-23-D-libcxx \
+    MACHGATE_EXTERNAL_LOGS=/work/tests/external/logs/full-loop-2026-06-23-K-loop-e-final \
+    MACHGATE_EXTERNAL_WORK=/work/tests/external/work/full-loop-2026-06-23-K-loop-e-final \
     MACHGATE_EXTERNAL_TIMEOUT=120 \
     bash tests/test_external_macho_cli.sh'
 ```
@@ -27,15 +27,17 @@ docker run --rm --platform linux/arm64 \
 Result:
 
 - Total visible unique external binaries: 57
-- Last full-corpus passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 48 / 57 (84.2%)
-- Last full-corpus not passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 9 / 57 (15.8%)
+- Last full-corpus passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 51 / 57 (89.5%)
+- Last full-corpus not passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 6 / 57 (10.5%)
+- Previous full-corpus passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 49 / 57 (86.0%)
+- Previous full-corpus not passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 8 / 57 (14.0%)
 - Last full-corpus passing without libc++ opt-in: 45 / 57 (78.9%)
 - Last full-corpus not passing without libc++ opt-in: 12 / 57 (21.1%)
 - Previous full corpus before the `sqlite3` fix: 44 / 57 (77.2%)
 - Canonical manifest: 19 / 19 passing
 - Go TLS/signal group: `yq`, `fzf`, `gum`, `shfmt` all passing
-- Full-corpus promoted fixes since the 45/57 baseline: `vault`, `duckdb`, and `node`.
-- Agent status: no active local Codex, Grok, or Claude helper agents in this loop.
+- Full-corpus promoted fixes since the 45/57 baseline: `vault`, `duckdb`, `node`, `protoc`, `cmake`, and `nvim`.
+- Agent status: Loop E Codex workers complete; Grok read-only report collected; Claude was blocked by the local session limit.
 
 ## Passing Binaries
 
@@ -45,14 +47,15 @@ Result:
 `gh`, `lazygit`, `glow`, `gum`, `goreleaser`, `chezmoi`, `duf`, `shfmt`,
 `fx`, `kubectl`, `k9s`, `kind`, `minikube`, `argocd`, `flux`, `kubeseal`,
 `stern`, `helm`, `consul`, `boundary`, `tofu`, `terragrunt`, `pulumi`,
-`sqlite3`, `vault`, `duckdb`, `node`.
+`cmake`, `sqlite3`, `vault`, `duckdb`, `node`, `protoc`, `nvim`.
 
 ## Current Non-Passing Binaries
 
 | Class | Count | Binaries | Current evidence |
 | --- | ---: | --- | --- |
-| SIGSEGV with missing shim/dylib surface | 5 | `nu`, `tilt`, `cmake`, `bun`, `protoc` | These crash with SIGSEGV and have unresolved or skipped dependency surface. `nu` improved from 92 to 43 failed binds after CF/CommonCrypto/libiconv/CoreServices work; `cmake`/`bun`/`protoc` now use opt-in libc++ mapping, but still need remaining shim/framework/runtime coverage. `tilt` still skips large framework/system surface. |
-| SIGSEGV after startup | 4 | `terraform`, `packer`, `nomad`, `nvim` | These reach `_main` and crash later. `terraform`/`packer` show NULL SIGSEGV after Go runtime startup; `nomad` no longer has missing `CFDictionaryAddValue`/`CFStringGetSystemEncoding`, but still crashes with skipped `IOKit`, `Security`, and `libresolv.9.dylib` surface plus LSE island range warnings; `nvim` now has 0 failed binds and crashes in libuv signal teardown. |
+| SIGSEGV with missing shim/dylib surface | 2 | `nu`, `bun` | `nu` is down to `519 resolved, 13 stubbed, 1 failed` and still has skipped/non-owned AppKit/CoreGraphics/Foundation plus a post-`_main` crash. `bun` is down to `910 resolved, 0 stubbed, 129 failed`; the remaining printed gaps are ICU field-position, collation, currency, and date APIs. |
+| SIGSEGV after startup/runtime | 3 | `tilt`, `terraform`, `nomad` | `tilt` has `231 resolved, 0 stubbed, 0 failed`, reaches `_main`, then crashes. `terraform` is a zero-failed-bind Go runtime crash. `nomad` remains a Go/runtime crash after the IOKit and LSE work. |
+| Process/env unsupported | 1 | `packer` | `packer` exits status `2`; prior traces show child re-exec/env support is the blocker, not parent SIGSEGV. |
 
 ## Failure Details
 
@@ -62,28 +65,33 @@ Logs for this refresh are under:
 - `tests/external/work/full-loop-2026-06-23-A/`
 - `tests/external/logs/full-loop-2026-06-23-D-libcxx/`
 - `tests/external/work/full-loop-2026-06-23-D-libcxx/`
+- `tests/external/logs/full-loop-2026-06-23-E2-loop-c/`
+- `tests/external/work/full-loop-2026-06-23-E2-loop-c/`
+- `tests/external/logs/full-loop-2026-06-23-K-loop-e-final/`
+- `tests/external/work/full-loop-2026-06-23-K-loop-e-final/`
 - `tests/external/logs/sqlite3-variadic-vfprintf-attempt7/`
 - `tests/external/work/sqlite3-variadic-vfprintf-attempt7/`
 
 Per-binary notes:
 
-- `nu`: `full-loop-2026-06-23-C` still `SIGSEGV` 139 after `_main` with 46 failed binds. The remaining bind blockers are 36 skipped/no-map framework/dylib instances (`AppKit` 1 pasteboard constant, `CoreServices` 6 FSEvents functions, `IOKit` 16 HID/registry/default-port symbols, `Security` 10 certificate/trust functions, `libiconv` 3 conversion functions) plus 10 mapped `libSystem` gaps (`copyfile_state_*`, `fclonefileat`, `fcopyfile`, `fsetattrlist`, `host_statistics64`, `proc_listallpids`, `proc_pidpath`, `pthread_set_qos_class_self_np`). `CoreGraphics` and `Foundation` are skipped in the load list but have no visible `nu` bind/lazy-bind symbols. Targeted `nu-classification-attempt4` with current libiconv/CoreServices mapping still fails with `SIGSEGV` at Rust thread-local initialization (`pc=0x1018fe474`, faulting `str xzr, [x8]`).
-- `tilt`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 after opt-in libc++ mapping. Resolver reports 204 binds resolved and 27 failed, with skipped `libresolv.9.dylib` and `Security` still visible.
-- `terraform`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 after `_main`. Resolver reports 133 binds resolved and 10 failed from skipped `libresolv.9.dylib` and `Security`.
-- `packer`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 after `_main`. Resolver reports 145 binds resolved and 10 failed from skipped `libresolv.9.dylib` and `Security`.
+- `nu`: `full-loop-2026-06-23-K-loop-e-final` still `SIGSEGV` 139 after `_main`. Resolver reports `519 resolved, 13 stubbed, 1 failed`; skipped/no-map dylibs are still `AppKit`, `CoreGraphics`, and `Foundation`, with `libobjc.A.dylib` stubbed. Native `__eh_frame` is served by the `_dl_find_object` hook.
+- `tilt`: `full-loop-2026-06-23-K-loop-e-final` still `SIGSEGV` 139 after `_main`, but resolver reports `231 resolved, 0 stubbed, 0 failed`. It has no visible missing imports now; the blocker is runtime/EH/trampoline behavior after `_main`.
+- `terraform`: `full-loop-2026-06-23-K-loop-e-final` still `SIGSEGV` 139 after `_main`. Resolver has no visible failed binds; remaining blocker is Go/runtime behavior, not import surface.
+- `packer`: `full-loop-2026-06-23-K-loop-e-final` exits status `2`. This is the known child-process/re-exec environment class from Loop D, not a promoted pass.
 - `vault`: PASS in full-loop `full-loop-2026-06-23-D-libcxx` after `libsystem_shim.c` sysctl/sysctlbyname/uname-style coverage; prints `Vault v2.0.3`.
-- `nomad`: `SIGSEGV` 139 in `shim-sysctl-cf-vault-nomad-attempt1`. `CFDictionaryAddValue` and `CFStringGetSystemEncoding` now resolve; remaining visible blockers are 34 failed binds from skipped `libresolv.9.dylib`, `IOKit`, and `Security`, plus LSE island out-of-B-range warnings. qemu trace ends with `SIGSEGV si_addr=NULL` then `si_addr=0x110`.
-- `cmake`: `full-loop-2026-06-23-D-libcxx` reaches `_main`, prints `CMake Error: Could not find CMAKE_ROOT !!!`, then `SIGSEGV` 139. Opt-in libc++ mapping is active; resolver reports 4437 binds resolved and 38 failed, including skipped `libcurl.4.dylib`, CommonCrypto hash symbols, CF bundle/URL/UUID helpers, `__mb_cur_max`, and `LSOpenCFURLRef`.
+- `nomad`: `full-loop-2026-06-23-K-loop-e-final` still `SIGSEGV` 139 after `_main`. LSE placement is clean; remaining blocker is Go/runtime behavior plus remaining platform-probe semantics.
+- `cmake`: PASS in `full-loop-2026-06-23-K-loop-e-final` after mapping `libcurl.4.dylib` to host `libcurl.so.4` and translating Darwin `dlsym` special handles such as `RTLD_DEFAULT=-2` before calling glibc.
 - `duckdb`: PASS in full-loop `full-loop-2026-06-23-D-libcxx` with opt-in libc++ mapping.
 - `node`: PASS in full-loop `full-loop-2026-06-23-D-libcxx` with opt-in libc++ mapping; prints `v26.3.1`.
-- `bun`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 in the single C++ static initializer. Opt-in libc++ mapping is active, but `libicucore.A.dylib` is unmapped, the LSE island pool exhausts after 32774 patches, and resolver reports 817 binds resolved and 222 failed.
-- `protoc`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 during static constructors. Opt-in libc++ mapping is active; resolver reports 1655 binds resolved and only 1 failed bind, `sigsetjmp`.
-- `nvim`: `full-loop-2026-06-23-D-libcxx` still `SIGSEGV` 139 with skipped dylib surface cleared: `CoreServices` maps to `libm.so.6`, `libiconv.2.dylib` maps to `libc.so.6`, and resolver reports `414 resolved, 0 failed`. `nvim-trace-attempt4` shows `SIGSEGV si_addr=0x210` in `_uv_close` from `_signal_teardown`; `libutil.dylib` has no visible imported symbols.
+- `bun`: `full-loop-2026-06-23-K-loop-e-final` still `SIGSEGV` 139 in the single C++ static initializer. LSE exhaustion is fixed. Resolver improved to `910 resolved, 0 stubbed, 129 failed`; remaining printed gaps are ICU field-position, collation, currency, and date APIs.
+- `protoc`: PASS in `full-loop-2026-06-23-K-loop-e-final`; native Mach-O `__eh_frame` is served by `_dl_find_object` instead of direct `__register_frame`.
+- `nvim`: PASS in `full-loop-2026-06-23-K-loop-e-final` after the `ioctl(FIONBIO)` stack-argument thunk and native Mach-O `__eh_frame` hook-only registration path.
 - `sqlite3`: targeted PASS in `sqlite3-variadic-vfprintf-attempt7` after Darwin-shaped malloc zone, `vfprintf` variadic adapter, and access wrappers.
 
 ## Next Fix Order
 
-1. Fix the narrowest remaining blocker first: add/verify `sigsetjmp` for `protoc`, rerun, and update the attempt count.
-2. Attack Go/runtime crashes: `terraform`, `packer`, `nomad`.
-3. Add focused shim/dylib surface for `nu`, `tilt`, `cmake`, `bun`, and `nvim`.
-4. Keep full-corpus reruns with `MACHGATE_EXTERNAL_MAP_LIBCXX=1` after any loader, shim, syscall, or mapping change.
+1. Continue ICU surface for `bun`; latest blocker is `ucfpos_*`, `ucol_*`, `ucurr_*`, and `udat_close`.
+2. Instrument zero-bind runtime crashes for `tilt`, `terraform`, and `nomad`.
+3. Decide the production policy for `packer` child-process/re-exec support.
+4. Resolve the remaining `nu` skipped framework/runtime crash class.
+5. Keep full-corpus reruns with `MACHGATE_EXTERNAL_MAP_LIBCXX=1` after any loader, shim, syscall, or mapping change.

@@ -32,12 +32,16 @@
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
+#include <linux/futex.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <dirent.h>
 #include <stdarg.h>
 #include <malloc.h>
 #include <locale.h>
+#include <sched.h>
 
 extern char **environ;
 
@@ -114,11 +118,23 @@ uint64_t clock_gettime_nsec_np(int clock_id)
 	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+double log2(double value)
+{
+	return log(value) / log(2.0);
+}
+
+double exp2(double value)
+{
+	return exp(value * log(2.0));
+}
+
 /* ===== Mach ports / task info (stubs) ===== */
 
 /* mach_task_self_ is a global variable in libSystem, not a function */
 uint32_t mach_task_self_ = 0x103; /* dummy port number */
 uint32_t vm_page_size = 4096;
+uint32_t vm_kernel_page_size = 4096;
+uint32_t kIOMasterPortDefault = 0;
 
 struct machgate_mach_semaphore {
 	uint32_t name;
@@ -131,6 +147,7 @@ struct machgate_mach_semaphore {
 static struct machgate_mach_semaphore
 	machgate_mach_semaphores[MACHGATE_MACH_SEMAPHORE_MAX];
 static uint32_t next_mach_semaphore_name = 0x4000;
+static uint32_t next_mach_port_name = 0x5000;
 
 uint32_t mach_host_self(void)
 {
@@ -145,6 +162,16 @@ uint32_t mach_thread_self(void)
 uint64_t mach_continuous_time(void)
 {
 	return mach_absolute_time();
+}
+
+uint64_t mach_approximate_time(void)
+{
+	return mach_absolute_time();
+}
+
+uint64_t mach_continuous_approximate_time(void)
+{
+	return mach_continuous_time();
 }
 
 /* task_info — stub, returns KERN_FAILURE */
@@ -177,6 +204,58 @@ int thread_info(uint32_t target_thread, int flavor, void* thread_info_out,
 	return 0;
 }
 
+int thread_get_state(uint32_t target_thread, int flavor, void* state,
+                     uint32_t* state_count)
+{
+	(void)target_thread;
+	(void)flavor;
+
+	if (state && state_count)
+		memset(state, 0, (size_t)*state_count * sizeof(uint32_t));
+	return 0;
+}
+
+int thread_suspend(uint32_t target_thread)
+{
+	(void)target_thread;
+	return 0;
+}
+
+int thread_resume(uint32_t target_thread)
+{
+	(void)target_thread;
+	return 0;
+}
+
+int thread_set_exception_ports(uint32_t thread, uint32_t exception_mask,
+                               uint32_t new_port, int behavior,
+                               int new_flavor)
+{
+	(void)thread;
+	(void)exception_mask;
+	(void)new_port;
+	(void)behavior;
+	(void)new_flavor;
+	return 0;
+}
+
+int thread_switch(uint32_t thread_name, int option, uint32_t option_time)
+{
+	(void)thread_name;
+	(void)option;
+
+	if (option_time) {
+		struct timespec ts;
+		ts.tv_sec = option_time / 1000;
+		ts.tv_nsec = (long)(option_time % 1000) * 1000000L;
+		nanosleep(&ts, NULL);
+		return 0;
+	}
+
+	sched_yield();
+	return 0;
+}
+
 /* mach_msg — stub, returns MACH_MSG_SUCCESS (0) */
 int mach_msg(void *msg, uint32_t option, uint32_t send_size,
              uint32_t rcv_size, uint32_t rcv_name,
@@ -191,6 +270,47 @@ int mach_msg(void *msg, uint32_t option, uint32_t send_size,
 int mach_port_deallocate(uint32_t task, uint32_t name)
 {
 	(void)task; (void)name;
+	return 0;
+}
+
+int mach_port_allocate(uint32_t task, uint32_t right, uint32_t* name)
+{
+	(void)task;
+	(void)right;
+
+	if (!name)
+		return 4;
+	*name = __sync_fetch_and_add(&next_mach_port_name, 1);
+	return 0;
+}
+
+int mach_port_construct(uint32_t task, void* options, uint64_t context,
+                        uint32_t* name)
+{
+	(void)task;
+	(void)options;
+	(void)context;
+	return mach_port_allocate(task, 0, name);
+}
+
+int mach_port_insert_right(uint32_t task, uint32_t name, uint32_t poly,
+                           uint32_t poly_poly)
+{
+	(void)task;
+	(void)name;
+	(void)poly;
+	(void)poly_poly;
+	return 0;
+}
+
+int mach_port_set_attributes(uint32_t task, uint32_t name, int flavor,
+                             void* info, uint32_t info_count)
+{
+	(void)task;
+	(void)name;
+	(void)flavor;
+	(void)info;
+	(void)info_count;
 	return 0;
 }
 
@@ -216,6 +336,62 @@ int host_statistics(uint32_t host_priv, int flavor, void* host_info_out,
 	return 0;
 }
 
+struct darwin_host_basic_info {
+	int32_t max_cpus;
+	int32_t avail_cpus;
+	uint32_t memory_size;
+	int32_t cpu_type;
+	int32_t cpu_subtype;
+	int32_t cpu_threadtype;
+	int32_t physical_cpu;
+	int32_t physical_cpu_max;
+	int32_t logical_cpu;
+	int32_t logical_cpu_max;
+	uint64_t max_mem;
+};
+
+int host_info(uint32_t host, int flavor, void* info, uint32_t* info_count)
+{
+	(void)host;
+
+	if (!info || !info_count)
+		return 4;
+
+	if (flavor == 1) {
+		struct darwin_host_basic_info basic;
+		memset(&basic, 0, sizeof(basic));
+		basic.max_cpus = shim_hw_ncpu();
+		basic.avail_cpus = basic.max_cpus;
+		basic.memory_size = 0x80000000U;
+		basic.cpu_type = 0x0100000c;
+		basic.physical_cpu = basic.max_cpus;
+		basic.physical_cpu_max = basic.max_cpus;
+		basic.logical_cpu = basic.max_cpus;
+		basic.logical_cpu_max = basic.max_cpus;
+		basic.max_mem = (uint64_t)sysconf(_SC_PHYS_PAGES) *
+		                (uint64_t)sysconf(_SC_PAGESIZE);
+
+		size_t available = (size_t)*info_count * sizeof(int32_t);
+		size_t copy_size = available < sizeof(basic) ? available : sizeof(basic);
+		memcpy(info, &basic, copy_size);
+		*info_count = (uint32_t)(sizeof(basic) / sizeof(int32_t));
+		return 0;
+	}
+
+	memset(info, 0, (size_t)*info_count * sizeof(int32_t));
+	return 0;
+}
+
+int mach_msg_server_once(void* demux, uint32_t max_size, uint32_t rcv_name,
+                         uint32_t options)
+{
+	(void)demux;
+	(void)max_size;
+	(void)rcv_name;
+	(void)options;
+	return 0;
+}
+
 int host_processor_info(uint32_t host, int flavor, uint32_t* out_processor_count,
                         void** out_processor_info,
                         uint32_t* out_processor_info_count)
@@ -229,6 +405,17 @@ int host_processor_info(uint32_t host, int flavor, uint32_t* out_processor_count
 		*out_processor_info = NULL;
 	if (out_processor_info_count)
 		*out_processor_info_count = 0;
+	return 0;
+}
+
+int host_statistics64(uint32_t host, int flavor, void* info,
+                      uint32_t* info_count)
+{
+	(void)host;
+	(void)flavor;
+
+	if (info && info_count)
+		memset(info, 0, (size_t)*info_count * sizeof(uint64_t));
 	return 0;
 }
 
@@ -302,6 +489,7 @@ int semaphore_timedwait(uint32_t semaphore, uint32_t seconds,
 }
 
 uint8_t NDR_record[8] = { 0 };
+int __mb_cur_max = 4;
 
 /* ===== dyld / process bootstrap compatibility ===== */
 
@@ -649,6 +837,98 @@ int CC_SHA256_Final(uint8_t* digest, struct cc_sha256_ctx* context)
 	return 1;
 }
 
+int CC_MD5_Init(void* context)
+{
+	(void)context;
+	return 1;
+}
+
+int CC_MD5_Update(void* context, const void* data, uint32_t length)
+{
+	(void)context;
+	(void)data;
+	(void)length;
+	return 1;
+}
+
+int CC_MD5_Final(uint8_t* digest, void* context)
+{
+	(void)context;
+	if (!digest)
+		return 0;
+	memset(digest, 0, 16);
+	return 1;
+}
+
+int CC_SHA1_Init(void* context)
+{
+	(void)context;
+	return 1;
+}
+
+int CC_SHA1_Update(void* context, const void* data, uint32_t length)
+{
+	(void)context;
+	(void)data;
+	(void)length;
+	return 1;
+}
+
+int CC_SHA1_Final(uint8_t* digest, void* context)
+{
+	(void)context;
+	if (!digest)
+		return 0;
+	memset(digest, 0, 20);
+	return 1;
+}
+
+int CC_SHA384_Init(void* context)
+{
+	(void)context;
+	return 1;
+}
+
+int CC_SHA384_Update(void* context, const void* data, uint32_t length)
+{
+	(void)context;
+	(void)data;
+	(void)length;
+	return 1;
+}
+
+int CC_SHA384_Final(uint8_t* digest, void* context)
+{
+	(void)context;
+	if (!digest)
+		return 0;
+	memset(digest, 0, 48);
+	return 1;
+}
+
+int CC_SHA512_Init(void* context)
+{
+	(void)context;
+	return 1;
+}
+
+int CC_SHA512_Update(void* context, const void* data, uint32_t length)
+{
+	(void)context;
+	(void)data;
+	(void)length;
+	return 1;
+}
+
+int CC_SHA512_Final(uint8_t* digest, void* context)
+{
+	(void)context;
+	if (!digest)
+		return 0;
+	memset(digest, 0, 64);
+	return 1;
+}
+
 int CCKeyDerivationPBKDF(uint32_t algorithm, const char* password,
                          size_t password_length, const uint8_t* salt,
                          size_t salt_length, uint32_t prf,
@@ -688,6 +968,22 @@ typedef const void* CFDictionaryRef;
 typedef void* CFMutableDictionaryRef;
 typedef double CFAbsoluteTime;
 typedef unsigned long CFTypeID;
+typedef const void* SecCertificateRef;
+typedef const void* SecPolicyRef;
+typedef void* SecTrustRef;
+typedef int32_t OSStatus;
+typedef double CFTimeInterval;
+typedef void* CFRunLoopRef;
+typedef void* FSEventStreamRef;
+typedef uint64_t FSEventStreamEventId;
+typedef uint32_t FSEventStreamEventFlags;
+typedef uint32_t FSEventStreamCreateFlags;
+typedef void (*FSEventStreamCallback)(FSEventStreamRef stream,
+                                      void* info,
+                                      size_t number_of_events,
+                                      void* event_paths,
+                                      const FSEventStreamEventFlags* event_flags,
+                                      const FSEventStreamEventId* event_ids);
 
 enum {
 	CF_TYPE_ID_STRING = 1,
@@ -755,6 +1051,24 @@ struct cf_dictionary_value_callbacks {
 	uint8_t (*equal)(const void* value_a, const void* value_b);
 };
 
+struct fsevent_stream_context {
+	CFIndex version;
+	void* info;
+	const void* retain;
+	const void* release;
+	const void* copy_description;
+};
+
+struct fsevent_stream {
+	FSEventStreamCallback callback;
+	struct fsevent_stream_context context;
+	CFArrayRef paths;
+	uint64_t device;
+	FSEventStreamEventId latest_event_id;
+	uint8_t started;
+	uint8_t invalidated;
+};
+
 CFDataRef CFDataCreate(CFAllocatorRef allocator, const uint8_t* bytes,
                        CFIndex length);
 CFDictionaryRef CFDictionaryCreate(CFAllocatorRef allocator,
@@ -809,6 +1123,8 @@ static const char cf_url_volume_is_removable_key[] = "NSURLVolumeIsRemovableKey"
 static const char cf_url_volume_name_key[] = "NSURLVolumeNameKey";
 static const char cf_url_volume_total_capacity_key[] = "NSURLVolumeTotalCapacityKey";
 static const char cf_url_volume_uuid_string_key[] = "NSURLVolumeUUIDStringKey";
+static const char security_policy_ssl_object[] = "MachGate/SecPolicySSL";
+static const char security_trust_object[] = "MachGate/SecTrust";
 
 const double kCFAbsoluteTimeIntervalSince1970 = 978307200.0;
 const void* kCFAllocatorDefault = NULL;
@@ -825,6 +1141,7 @@ const void* kCFURLVolumeIsRemovableKey = cf_url_volume_is_removable_key;
 const void* kCFURLVolumeNameKey = cf_url_volume_name_key;
 const void* kCFURLVolumeTotalCapacityKey = cf_url_volume_total_capacity_key;
 const void* kCFURLVolumeUUIDStringKey = cf_url_volume_uuid_string_key;
+const char __CFConstantStringClassReference[] = "__CFConstantStringClassReference";
 const struct cf_array_callbacks kCFTypeArrayCallBacks = {
 	0,
 	cf_callback_retain,
@@ -1022,6 +1339,31 @@ CFStringRef CFURLCreateFromFileSystemRepresentation(CFAllocatorRef allocator,
 	return CFStringCreateWithBytes(allocator, buffer, buffer_length, 0, 0);
 }
 
+CFStringRef CFURLCreateWithFileSystemPath(CFAllocatorRef allocator,
+                                          CFStringRef file_path,
+                                          int path_style,
+                                          uint8_t is_directory)
+{
+	(void)path_style;
+	(void)is_directory;
+	return CFStringCreateCopy(allocator, file_path);
+}
+
+uint8_t CFURLGetFileSystemRepresentation(CFStringRef url,
+                                          uint8_t resolve_against_base,
+                                          uint8_t* buffer,
+                                          CFIndex max_buffer_length)
+{
+	(void)resolve_against_base;
+
+	if (!url || !buffer || max_buffer_length <= 0)
+		return 0;
+
+	snprintf((char*)buffer, (size_t)max_buffer_length, "%s",
+	         (const char*)url);
+	return 1;
+}
+
 CFStringRef CFURLCreateFilePathURL(CFAllocatorRef allocator, CFStringRef url,
                                    void* error)
 {
@@ -1126,6 +1468,39 @@ CFDictionaryRef CFURLCopyResourcePropertiesForKeys(CFStringRef url,
 	return CFDictionaryCreate(NULL, NULL, NULL, 0,
 	                          &kCFTypeDictionaryKeyCallBacks,
 	                          &kCFTypeDictionaryValueCallBacks);
+}
+
+CFStringRef CFBundleCreate(CFAllocatorRef allocator, CFStringRef bundle_url)
+{
+	return CFStringCreateCopy(allocator, bundle_url);
+}
+
+CFStringRef CFBundleCopyExecutableURL(CFStringRef bundle)
+{
+	return CFStringCreateCopy(NULL, bundle);
+}
+
+CFStringRef CFUUIDCreate(CFAllocatorRef allocator)
+{
+	return CFStringCreateWithCString(allocator,
+	                                 "00000000-0000-0000-0000-000000000000",
+	                                 0);
+}
+
+CFStringRef CFUUIDCreateString(CFAllocatorRef allocator, CFStringRef uuid)
+{
+	if (uuid)
+		return CFStringCreateCopy(allocator, uuid);
+	return CFStringCreateWithCString(allocator,
+	                                 "00000000-0000-0000-0000-000000000000",
+	                                 0);
+}
+
+OSStatus LSOpenCFURLRef(CFStringRef url, CFStringRef* launched_url)
+{
+	if (launched_url)
+		*launched_url = url ? CFStringCreateCopy(NULL, url) : NULL;
+	return 0;
 }
 
 CFDataRef CFStringCreateExternalRepresentation(CFAllocatorRef allocator,
@@ -1453,6 +1828,374 @@ uint8_t CFDictionaryGetValueIfPresent(CFDictionaryRef dictionary_ref,
 	return 1;
 }
 
+SecCertificateRef SecCertificateCreateWithData(CFAllocatorRef allocator,
+                                               CFDataRef data)
+{
+	(void)allocator;
+	return data;
+}
+
+CFDataRef SecCertificateCopyData(SecCertificateRef certificate)
+{
+	return certificate;
+}
+
+CFStringRef SecCertificateCopySubjectSummary(SecCertificateRef certificate)
+{
+	(void)certificate;
+	return CFStringCreateWithCString(NULL, "MachGate Certificate", 0);
+}
+
+CFStringRef SecCopyErrorMessageString(OSStatus status, void* reserved)
+{
+	(void)status;
+	(void)reserved;
+	return CFStringCreateWithCString(NULL, "Security operation failed", 0);
+}
+
+SecPolicyRef SecPolicyCreateSSL(uint8_t server, CFStringRef hostname)
+{
+	(void)server;
+	(void)hostname;
+	return security_policy_ssl_object;
+}
+
+OSStatus SecTrustCreateWithCertificates(const void* certificates,
+                                        SecPolicyRef policies,
+                                        SecTrustRef* trust)
+{
+	(void)certificates;
+	(void)policies;
+
+	if (!trust)
+		return -50;
+	*trust = (SecTrustRef)security_trust_object;
+	return 0;
+}
+
+OSStatus SecTrustSetAnchorCertificates(SecTrustRef trust,
+                                       CFArrayRef anchor_certificates)
+{
+	(void)trust;
+	(void)anchor_certificates;
+	return 0;
+}
+
+OSStatus SecTrustSetAnchorCertificatesOnly(SecTrustRef trust,
+                                           uint8_t anchor_certificates_only)
+{
+	(void)trust;
+	(void)anchor_certificates_only;
+	return 0;
+}
+
+OSStatus SecTrustSetOCSPResponse(SecTrustRef trust, const void* response)
+{
+	(void)trust;
+	(void)response;
+	return 0;
+}
+
+OSStatus SecTrustSetVerifyDate(SecTrustRef trust, const void* verify_date)
+{
+	(void)trust;
+	(void)verify_date;
+	return 0;
+}
+
+uint8_t SecTrustEvaluateWithError(SecTrustRef trust, CFErrorRef* error)
+{
+	(void)trust;
+
+	if (error)
+		*error = NULL;
+	return 0;
+}
+
+CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust)
+{
+	(void)trust;
+	return CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
+}
+
+int res_9_ninit(void* state)
+{
+	(void)state;
+	return -1;
+}
+
+void res_9_nclose(void* state)
+{
+	(void)state;
+}
+
+int res_9_nsearch(void* state, const char* name, int dns_class,
+                  int type, uint8_t* answer, int answer_length)
+{
+	(void)state;
+	(void)name;
+	(void)dns_class;
+	(void)type;
+	(void)answer;
+	(void)answer_length;
+	return -1;
+}
+
+FSEventStreamRef FSEventStreamCreate(CFAllocatorRef allocator,
+                                     FSEventStreamCallback callback,
+                                     const struct fsevent_stream_context* context,
+                                     CFArrayRef paths,
+                                     FSEventStreamEventId since_when,
+                                     CFTimeInterval latency,
+                                     FSEventStreamCreateFlags flags)
+{
+	(void)allocator;
+	(void)latency;
+	(void)flags;
+
+	struct fsevent_stream* stream = calloc(1, sizeof(*stream));
+	if (!stream)
+		return NULL;
+
+	stream->callback = callback;
+	if (context)
+		stream->context = *context;
+	stream->paths = paths;
+	stream->latest_event_id = since_when == UINT64_MAX ? 1 : since_when;
+	return stream;
+}
+
+FSEventStreamRef FSEventStreamCreateRelativeToDevice(
+	CFAllocatorRef allocator, FSEventStreamCallback callback,
+	const struct fsevent_stream_context* context, uint64_t device,
+	CFArrayRef paths, FSEventStreamEventId since_when,
+	CFTimeInterval latency, FSEventStreamCreateFlags flags)
+{
+	struct fsevent_stream* stream = FSEventStreamCreate(
+		allocator, callback, context, paths, since_when, latency, flags);
+	if (stream)
+		stream->device = device;
+	return stream;
+}
+
+CFStringRef FSEventStreamCopyDescription(FSEventStreamRef stream_ref)
+{
+	(void)stream_ref;
+	return CFStringCreateWithCString(NULL, "MachGate/FSEventStream", 0);
+}
+
+CFArrayRef FSEventStreamCopyPathsBeingWatched(FSEventStreamRef stream_ref)
+{
+	struct fsevent_stream* stream = stream_ref;
+	if (!stream || !stream->paths)
+		return CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
+	return stream->paths;
+}
+
+void FSEventStreamFlushAsync(FSEventStreamRef stream_ref)
+{
+	(void)stream_ref;
+}
+
+void FSEventStreamFlushSync(FSEventStreamRef stream_ref)
+{
+	(void)stream_ref;
+}
+
+uint64_t FSEventStreamGetDeviceBeingWatched(FSEventStreamRef stream_ref)
+{
+	struct fsevent_stream* stream = stream_ref;
+	return stream ? stream->device : 0;
+}
+
+FSEventStreamEventId FSEventStreamGetLatestEventId(FSEventStreamRef stream_ref)
+{
+	struct fsevent_stream* stream = stream_ref;
+	return stream ? stream->latest_event_id : 0;
+}
+
+void FSEventStreamInvalidate(FSEventStreamRef stream_ref)
+{
+	struct fsevent_stream* stream = stream_ref;
+	if (stream)
+		stream->invalidated = 1;
+}
+
+void FSEventStreamRelease(FSEventStreamRef stream_ref)
+{
+	free(stream_ref);
+}
+
+void FSEventStreamScheduleWithRunLoop(FSEventStreamRef stream_ref,
+                                      CFRunLoopRef run_loop,
+                                      CFStringRef run_loop_mode)
+{
+	(void)stream_ref;
+	(void)run_loop;
+	(void)run_loop_mode;
+}
+
+void FSEventStreamSetDispatchQueue(FSEventStreamRef stream_ref, void* queue)
+{
+	(void)stream_ref;
+	(void)queue;
+}
+
+int FSEventStreamStart(FSEventStreamRef stream_ref)
+{
+	struct fsevent_stream* stream = stream_ref;
+	if (!stream || stream->invalidated)
+		return 0;
+	stream->started = 1;
+	return 1;
+}
+
+void FSEventStreamStop(FSEventStreamRef stream_ref)
+{
+	struct fsevent_stream* stream = stream_ref;
+	if (stream)
+		stream->started = 0;
+}
+
+CFStringRef FSEventsCopyUUIDForDevice(uint64_t device)
+{
+	(void)device;
+	return CFUUIDCreateString(NULL, NULL);
+}
+
+FSEventStreamEventId FSEventsGetCurrentEventId(void)
+{
+	return 1;
+}
+
+FSEventStreamEventId FSEventsGetLastEventIdForDeviceBeforeTime(
+	uint64_t device, CFAbsoluteTime time)
+{
+	(void)device;
+	(void)time;
+	return 1;
+}
+
+CFMutableDictionaryRef IOBSDNameMatching(uint32_t master_port,
+                                         uint32_t options,
+                                         const char* bsd_name)
+{
+	(void)master_port;
+	(void)options;
+	(void)bsd_name;
+	return (CFMutableDictionaryRef)CFDictionaryCreate(NULL, NULL, NULL, 0,
+	                                                 &kCFTypeDictionaryKeyCallBacks,
+	                                                 &kCFTypeDictionaryValueCallBacks);
+}
+
+CFMutableDictionaryRef IOServiceMatching(const char* name)
+{
+	(void)name;
+	return (CFMutableDictionaryRef)CFDictionaryCreate(NULL, NULL, NULL, 0,
+	                                                 &kCFTypeDictionaryKeyCallBacks,
+	                                                 &kCFTypeDictionaryValueCallBacks);
+}
+
+int IOServiceGetMatchingServices(uint32_t master_port, CFDictionaryRef matching,
+                                 uint32_t* iterator)
+{
+	(void)master_port;
+	(void)matching;
+	if (iterator)
+		*iterator = 0;
+	return 0;
+}
+
+uint32_t IOIteratorNext(uint32_t iterator)
+{
+	(void)iterator;
+	return 0;
+}
+
+int IOObjectConformsTo(uint32_t object, const char* class_name)
+{
+	(void)object;
+	(void)class_name;
+	return 0;
+}
+
+int IOObjectRelease(uint32_t object)
+{
+	(void)object;
+	return 0;
+}
+
+const void* IORegistryEntryCreateCFProperty(uint32_t entry, CFStringRef key,
+                                            CFAllocatorRef allocator,
+                                            uint32_t options)
+{
+	(void)entry;
+	(void)key;
+	(void)allocator;
+	(void)options;
+	return NULL;
+}
+
+int IORegistryEntryGetName(uint32_t entry, char* name)
+{
+	(void)entry;
+	if (name)
+		name[0] = '\0';
+	return 0;
+}
+
+int IORegistryEntryGetParentEntry(uint32_t entry, const char* plane,
+                                  uint32_t* parent)
+{
+	(void)entry;
+	(void)plane;
+	if (parent)
+		*parent = 0;
+	return -1;
+}
+
+void* IOHIDEventSystemClientCreate(CFAllocatorRef allocator)
+{
+	(void)allocator;
+	return calloc(1, 1);
+}
+
+void IOHIDEventSystemClientSetMatching(void* client, CFDictionaryRef matching)
+{
+	(void)client;
+	(void)matching;
+}
+
+CFArrayRef IOHIDEventSystemClientCopyServices(void* client)
+{
+	(void)client;
+	return CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
+}
+
+const void* IOHIDServiceClientCopyEvent(void* service, int64_t type,
+                                        int32_t options, int64_t timeout)
+{
+	(void)service;
+	(void)type;
+	(void)options;
+	(void)timeout;
+	return NULL;
+}
+
+const void* IOHIDServiceClientCopyProperty(void* service, CFStringRef key)
+{
+	(void)service;
+	(void)key;
+	return NULL;
+}
+
+double IOHIDEventGetFloatValue(const void* event, int32_t field)
+{
+	(void)event;
+	(void)field;
+	return 0.0;
+}
+
 CFTypeID CFStringGetTypeID(void)
 {
 	return CF_TYPE_ID_STRING;
@@ -1522,6 +2265,543 @@ uint8_t LocaleRefGetPartString(void* locale, uint32_t part_mask,
 	if (part_string && max_string_len > 0)
 		part_string[0] = 0;
 	return 0;
+}
+
+typedef int32_t UChar32;
+typedef int32_t UErrorCode;
+
+#define U_ZERO_ERROR 0
+#define U_ILLEGAL_ARGUMENT_ERROR 1
+#define U_BUFFER_OVERFLOW_ERROR 15
+#define UBRK_DONE (-1)
+
+struct machgate_ubrk {
+	int32_t position;
+	int32_t text_length;
+};
+
+struct machgate_ucal {
+	double millis;
+};
+
+static int icu_is_ascii_alpha(UChar32 value)
+{
+	return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+}
+
+static int icu_is_ascii_digit(UChar32 value)
+{
+	return value >= '0' && value <= '9';
+}
+
+static int icu_is_ascii_space(UChar32 value)
+{
+	return value == ' ' || (value >= '\t' && value <= '\r');
+}
+
+int u_charDirection(UChar32 value)
+{
+	(void)value;
+	return 0;
+}
+
+int8_t u_charType(UChar32 value)
+{
+	if (value >= 'A' && value <= 'Z')
+		return 1;
+	if (value >= 'a' && value <= 'z')
+		return 2;
+	if (icu_is_ascii_digit(value))
+		return 9;
+	if (value >= 0 && value < 0x20)
+		return 15;
+	if (value == ' ')
+		return 12;
+	return 0;
+}
+
+const char* u_errorName(UErrorCode code)
+{
+	switch (code) {
+	case U_ZERO_ERROR:
+		return "U_ZERO_ERROR";
+	case U_ILLEGAL_ARGUMENT_ERROR:
+		return "U_ILLEGAL_ARGUMENT_ERROR";
+	case U_BUFFER_OVERFLOW_ERROR:
+		return "U_BUFFER_OVERFLOW_ERROR";
+	default:
+		return "[BOGUS UErrorCode]";
+	}
+}
+
+void u_getVersion(uint8_t version_array[4])
+{
+	if (!version_array)
+		return;
+	version_array[0] = 76;
+	version_array[1] = 1;
+	version_array[2] = 0;
+	version_array[3] = 0;
+}
+
+uint8_t u_hasBinaryProperty(UChar32 value, int property)
+{
+	switch (property) {
+	case 0:
+		return icu_is_ascii_alpha(value);
+	case 1:
+	case 48:
+		return isxdigit((unsigned char)value) ? 1 : 0;
+	case 22:
+		return value >= 'a' && value <= 'z';
+	case 30:
+		return value >= 'A' && value <= 'Z';
+	case 31:
+		return icu_is_ascii_space(value);
+	case 44:
+		return icu_is_ascii_alpha(value) || icu_is_ascii_digit(value);
+	case 45:
+		return value == ' ' || value == '\t';
+	case 46:
+		return value >= 0x21 && value <= 0x7e;
+	case 47:
+		return value >= 0x20 && value <= 0x7e;
+	case 49:
+	case 34:
+		return icu_is_ascii_alpha(value);
+	default:
+		return 0;
+	}
+}
+
+UChar32 u_tolower(UChar32 value)
+{
+	if (value >= 'A' && value <= 'Z')
+		return value + ('a' - 'A');
+	return value;
+}
+
+UChar32 u_toupper(UChar32 value)
+{
+	if (value >= 'a' && value <= 'z')
+		return value - ('a' - 'A');
+	return value;
+}
+
+static int32_t icu_str_map(uint16_t* dest, int32_t dest_capacity,
+                           const uint16_t* src, int32_t src_length,
+                           UErrorCode* status, int to_upper)
+{
+	if (!src || src_length < -1) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return 0;
+	}
+
+	if (src_length < 0) {
+		src_length = 0;
+		while (src[src_length])
+			src_length++;
+	}
+
+	if (dest && dest_capacity > 0) {
+		int32_t copy_length = src_length < dest_capacity ? src_length : dest_capacity;
+		for (int32_t index = 0; index < copy_length; index++) {
+			UChar32 value = src[index];
+			dest[index] = (uint16_t)(to_upper ? u_toupper(value) : u_tolower(value));
+		}
+		if (copy_length < dest_capacity)
+			dest[copy_length] = 0;
+	}
+
+	if (status)
+		*status = src_length >= dest_capacity ? U_BUFFER_OVERFLOW_ERROR : U_ZERO_ERROR;
+	return src_length;
+}
+
+int32_t u_strToLower(uint16_t* dest, int32_t dest_capacity,
+                     const uint16_t* src, int32_t src_length,
+                     const char* locale, UErrorCode* status)
+{
+	(void)locale;
+	return icu_str_map(dest, dest_capacity, src, src_length, status, 0);
+}
+
+int32_t u_strToUpper(uint16_t* dest, int32_t dest_capacity,
+                     const uint16_t* src, int32_t src_length,
+                     const char* locale, UErrorCode* status)
+{
+	(void)locale;
+	return icu_str_map(dest, dest_capacity, src, src_length, status, 1);
+}
+
+void* ubrk_clone(const void* break_iterator, UErrorCode* status)
+{
+	struct machgate_ubrk* result = calloc(1, sizeof(*result));
+	const struct machgate_ubrk* source = break_iterator;
+
+	if (!result) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (source)
+		*result = *source;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return result;
+}
+
+void ubrk_close(void* break_iterator)
+{
+	free(break_iterator);
+}
+
+int32_t ubrk_countAvailable(void)
+{
+	return 1;
+}
+
+int32_t ubrk_current(const void* break_iterator)
+{
+	const struct machgate_ubrk* iterator = break_iterator;
+	return iterator ? iterator->position : UBRK_DONE;
+}
+
+int32_t ubrk_first(void* break_iterator)
+{
+	struct machgate_ubrk* iterator = break_iterator;
+	if (!iterator)
+		return UBRK_DONE;
+	iterator->position = 0;
+	return iterator->position;
+}
+
+int32_t ubrk_following(void* break_iterator, int32_t offset)
+{
+	struct machgate_ubrk* iterator = break_iterator;
+	if (!iterator || offset < 0)
+		return UBRK_DONE;
+	if (iterator->text_length >= 0 && offset >= iterator->text_length)
+		return UBRK_DONE;
+	iterator->position = offset + 1;
+	return iterator->position;
+}
+
+int32_t ubrk_preceding(void* break_iterator, int32_t offset)
+{
+	struct machgate_ubrk* iterator = break_iterator;
+	if (!iterator || offset <= 0)
+		return UBRK_DONE;
+	iterator->position = offset - 1;
+	return iterator->position;
+}
+
+const char* ubrk_getAvailable(int32_t index)
+{
+	return index == 0 ? "en_US" : NULL;
+}
+
+int32_t ubrk_getRuleStatus(void* break_iterator)
+{
+	(void)break_iterator;
+	return 0;
+}
+
+uint8_t ubrk_isBoundary(void* break_iterator, int32_t offset)
+{
+	struct machgate_ubrk* iterator = break_iterator;
+	if (iterator)
+		iterator->position = offset;
+	return offset >= 0 ? 1 : 0;
+}
+
+int32_t ubrk_next(void* break_iterator)
+{
+	struct machgate_ubrk* iterator = break_iterator;
+	if (!iterator)
+		return UBRK_DONE;
+	if (iterator->text_length >= 0 && iterator->position >= iterator->text_length)
+		return UBRK_DONE;
+	iterator->position++;
+	return iterator->position;
+}
+
+void* ubrk_open(int type, const char* locale, const uint16_t* text,
+                int32_t text_length, UErrorCode* status)
+{
+	(void)type;
+	(void)locale;
+	(void)text;
+	struct machgate_ubrk* iterator = ubrk_clone(NULL, status);
+	if (iterator)
+		iterator->text_length = text_length;
+	return iterator;
+}
+
+void ubrk_setText(void* break_iterator, const uint16_t* text,
+                  int32_t text_length, UErrorCode* status)
+{
+	struct machgate_ubrk* iterator = break_iterator;
+	(void)text;
+
+	if (!iterator) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return;
+	}
+	iterator->position = 0;
+	iterator->text_length = text_length;
+	if (status)
+		*status = U_ZERO_ERROR;
+}
+
+void ubrk_setUText(void* break_iterator, void* text, UErrorCode* status)
+{
+	(void)text;
+	ubrk_setText(break_iterator, NULL, -1, status);
+}
+
+static double icu_now_millis(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static int32_t utf16_copy_ascii(uint16_t* result, int32_t capacity,
+                                const char* text, UErrorCode* status)
+{
+	int32_t length = (int32_t)strlen(text);
+
+	if (result && capacity > 0) {
+		int32_t copy_length = length < capacity ? length : capacity - 1;
+		for (int32_t index = 0; index < copy_length; index++)
+			result[index] = (uint16_t)(unsigned char)text[index];
+		result[copy_length] = 0;
+	}
+
+	if (status)
+		*status = length >= capacity ? U_BUFFER_OVERFLOW_ERROR : U_ZERO_ERROR;
+	return length;
+}
+
+void* ucal_open(const uint16_t* zone_id, int32_t length, const char* locale,
+                int type, UErrorCode* status)
+{
+	struct machgate_ucal* calendar = calloc(1, sizeof(*calendar));
+	(void)zone_id;
+	(void)length;
+	(void)locale;
+	(void)type;
+
+	if (!calendar) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	calendar->millis = icu_now_millis();
+	if (status)
+		*status = U_ZERO_ERROR;
+	return calendar;
+}
+
+void ucal_close(void* calendar)
+{
+	free(calendar);
+}
+
+void* ucal_clone(const void* calendar, UErrorCode* status)
+{
+	struct machgate_ucal* result = calloc(1, sizeof(*result));
+	const struct machgate_ucal* source = calendar;
+
+	if (!result) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	result->millis = source ? source->millis : icu_now_millis();
+	if (status)
+		*status = U_ZERO_ERROR;
+	return result;
+}
+
+int32_t ucal_getAttribute(const void* calendar, int attribute)
+{
+	(void)calendar;
+
+	switch (attribute) {
+	case 0:
+		return 1;
+	case 1:
+		return 1;
+	case 2:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+void ucal_setMillis(void* calendar, double date_time, UErrorCode* status)
+{
+	struct machgate_ucal* cal = calendar;
+	if (cal)
+		cal->millis = date_time;
+	if (status)
+		*status = cal ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+}
+
+int32_t ucal_get(const void* calendar, int field, UErrorCode* status)
+{
+	const struct machgate_ucal* cal = calendar;
+	time_t seconds = (time_t)((cal ? cal->millis : icu_now_millis()) / 1000.0);
+	struct tm tm_value;
+
+	gmtime_r(&seconds, &tm_value);
+	if (status)
+		*status = U_ZERO_ERROR;
+
+	switch (field) {
+	case 1:
+	case 19:
+		return tm_value.tm_year + 1900;
+	case 2:
+	case 22:
+		return tm_value.tm_mon;
+	case 5:
+		return tm_value.tm_mday;
+	case 6:
+		return tm_value.tm_yday + 1;
+	case 7:
+		return tm_value.tm_wday + 1;
+	case 9:
+		return tm_value.tm_hour >= 12;
+	case 10:
+		return tm_value.tm_hour % 12;
+	case 11:
+		return tm_value.tm_hour;
+	case 12:
+		return tm_value.tm_min;
+	case 13:
+		return tm_value.tm_sec;
+	case 14:
+		return cal ? (int32_t)((int64_t)cal->millis % 1000) : 0;
+	case 15:
+	case 16:
+		return 0;
+	default:
+		return 0;
+	}
+}
+
+int32_t ucal_getCanonicalTimeZoneID(const uint16_t* id, int32_t length,
+                                    uint16_t* result, int32_t capacity,
+                                    uint8_t* is_system_id,
+                                    UErrorCode* status)
+{
+	(void)id;
+	(void)length;
+	if (is_system_id)
+		*is_system_id = 1;
+	return utf16_copy_ascii(result, capacity, "Etc/UTC", status);
+}
+
+int32_t ucal_getHostTimeZone(uint16_t* result, int32_t capacity,
+                             UErrorCode* status)
+{
+	return utf16_copy_ascii(result, capacity, "Etc/UTC", status);
+}
+
+int32_t ucal_getTimeZoneDisplayName(const void* calendar, int type,
+                                    const char* locale, uint16_t* result,
+                                    int32_t capacity, UErrorCode* status)
+{
+	(void)calendar;
+	(void)type;
+	(void)locale;
+	return utf16_copy_ascii(result, capacity, "UTC", status);
+}
+
+void ucal_getTimeZoneOffsetFromLocal(const void* calendar,
+                                     int non_existing_time_opt,
+                                     int duplicated_time_opt,
+                                     int32_t* raw_offset,
+                                     int32_t* dst_offset,
+                                     UErrorCode* status)
+{
+	(void)calendar;
+	(void)non_existing_time_opt;
+	(void)duplicated_time_opt;
+	if (raw_offset)
+		*raw_offset = 0;
+	if (dst_offset)
+		*dst_offset = 0;
+	if (status)
+		*status = U_ZERO_ERROR;
+}
+
+int ucal_getDayOfWeekType(const void* calendar, int day_of_week,
+                          UErrorCode* status)
+{
+	(void)calendar;
+	(void)day_of_week;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return 0;
+}
+
+void* ucal_getKeywordValuesForLocale(const char* key, const char* locale,
+                                     uint8_t commonly_used,
+                                     UErrorCode* status)
+{
+	(void)key;
+	(void)locale;
+	(void)commonly_used;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return NULL;
+}
+
+void* ucal_openTimeZoneIDEnumeration(int zone_type, const char* region,
+                                     const int32_t* raw_offset,
+                                     UErrorCode* status)
+{
+	(void)zone_type;
+	(void)region;
+	(void)raw_offset;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return NULL;
+}
+
+void* ucal_openTimeZones(UErrorCode* status)
+{
+	if (status)
+		*status = U_ZERO_ERROR;
+	return NULL;
+}
+
+void ucal_setGregorianChange(void* calendar, double date, UErrorCode* status)
+{
+	(void)calendar;
+	(void)date;
+	if (status)
+		*status = U_ZERO_ERROR;
+}
+
+void ucfpos_close(void* field_position)
+{
+	free(field_position);
+}
+
+void ucfpos_constrainCategory(void* field_position, int32_t category,
+                              UErrorCode* status)
+{
+	(void)field_position;
+	(void)category;
+	if (status)
+		*status = U_ZERO_ERROR;
 }
 
 void* CFRunLoopGetCurrent(void)
@@ -1652,6 +2932,46 @@ int mach_vm_region(uint32_t target_task, uint64_t* address, uint64_t* size,
 	return 1;
 }
 
+int mach_vm_map(uint32_t target_task, uint64_t* address, uint64_t size,
+                uint64_t mask, int flags, uint32_t object, uint64_t offset,
+                uint8_t copy, int cur_protection, int max_protection,
+                int inheritance)
+{
+	(void)target_task;
+	(void)mask;
+	(void)flags;
+	(void)object;
+	(void)offset;
+	(void)copy;
+	(void)max_protection;
+	(void)inheritance;
+
+	if (!address || !size)
+		return 4;
+
+	int protection = PROT_NONE;
+	if (cur_protection & 0x1)
+		protection |= PROT_READ;
+	if (cur_protection & 0x2)
+		protection |= PROT_WRITE;
+	if (cur_protection & 0x4)
+		protection |= PROT_EXEC;
+	if (protection == PROT_NONE)
+		protection = PROT_READ | PROT_WRITE;
+
+	void* requested = *address ? (void*)(uintptr_t)*address : NULL;
+	int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+	if (requested)
+		mmap_flags |= MAP_FIXED_NOREPLACE;
+
+	void* result = mmap(requested, (size_t)size, protection, mmap_flags, -1, 0);
+	if (result == MAP_FAILED)
+		return 3;
+
+	*address = (uint64_t)(uintptr_t)result;
+	return 0;
+}
+
 int proc_regionfilename(int pid, uint64_t address, void* buffer,
                         uint32_t buffer_size)
 {
@@ -1677,6 +2997,19 @@ int proc_listpids(uint32_t type, uint32_t typeinfo, void* buffer,
 	pid_t pid = getpid();
 	memcpy(buffer, &pid, sizeof(pid));
 	return (int)sizeof(pid);
+}
+
+int proc_listallpids(void* buffer, int buffer_size)
+{
+	return proc_listpids(0, 0, buffer, buffer_size);
+}
+
+int proc_listchildpids(pid_t parent_pid, void* buffer, int buffer_size)
+{
+	(void)parent_pid;
+	(void)buffer;
+	(void)buffer_size;
+	return 0;
 }
 
 int proc_pid_rusage(int pid, int flavor, void* buffer)
@@ -1853,6 +3186,221 @@ void srandomdev(void)
 	srandom(seed);
 }
 
+struct darwin_arch_info {
+	const char* name;
+	int32_t cpu_type;
+	int32_t cpu_subtype;
+	int32_t byte_order;
+	const char* description;
+};
+
+const struct darwin_arch_info* NXGetArchInfoFromCpuType(int32_t cpu_type,
+                                                        int32_t cpu_subtype)
+{
+	(void)cpu_subtype;
+
+	static const struct darwin_arch_info arm64_info = {
+		"arm64", 0x0100000c, 0, 0, "arm64"
+	};
+
+	if (cpu_type == arm64_info.cpu_type)
+		return &arm64_info;
+	return NULL;
+}
+
+void* acl_dup(void* acl)
+{
+	(void)acl;
+	errno = ENOTSUP;
+	return NULL;
+}
+
+int acl_free(void* object)
+{
+	free(object);
+	return 0;
+}
+
+void* acl_get_fd(int fd)
+{
+	(void)fd;
+	errno = ENOTSUP;
+	return NULL;
+}
+
+int acl_set_fd(int fd, void* acl)
+{
+	(void)fd;
+	(void)acl;
+	errno = ENOTSUP;
+	return -1;
+}
+
+int copyfile(const char* from, const char* to, void* state, uint32_t flags)
+{
+	(void)state;
+	(void)flags;
+
+	if (!from || !to) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	int input_fd = open(from, O_RDONLY);
+	if (input_fd < 0)
+		return -1;
+
+	int output_fd = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (output_fd < 0) {
+		int saved_errno = errno;
+		close(input_fd);
+		errno = saved_errno;
+		return -1;
+	}
+
+	char buffer[16384];
+	for (;;) {
+		ssize_t bytes_read = read(input_fd, buffer, sizeof(buffer));
+		if (bytes_read == 0)
+			break;
+		if (bytes_read < 0) {
+			int saved_errno = errno;
+			close(input_fd);
+			close(output_fd);
+			errno = saved_errno;
+			return -1;
+		}
+
+		char* cursor = buffer;
+		while (bytes_read > 0) {
+			ssize_t bytes_written = write(output_fd, cursor,
+			                              (size_t)bytes_read);
+			if (bytes_written < 0) {
+				int saved_errno = errno;
+				close(input_fd);
+				close(output_fd);
+				errno = saved_errno;
+				return -1;
+			}
+			cursor += bytes_written;
+			bytes_read -= bytes_written;
+		}
+	}
+
+	int result = 0;
+	if (close(output_fd) < 0)
+		result = -1;
+	if (close(input_fd) < 0)
+		result = -1;
+	return result;
+}
+
+struct copyfile_state {
+	uint32_t flags;
+};
+
+void* copyfile_state_alloc(void)
+{
+	return calloc(1, sizeof(struct copyfile_state));
+}
+
+int copyfile_state_free(void* state)
+{
+	free(state);
+	return 0;
+}
+
+int copyfile_state_get(void* state, uint32_t flag, void* value)
+{
+	(void)state;
+	(void)flag;
+	(void)value;
+	errno = EINVAL;
+	return -1;
+}
+
+int fcopyfile(int from_fd, int to_fd, void* state, uint32_t flags)
+{
+	(void)state;
+	(void)flags;
+
+	char buffer[16384];
+	for (;;) {
+		ssize_t bytes_read = read(from_fd, buffer, sizeof(buffer));
+		if (bytes_read == 0)
+			return 0;
+		if (bytes_read < 0)
+			return -1;
+
+		char* cursor = buffer;
+		while (bytes_read > 0) {
+			ssize_t bytes_written = write(to_fd, cursor, (size_t)bytes_read);
+			if (bytes_written < 0)
+				return -1;
+			cursor += bytes_written;
+			bytes_read -= bytes_written;
+		}
+	}
+}
+
+int clonefile(const char* from, const char* to, uint32_t flags)
+{
+	return copyfile(from, to, NULL, flags);
+}
+
+int clonefileat(int from_dirfd, const char* from, int to_dirfd,
+                const char* to, uint32_t flags)
+{
+	(void)flags;
+
+	if (!from || !to) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	int input_fd = openat(from_dirfd, from, O_RDONLY);
+	if (input_fd < 0)
+		return -1;
+	int output_fd = openat(to_dirfd, to, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (output_fd < 0) {
+		int saved_errno = errno;
+		close(input_fd);
+		errno = saved_errno;
+		return -1;
+	}
+
+	int result = fcopyfile(input_fd, output_fd, NULL, 0);
+	int saved_errno = errno;
+	close(input_fd);
+	close(output_fd);
+	errno = saved_errno;
+	return result;
+}
+
+int fclonefileat(int from_dirfd, const char* from, int to_dirfd,
+                 const char* to, uint32_t flags)
+{
+	return clonefileat(from_dirfd, from, to_dirfd, to, flags);
+}
+
+int fsetattrlist(int fd, const void* attr_list, void* attr_buf,
+                 size_t attr_buf_size, uint32_t options)
+{
+	(void)fd;
+	(void)attr_list;
+	(void)attr_buf;
+	(void)attr_buf_size;
+	(void)options;
+	return 0;
+}
+
+int lchflags(const char* path, uint32_t flags)
+{
+	(void)path;
+	(void)flags;
+	return 0;
+}
+
 int atexit(void (*function)(void))
 {
 	(void)function;
@@ -2002,17 +3550,104 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize)
 {
 	if (!buf || !bufsize) return -1;
 
-	ssize_t len = readlink("/proc/self/exe", buf, *bufsize - 1);
-	if (len < 0) return -1;
+	const char** guest_executable_path =
+		dlsym(RTLD_DEFAULT, "__machismo_guest_executable_path");
+	const char* path = (guest_executable_path && *guest_executable_path)
+		? *guest_executable_path
+		: NULL;
+	char proc_path[4096];
+
+	if (!path) {
+		ssize_t proc_len = readlink("/proc/self/exe", proc_path,
+		                            sizeof(proc_path) - 1);
+		if (proc_len < 0) return -1;
+		proc_path[proc_len] = '\0';
+		path = proc_path;
+	}
+
+	size_t len = strlen(path);
 
 	if ((uint32_t)len >= *bufsize) {
 		*bufsize = (uint32_t)len + 1;
 		return -1; /* buffer too small */
 	}
 
-	buf[len] = '\0';
+	memcpy(buf, path, len + 1);
 	*bufsize = (uint32_t)len;
 	return 0;
+}
+
+int proc_pidpath(int pid, void* buffer, uint32_t buffersize)
+{
+	if (!buffer || buffersize == 0) {
+		errno = EINVAL;
+		return 0;
+	}
+
+	const char** guest_executable_path =
+		dlsym(RTLD_DEFAULT, "__machismo_guest_executable_path");
+	const char* path = (pid == getpid() && guest_executable_path &&
+	                    *guest_executable_path)
+		? *guest_executable_path
+		: NULL;
+	char proc_path[4096];
+	char proc_link[64];
+
+	if (!path) {
+		snprintf(proc_link, sizeof(proc_link), "/proc/%d/exe", pid);
+		ssize_t proc_len = readlink(proc_link, proc_path,
+		                            sizeof(proc_path) - 1);
+		if (proc_len < 0)
+			return 0;
+		proc_path[proc_len] = '\0';
+		path = proc_path;
+	}
+
+	size_t len = strlen(path);
+	if (len >= buffersize) {
+		errno = ENOBUFS;
+		return 0;
+	}
+
+	memcpy(buffer, path, len + 1);
+	return (int)len;
+}
+
+ssize_t __getdirentries64(int fd, char* buffer, size_t buffer_size,
+                          int64_t* basep)
+{
+	(void)fd;
+	(void)buffer;
+	(void)buffer_size;
+	if (basep)
+		*basep = 0;
+	return 0;
+}
+
+int __pthread_fchdir(int fd)
+{
+	return fchdir(fd);
+}
+
+const char* getprogname(void)
+{
+	const char** guest_executable_path =
+		dlsym(RTLD_DEFAULT, "__machismo_guest_executable_path");
+	const char* path = (guest_executable_path && *guest_executable_path)
+		? *guest_executable_path
+		: "machgate";
+	const char* slash = strrchr(path, '/');
+	return slash ? slash + 1 : path;
+}
+
+void* getsegmentdata(const void* header, const char* segment_name,
+                     unsigned long* size)
+{
+	(void)header;
+	(void)segment_name;
+	if (size)
+		*size = 0;
+	return NULL;
 }
 
 /* ===== NSSearchPathEnumeration =====
@@ -2644,6 +4279,11 @@ void pthread_jit_write_protect_np(int enabled)
 	(void)enabled;
 }
 
+int pthread_jit_write_protect_supported_np(void)
+{
+	return 0;
+}
+
 int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void))
 {
 	static int (*real_pthread_atfork)(void (*)(void), void (*)(void), void (*)(void));
@@ -2699,7 +4339,11 @@ int pthread_cond_timedwait_relative_np(pthread_cond_t* cond,
 
 int kqueue(void)
 {
-	return eventfd(0, EFD_CLOEXEC);
+	int result = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: kqueue() -> %d errno=%d\n",
+		        result, result < 0 ? errno : 0);
+	return result;
 }
 
 struct darwin_kevent_placeholder {
@@ -2711,12 +4355,221 @@ struct darwin_kevent_placeholder {
 	void* udata;
 };
 
+#define DARWIN_EVFILT_READ (-1)
+#define DARWIN_EVFILT_WRITE (-2)
+#define DARWIN_EVFILT_USER (-10)
+#define DARWIN_EV_DELETE 0x0002
+#define DARWIN_EV_DISABLE 0x0008
+#define DARWIN_EV_EOF 0x8000
+#define DARWIN_NOTE_TRIGGER 0x01000000
+#define KQUEUE_REGISTRATION_COUNT 1024
+
+struct shim_kqueue_registration {
+	int used;
+	int kq;
+	uint64_t ident;
+	int16_t filter;
+	uint16_t flags;
+	uint32_t fflags;
+	int64_t data;
+	void* udata;
+	int triggered;
+};
+
+static pthread_mutex_t kqueue_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct shim_kqueue_registration kqueue_registrations[KQUEUE_REGISTRATION_COUNT];
+
+static struct shim_kqueue_registration* find_kqueue_registration(int kq,
+                                                                 uint64_t ident,
+                                                                 int16_t filter)
+{
+	for (int i = 0; i < KQUEUE_REGISTRATION_COUNT; i++) {
+		struct shim_kqueue_registration* registration = &kqueue_registrations[i];
+		if (registration->used && registration->kq == kq &&
+		    registration->ident == ident && registration->filter == filter)
+			return registration;
+	}
+	return NULL;
+}
+
+static struct shim_kqueue_registration* alloc_kqueue_registration(void)
+{
+	for (int i = 0; i < KQUEUE_REGISTRATION_COUNT; i++) {
+		if (!kqueue_registrations[i].used)
+			return &kqueue_registrations[i];
+	}
+	return NULL;
+}
+
+static int update_kqueue_registration(int kq,
+                                      const struct darwin_kevent_placeholder* change)
+{
+	struct shim_kqueue_registration* registration =
+		find_kqueue_registration(kq, change->ident, change->filter);
+
+	if (change->flags & DARWIN_EV_DELETE) {
+		if (registration)
+			memset(registration, 0, sizeof(*registration));
+		return 0;
+	}
+
+	if (change->filter != DARWIN_EVFILT_READ &&
+	    change->filter != DARWIN_EVFILT_WRITE &&
+	    change->filter != DARWIN_EVFILT_USER)
+		return 0;
+
+	if (!registration) {
+		registration = alloc_kqueue_registration();
+		if (!registration)
+			return -1;
+	}
+
+	registration->used = 1;
+	registration->kq = kq;
+	registration->ident = change->ident;
+	registration->filter = change->filter;
+	registration->flags = change->flags;
+	registration->fflags = change->fflags;
+	registration->data = change->data;
+	registration->udata = change->udata;
+	if (change->fflags & DARWIN_NOTE_TRIGGER)
+		registration->triggered = 1;
+	if (change->filter == DARWIN_EVFILT_USER &&
+	    (change->fflags & DARWIN_NOTE_TRIGGER)) {
+		uint64_t value = 1;
+		ssize_t write_result = write(kq, &value, sizeof(value));
+		(void)write_result;
+	}
+
+	return 0;
+}
+
+static int apply_kqueue_changes(int kq,
+                                const struct darwin_kevent_placeholder* changelist,
+                                int nchanges)
+{
+	for (int i = 0; i < nchanges; i++) {
+		if (update_kqueue_registration(kq, &changelist[i]) < 0) {
+			errno = ENOMEM;
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int kevent_timeout_ms(const struct timespec* timeout)
+{
+	if (!timeout)
+		return -1;
+	if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 ||
+	    timeout->tv_nsec >= 1000000000L)
+		return -1;
+	if (timeout->tv_sec > INT32_MAX / 1000)
+		return INT32_MAX;
+	int result = (int)(timeout->tv_sec * 1000);
+	result += (int)((timeout->tv_nsec + 999999L) / 1000000L);
+	return result;
+}
+
+static short kqueue_poll_events(int16_t filter)
+{
+	if (filter == DARWIN_EVFILT_READ || filter == DARWIN_EVFILT_USER)
+		return POLLIN;
+	if (filter == DARWIN_EVFILT_WRITE)
+		return POLLOUT;
+	return 0;
+}
+
+static int collect_kqueue_pollfds(int kq, struct pollfd* pollfds,
+                                  struct shim_kqueue_registration** registrations,
+                                  int max_events)
+{
+	int count = 0;
+
+	for (int i = 0; i < KQUEUE_REGISTRATION_COUNT && count < max_events; i++) {
+		struct shim_kqueue_registration* registration = &kqueue_registrations[i];
+		if (!registration->used || registration->kq != kq)
+			continue;
+		if (registration->flags & DARWIN_EV_DISABLE)
+			continue;
+		if (registration->filter == DARWIN_EVFILT_USER &&
+		    registration->triggered) {
+			pollfds[count].fd = kq;
+			pollfds[count].events = POLLIN;
+		} else {
+			pollfds[count].fd = (int)registration->ident;
+			pollfds[count].events = kqueue_poll_events(registration->filter);
+		}
+		pollfds[count].revents = 0;
+		registrations[count] = registration;
+		count++;
+	}
+
+	return count;
+}
+
+static int emit_kqueue_events(struct pollfd* pollfds,
+                              struct shim_kqueue_registration** registrations,
+                              int pollfd_count,
+                              struct darwin_kevent_placeholder* eventlist,
+                              int nevents)
+{
+	int result = 0;
+
+	for (int i = 0; i < pollfd_count && result < nevents; i++) {
+		struct shim_kqueue_registration* registration = registrations[i];
+		short revents = pollfds[i].revents;
+
+		if (!revents && registration->filter != DARWIN_EVFILT_USER)
+			continue;
+		if (!revents && !registration->triggered)
+			continue;
+
+		eventlist[result].ident = registration->ident;
+		eventlist[result].filter = registration->filter;
+		eventlist[result].flags = registration->flags;
+		eventlist[result].fflags = registration->fflags;
+		eventlist[result].data = 0;
+		eventlist[result].udata = registration->udata;
+		if (revents & (POLLHUP | POLLERR | POLLNVAL))
+			eventlist[result].flags |= DARWIN_EV_EOF;
+
+		if (registration->filter == DARWIN_EVFILT_USER) {
+			uint64_t value;
+			while (read(registration->kq, &value, sizeof(value)) > 0) {
+			}
+			registration->triggered = 0;
+		}
+
+		result++;
+	}
+
+	return result;
+}
+
+static void sleep_for_kevent_timeout(const struct timespec* timeout)
+{
+	if (!timeout)
+		return;
+	if (timeout->tv_sec == 0 && timeout->tv_nsec == 0)
+		return;
+	if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 ||
+	    timeout->tv_nsec >= 1000000000L)
+		return;
+
+	struct timespec sleep_time = *timeout;
+	if (sleep_time.tv_sec > 0 || sleep_time.tv_nsec > 1000000L) {
+		sleep_time.tv_sec = 0;
+		sleep_time.tv_nsec = 1000000L;
+	}
+	syscall(SYS_nanosleep, &sleep_time, NULL);
+}
+
 int kevent(int kq, const struct darwin_kevent_placeholder* changelist,
            int nchanges, struct darwin_kevent_placeholder* eventlist,
            int nevents, const struct timespec* timeout)
 {
-	(void)changelist;
-	(void)nchanges;
+	int result = 0;
 
 	if (kq < 0) {
 		errno = EBADF;
@@ -2726,15 +4579,87 @@ int kevent(int kq, const struct darwin_kevent_placeholder* changelist,
 		errno = EINVAL;
 		return -1;
 	}
-	if (eventlist && nevents > 0 && timeout &&
-	    timeout->tv_sec == 0 && timeout->tv_nsec == 0)
-		return 0;
-	return 0;
+
+	pthread_mutex_lock(&kqueue_mutex);
+	if (changelist && nchanges > 0)
+		result = apply_kqueue_changes(kq, changelist, nchanges);
+	pthread_mutex_unlock(&kqueue_mutex);
+	if (result < 0)
+		return result;
+
+	if (eventlist && nevents > 0) {
+		struct pollfd pollfds[64];
+		struct shim_kqueue_registration* registrations[64];
+		int max_events = nevents < 64 ? nevents : 64;
+		int pollfd_count;
+		int poll_result;
+
+		pthread_mutex_lock(&kqueue_mutex);
+		pollfd_count = collect_kqueue_pollfds(kq, pollfds, registrations,
+		                                      max_events);
+		pthread_mutex_unlock(&kqueue_mutex);
+
+		if (pollfd_count == 0) {
+			sleep_for_kevent_timeout(timeout);
+			result = 0;
+		} else {
+			poll_result = poll(pollfds, (nfds_t)pollfd_count,
+			                   kevent_timeout_ms(timeout));
+			if (poll_result < 0)
+				result = -1;
+			else {
+				pthread_mutex_lock(&kqueue_mutex);
+				result = emit_kqueue_events(pollfds, registrations,
+				                            pollfd_count, eventlist,
+				                            nevents);
+				pthread_mutex_unlock(&kqueue_mutex);
+			}
+		}
+	}
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: kevent(kq=%d nchanges=%d nevents=%d timeout=%p timeout_value=%lld.%09ld) -> %d errno=%d\n",
+		        kq, nchanges, nevents, timeout,
+		        timeout ? (long long)timeout->tv_sec : -1,
+		        timeout ? timeout->tv_nsec : -1L,
+		        result, result < 0 ? errno : 0);
+	return result;
+}
+
+int kevent64(int kq, const struct darwin_kevent_placeholder* changelist,
+             int nchanges, struct darwin_kevent_placeholder* eventlist,
+             int nevents, uint32_t flags, const struct timespec* timeout)
+{
+	(void)flags;
+	return kevent(kq, changelist, nchanges, eventlist, nevents, timeout);
 }
 
 int notify_is_valid_token(int token)
 {
 	(void)token;
+	return 0;
+}
+
+int notify_cancel(int token)
+{
+	(void)token;
+	return 0;
+}
+
+int notify_register_file_descriptor(const char* name, int* notify_fd,
+                                    int flags, int* token)
+{
+	(void)name;
+	(void)flags;
+
+	if (!notify_fd || !token)
+		return EINVAL;
+
+	int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (fd < 0)
+		return errno;
+
+	*notify_fd = fd;
+	*token = fd;
 	return 0;
 }
 
@@ -2829,6 +4754,23 @@ int pthread_threadid_np(pthread_t thread, uint64_t *thread_id)
 	if (shim_trace_enabled())
 		fprintf(stderr, "libsystem_shim: pthread_threadid_np -> %llu\n",
 		        (unsigned long long)*thread_id);
+	return 0;
+}
+
+int pthread_set_qos_class_self_np(int qos_class, int relative_priority)
+{
+	(void)qos_class;
+	(void)relative_priority;
+	return 0;
+}
+
+int pthread_main_np(void)
+{
+	return syscall(SYS_gettid) == getpid();
+}
+
+int pthread_self_is_exiting_np(void)
+{
 	return 0;
 }
 
@@ -3128,6 +5070,27 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 	struct sigaction* linux_act_ptr = NULL;
 	struct sigaction* linux_oldact_ptr = darwin_oldact ? &linux_oldact : NULL;
 	int linux_signal = darwin_signal_to_linux(signum);
+
+	if ((signum == 9 || signum == 17) &&
+	    (!darwin_act || darwin_act->handler == 0)) {
+		if (darwin_oldact) {
+			darwin_oldact->handler = 0;
+			darwin_oldact->mask = 0;
+			darwin_oldact->flags = 0;
+		}
+		if (shim_trace_enabled())
+			fprintf(stderr, "libsystem_shim: sigaction(%d->%d act=%p old=%p) -> 0 errno=0\n",
+			        signum, linux_signal, act, oldact);
+		return 0;
+	}
+
+	if ((signum == 9 || signum == 17) && darwin_act) {
+		errno = EINVAL;
+		if (shim_trace_enabled())
+			fprintf(stderr, "libsystem_shim: sigaction(%d->%d act=%p old=%p) -> -1 errno=%d\n",
+			        signum, linux_signal, act, oldact, errno);
+		return -1;
+	}
 
 	if (!real_sigaction)
 		real_sigaction = dlsym(RTLD_NEXT, "sigaction");
@@ -3641,43 +5604,219 @@ void* dispatch_queue_create(const char *label, void *attr)
 /* ---- Async/sync (execute blocks inline — no real concurrency) ---- */
 
 typedef void (*dispatch_block_t)(void);
+typedef void (*dispatch_function_t)(void*);
+
+struct machgate_dispatch_source {
+	void* type;
+	uintptr_t handle;
+	uintptr_t mask;
+	void* queue;
+	void* event_handler;
+};
+
+const char _dispatch_source_type_mach_recv[] = "mach_recv";
+
+static void dispatch_invoke_block(void* block)
+{
+	if (!block)
+		return;
+
+	void** block_words = (void**)block;
+	void (*invoke)(void*) = (void (*)(void*))block_words[2];
+	if (invoke)
+		invoke(block);
+}
 
 void dispatch_async(void *queue, void *block)
 {
 	(void)queue;
-	if (block) {
-		/* Execute the block synchronously.
-		 * Apple Blocks ABI: the function pointer is at offset 16 in the block literal. */
-		void **blk = (void **)block;
-		void (*invoke)(void *) = (void (*)(void *))blk[2];
-		if (invoke) invoke(block);
-	}
+	dispatch_invoke_block(block);
 }
 
 void dispatch_sync(void *queue, void *block)
 {
 	(void)queue;
-	if (block) {
-		void **blk = (void **)block;
-		void (*invoke)(void *) = (void (*)(void *))blk[2];
-		if (invoke) invoke(block);
-	}
+	dispatch_invoke_block(block);
 }
 
 void dispatch_once(long *predicate, void *block)
 {
 	if (__sync_bool_compare_and_swap(predicate, 0, 1)) {
-		if (block) {
-			void **blk = (void **)block;
-			void (*invoke)(void *) = (void (*)(void *))blk[2];
-			if (invoke) invoke(block);
-		}
+		dispatch_invoke_block(block);
 		__sync_synchronize();
 		*predicate = ~0L;
 	} else {
 		while (*predicate != ~0L)
 			sched_yield();
 	}
+}
+
+void dispatch_once_f(long* predicate, void* context,
+                     dispatch_function_t function)
+{
+	if (__sync_bool_compare_and_swap(predicate, 0, 1)) {
+		if (function)
+			function(context);
+		__sync_synchronize();
+		*predicate = ~0L;
+		return;
+	}
+
+	while (*predicate != ~0L)
+		sched_yield();
+}
+
+void* dispatch_source_create(const void* type, uintptr_t handle,
+                             uintptr_t mask, void* queue)
+{
+	struct machgate_dispatch_source* source = calloc(1, sizeof(*source));
+	if (!source)
+		return NULL;
+	source->type = (void*)type;
+	source->handle = handle;
+	source->mask = mask;
+	source->queue = queue;
+	return source;
+}
+
+void dispatch_source_set_event_handler(void* source_ref, void* handler)
+{
+	struct machgate_dispatch_source* source = source_ref;
+	if (source)
+		source->event_handler = handler;
+}
+
+void dispatch_resume(void* object)
+{
+	struct machgate_dispatch_source* source = object;
+	if (source && source->event_handler)
+		dispatch_invoke_block(source->event_handler);
+}
+
+void _os_signpost_emit_with_name_impl(void* dso, void* log, uint32_t type,
+                                      uint64_t signpost_id, const char* name,
+                                      const char* format, ...)
+{
+	(void)dso;
+	(void)log;
+	(void)type;
+	(void)signpost_id;
+	(void)name;
+	(void)format;
+}
+
+void* os_log_create(const char* subsystem, const char* category)
+{
+	(void)subsystem;
+	(void)category;
+	return (void*)"MachGate/os_log";
+}
+
+uint8_t os_signpost_enabled(void* log)
+{
+	(void)log;
+	return 0;
+}
+
+void os_unfair_lock_lock(uint32_t* lock)
+{
+	if (!lock)
+		return;
+	while (!__sync_bool_compare_and_swap(lock, 0, 1))
+		sched_yield();
+}
+
+uint8_t os_unfair_lock_trylock(uint32_t* lock)
+{
+	if (!lock)
+		return 0;
+	return __sync_bool_compare_and_swap(lock, 0, 1) ? 1 : 0;
+}
+
+void os_unfair_lock_unlock(uint32_t* lock)
+{
+	if (lock)
+		__sync_lock_release(lock);
+}
+
+void os_unfair_lock_assert_owner(uint32_t* lock)
+{
+	(void)lock;
+}
+
+#define DARWIN_UL_OPCODE_MASK 0x000000ffU
+#define DARWIN_ULF_NO_ERRNO 0x01000000U
+#define DARWIN_ULF_WAKE_ALL 0x00000100U
+
+static int ulock_result(int result, uint32_t operation)
+{
+	if (result == 0)
+		return 0;
+	if (operation & DARWIN_ULF_NO_ERRNO)
+		return -errno;
+	return -1;
+}
+
+int __ulock_wait2(uint32_t operation, void* address, uint64_t value,
+                  uint64_t timeout, uint64_t value2)
+{
+	(void)value2;
+
+	if (!address) {
+		errno = EFAULT;
+		return ulock_result(-1, operation);
+	}
+
+	uint32_t opcode = operation & DARWIN_UL_OPCODE_MASK;
+	int futex_op = FUTEX_WAIT_PRIVATE;
+	const struct timespec* timeout_ptr = NULL;
+	struct timespec timeout_value;
+
+	if (timeout) {
+		timeout_value.tv_sec = (time_t)(timeout / 1000000000ULL);
+		timeout_value.tv_nsec = (long)(timeout % 1000000000ULL);
+		timeout_ptr = &timeout_value;
+	}
+
+	long result;
+	if (opcode == 5 || opcode == 6) {
+		result = syscall(SYS_futex, address, futex_op, value,
+		                 timeout_ptr, NULL, 0);
+	} else {
+		result = syscall(SYS_futex, address, futex_op, (uint32_t)value,
+		                 timeout_ptr, NULL, 0);
+	}
+
+	if (result == 0)
+		return 0;
+	return ulock_result(-1, operation);
+}
+
+int __ulock_wait(uint32_t operation, void* address, uint64_t value,
+                 uint32_t timeout)
+{
+	uint64_t timeout_ns = (uint64_t)timeout * 1000ULL;
+	return __ulock_wait2(operation, address, value, timeout_ns, 0);
+}
+
+int __ulock_wake(uint32_t operation, void* address, uint64_t wake_value)
+{
+	if (!address) {
+		errno = EFAULT;
+		return ulock_result(-1, operation);
+	}
+
+	int wake_count = 1;
+	if ((operation & DARWIN_ULF_WAKE_ALL) || wake_value > INT32_MAX)
+		wake_count = INT32_MAX;
+	else if (wake_value > 0)
+		wake_count = (int)wake_value;
+
+	long result = syscall(SYS_futex, address, FUTEX_WAKE_PRIVATE, wake_count,
+	                      NULL, NULL, 0);
+	if (result >= 0)
+		return 0;
+	return ulock_result(-1, operation);
 }
 
 /* ---- Dispatch time ---- */
@@ -3848,9 +5987,13 @@ __asm__(
 	".global _tlv_bootstrap\n"
 	".type _tlv_bootstrap, %function\n"
 	"_tlv_bootstrap:\n"
-	"stp x8, x30, [sp, #-16]!\n"
+	"stp x8, x9, [sp, #-48]!\n"
+	"stp x10, x11, [sp, #16]\n"
+	"str x30, [sp, #32]\n"
 	"bl _tlv_bootstrap_impl\n"
-	"ldp x8, x30, [sp], #16\n"
+	"ldr x30, [sp, #32]\n"
+	"ldp x10, x11, [sp, #16]\n"
+	"ldp x8, x9, [sp], #48\n"
 	"ret\n"
 );
 #else
@@ -3873,6 +6016,19 @@ pid_t vfork(void)
 {
 	return fork();
 }
+
+/* ===== setjmp ===== */
+
+#if defined(__aarch64__)
+__asm__(
+".text\n"
+".global sigsetjmp\n"
+".type sigsetjmp, %function\n"
+"sigsetjmp:\n"
+"	b __sigsetjmp\n"
+".size sigsetjmp, .-sigsetjmp\n"
+);
+#endif
 
 /* ===== 128-bit division ===== */
 
@@ -3947,6 +6103,25 @@ void _Unwind_Resume(void* exception_object)
 #define DARWIN_F_NOCACHE    48  /* no Linux equivalent */
 #define DARWIN_F_GETPATH    50  /* implement via /proc */
 #define DARWIN_F_FULLFSYNC  51  /* implement via fsync */
+
+#define DARWIN_FIOCLEX      0x20006601u
+#define DARWIN_FIONCLEX     0x20006602u
+#define DARWIN_FIONREAD     0x4004667fu
+#define DARWIN_FIONBIO      0x8004667eu
+#define DARWIN_TIOCOUTQ     0x40047473u
+#define DARWIN_TIOCSWINSZ   0x80087467u
+#define DARWIN_TIOCGWINSZ   0x40087468u
+
+#define DARWIN_RENAME_SWAP 0x00000002u
+#define DARWIN_RENAME_EXCL 0x00000004u
+
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1U << 0)
+#endif
+
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1U << 1)
+#endif
 
 /* ---- Translation helpers ---- */
 
@@ -4061,16 +6236,39 @@ int shim_openat(int dirfd, const char *pathname, int flags, ...)
 	               linux_flags, mode);
 }
 
+int __renameatx_np(int oldfd, const char* old_path, int newfd,
+                   const char* new_path, unsigned int flags)
+{
+	unsigned int linux_flags = 0;
+
+	if (flags & DARWIN_RENAME_SWAP)
+		linux_flags |= RENAME_EXCHANGE;
+	if (flags & DARWIN_RENAME_EXCL)
+		linux_flags |= RENAME_NOREPLACE;
+
+	if (flags & ~(DARWIN_RENAME_SWAP | DARWIN_RENAME_EXCL)) {
+		errno = ENOTSUP;
+		return -1;
+	}
+
+	if (linux_flags)
+		return syscall(SYS_renameat2, translate_dirfd(oldfd), old_path,
+		               translate_dirfd(newfd), new_path, linux_flags);
+
+	return syscall(SYS_renameat, translate_dirfd(oldfd), old_path,
+	               translate_dirfd(newfd), new_path);
+}
+
+int renameatx_np(int oldfd, const char* old_path, int newfd,
+                 const char* new_path, unsigned int flags)
+{
+	return __renameatx_np(oldfd, old_path, newfd, new_path, flags);
+}
+
 /* ---- fcntl() ---- */
 
-int shim_fcntl(int fd, int cmd, ...) __asm__("fcntl");
-int shim_fcntl(int fd, int cmd, ...)
+static int shim_fcntl_fixed(int fd, int cmd, unsigned long arg)
 {
-	va_list args;
-	va_start(args, cmd);
-	unsigned long arg = va_arg(args, unsigned long);
-	va_end(args);
-
 	int linux_cmd;
 	switch (cmd) {
 	/* Commands 0–4 (F_DUPFD through F_SETFL) are identical */
@@ -4109,12 +6307,92 @@ int shim_fcntl(int fd, int cmd, ...)
 		arg = (unsigned long)translate_oflags((int)arg);
 
 	int ret = syscall(SYS_fcntl, fd, linux_cmd, arg);
+	int saved_errno = errno;
 
 	/* Translate O_flags back to Darwin for F_GETFL */
 	if (cmd == F_GETFL && ret >= 0)
 		ret = translate_oflags_to_darwin(ret);
 
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: fcntl(fd=%d cmd=%d->%d arg=%#lx) -> %d errno=%d\n",
+		        fd, cmd, linux_cmd, arg, ret, ret < 0 ? saved_errno : 0);
+
 	return ret;
+}
+
+int shim_fcntl(int fd, int cmd, ...) __asm__("fcntl");
+int shim_fcntl(int fd, int cmd, ...)
+{
+	va_list args;
+	va_start(args, cmd);
+	unsigned long arg = va_arg(args, unsigned long);
+	va_end(args);
+
+	return shim_fcntl_fixed(fd, cmd, arg);
+}
+
+int machgate_darwin_fcntl_fixed(int fd, int cmd, unsigned long arg)
+{
+	return shim_fcntl_fixed(fd, cmd, arg);
+}
+
+static int translate_ioctl_request(unsigned long darwin_request,
+                                   unsigned long* linux_request)
+{
+	switch (darwin_request) {
+	case DARWIN_FIONREAD:
+		*linux_request = FIONREAD;
+		return 1;
+	case DARWIN_FIONBIO:
+		*linux_request = FIONBIO;
+		return 1;
+#ifdef TIOCOUTQ
+	case DARWIN_TIOCOUTQ:
+		*linux_request = TIOCOUTQ;
+		return 1;
+#endif
+	case DARWIN_TIOCSWINSZ:
+		*linux_request = TIOCSWINSZ;
+		return 1;
+	case DARWIN_TIOCGWINSZ:
+		*linux_request = TIOCGWINSZ;
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+int machgate_darwin_ioctl_fixed(int fd, unsigned long request,
+                                unsigned long arg)
+{
+	unsigned long linux_request;
+	int result;
+	int saved_errno;
+
+	linux_request = request;
+
+	if (request == DARWIN_FIOCLEX) {
+		result = syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
+		saved_errno = errno;
+	} else if (request == DARWIN_FIONCLEX) {
+		result = syscall(SYS_fcntl, fd, F_SETFD, 0);
+		saved_errno = errno;
+	} else if (translate_ioctl_request(request, &linux_request)) {
+		result = syscall(SYS_ioctl, fd, linux_request, arg);
+		saved_errno = errno;
+	} else {
+		errno = ENOSYS;
+		result = -1;
+		saved_errno = errno;
+		linux_request = request;
+	}
+
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: ioctl(fd=%d request=%#lx->%#lx arg=%#lx) -> %d errno=%d\n",
+		        fd, request, linux_request, arg, result,
+		        result < 0 ? saved_errno : 0);
+
+	return result;
 }
 
 /* ---- shm_open() ---- */
@@ -4143,10 +6421,26 @@ int shim_dup3(int oldfd, int newfd, int flags)
 	return syscall(SYS_dup3, oldfd, newfd, translate_oflags(flags));
 }
 
+int shim_pipe(int pipefd[2]) __asm__("pipe");
+int shim_pipe(int pipefd[2])
+{
+	int result = syscall(SYS_pipe2, pipefd, 0);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pipe() -> %d fds=[%d,%d] errno=%d\n",
+		        result, result == 0 ? pipefd[0] : -1,
+		        result == 0 ? pipefd[1] : -1, result < 0 ? errno : 0);
+	return result;
+}
+
 int shim_pipe2(int pipefd[2], int flags) __asm__("pipe2");
 int shim_pipe2(int pipefd[2], int flags)
 {
-	return syscall(SYS_pipe2, pipefd, translate_oflags(flags));
+	int result = syscall(SYS_pipe2, pipefd, translate_oflags(flags));
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pipe2(flags=%#x) -> %d fds=[%d,%d] errno=%d\n",
+		        flags, result, result == 0 ? pipefd[0] : -1,
+		        result == 0 ? pipefd[1] : -1, result < 0 ? errno : 0);
+	return result;
 }
 
 /* ===== stat() ABI translation ===== */
@@ -4502,21 +6796,79 @@ static size_t mmap_registry_remove(void *addr)
  * We intercept and redirect to the native GL library (gl4es or Mesa). */
 
 static void* (*real_dlopen)(const char*, int) = NULL;
+static void* (*real_dlsym)(void*, const char*) = NULL;
+
+#define DARWIN_RTLD_DEFAULT ((void*)-2L)
+#define DARWIN_RTLD_SELF ((void*)-3L)
+#define DARWIN_RTLD_MAIN_ONLY ((void*)-5L)
+
+static void* translate_dlsym_handle(void* handle)
+{
+	if (handle == DARWIN_RTLD_DEFAULT ||
+	    handle == DARWIN_RTLD_SELF ||
+	    handle == DARWIN_RTLD_MAIN_ONLY)
+		return RTLD_DEFAULT;
+	return handle;
+}
+
+void* dlsym(void* handle, const char* symbol)
+{
+	if (!real_dlsym)
+		real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.17");
+
+	return real_dlsym(translate_dlsym_handle(handle), symbol);
+}
+
+static int translate_dlopen_flags(int flags)
+{
+	int result = 0;
+
+	if (flags & RTLD_NOW)
+		result |= RTLD_NOW;
+	else
+		result |= RTLD_LAZY;
+
+	if (flags & RTLD_GLOBAL)
+		result |= RTLD_GLOBAL;
+	else
+		result |= RTLD_LOCAL;
+
+	return result;
+}
+
+static int is_shim_framework_path(const char* path)
+{
+	return path &&
+	       (strstr(path, "CoreFoundation.framework") ||
+	        strstr(path, "CoreServices.framework") ||
+	        strstr(path, "ApplicationServices.framework") ||
+	        strstr(path, "IOKit.framework"));
+}
 
 void* dlopen(const char* path, int flags)
 {
 	if (!real_dlopen)
 		real_dlopen = dlsym(RTLD_NEXT, "dlopen");
 
+	int linux_flags = translate_dlopen_flags(flags);
+
+	if (is_shim_framework_path(path)) {
+		void* handle = real_dlopen("libsystem_shim.so", linux_flags);
+		if (shim_trace_enabled())
+			fprintf(stderr, "libsystem_shim: redirected dlopen('%s') -> libsystem_shim.so handle=%p\n",
+			        path, handle);
+		return handle;
+	}
+
 	if (path && strstr(path, "OpenGL.framework")) {
 		/* Redirect to gl4es (or native Mesa GL) — search LD_LIBRARY_PATH */
-		void* handle = real_dlopen("libGL.so.1", flags);
+		void* handle = real_dlopen("libGL.so.1", linux_flags);
 		if (handle) {
 			fprintf(stderr, "libsystem_shim: redirected dlopen('%s') → libGL.so.1\n", path);
 			return handle;
 		}
 		/* Fallback to GLES if no desktop GL */
-		handle = real_dlopen("libGLESv2.so.2", flags);
+		handle = real_dlopen("libGLESv2.so.2", linux_flags);
 		if (handle) {
 			fprintf(stderr, "libsystem_shim: redirected dlopen('%s') → libGLESv2.so.2\n", path);
 			return handle;
@@ -4524,7 +6876,7 @@ void* dlopen(const char* path, int flags)
 		fprintf(stderr, "libsystem_shim: WARNING: failed to redirect dlopen('%s')\n", path);
 	}
 
-	return real_dlopen(path, flags);
+	return real_dlopen(path, linux_flags);
 }
 
 /* ===== Darwin assert ===== */
@@ -4537,6 +6889,18 @@ __attribute__((noreturn))
 void __assert_rtn(const char *func, const char *file, int line, const char *expr)
 {
 	__assert_fail(expr, file, (unsigned)line, func);
+}
+
+int timingsafe_bcmp(const void* buffer_a, const void* buffer_b, size_t length)
+{
+	const unsigned char* bytes_a = buffer_a;
+	const unsigned char* bytes_b = buffer_b;
+	unsigned char result = 0;
+
+	while (length--)
+		result |= bytes_a[length] ^ bytes_b[length];
+
+	return (result + 0xff) >> 8;
 }
 
 /* ===== Heap allocation wrappers ===== */
@@ -4710,7 +7074,7 @@ static void malloc_zone_batch_free(void* zone, void** pointers,
 		shim_free(pointers[index]);
 }
 
-static void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
+void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
 {
 	void* result = NULL;
 
@@ -4728,7 +7092,7 @@ static void malloc_zone_free_definite_size(void* zone, void* ptr, size_t size)
 	malloc_zone_free(zone, ptr);
 }
 
-static size_t malloc_zone_pressure_relief(void* zone, size_t goal)
+size_t malloc_zone_pressure_relief(void* zone, size_t goal)
 {
 	(void)zone;
 	(void)goal;
@@ -4811,6 +7175,18 @@ void* malloc_create_zone(size_t start_size, unsigned int flags)
 	(void)start_size;
 	(void)flags;
 	return &default_malloc_zone;
+}
+
+size_t malloc_good_size(size_t size)
+{
+	return size;
+}
+
+void* malloc_logger = NULL;
+
+void malloc_zone_register(void* zone)
+{
+	(void)zone;
 }
 
 void malloc_set_zone_name(void* zone, const char* name)

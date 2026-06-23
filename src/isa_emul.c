@@ -442,6 +442,26 @@ static int emit_bcax_island(int vd, int vn, int vm, int va,
 	return n;
 }
 
+size_t isa_emul_estimate_pool_size(uint32_t *code, size_t code_size)
+{
+	size_t count = code_size / 4;
+	size_t words = 0;
+
+	for (size_t i = 0; i < count; i++) {
+		struct lse_decoded d;
+		if (decode_lse(code[i], &d)) {
+			words += 24;
+			continue;
+		}
+
+		int vd, vn, vm, va;
+		if (decode_bcax(code[i], &vd, &vn, &vm, &va))
+			words += 5;
+	}
+
+	return words * sizeof(uint32_t);
+}
+
 int isa_emul_patch(uint32_t *code, size_t code_size,
                    uint32_t **pool_ptr, uint32_t *pool_end)
 {

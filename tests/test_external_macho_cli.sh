@@ -39,18 +39,20 @@ fi
 
 cat > "$CONFIG_DIR/dylib_map.conf" <<EOF
 libSystem.B = $BUILD_DIR/libsystem_shim.so
+libcurl.4 = libcurl.so.4
 libz.1 = libz.so
 libobjc = STUB
 CoreFoundation = $BUILD_DIR/libsystem_shim.so
 $(if [ -n "$LIBCXX_DYLIB" ]; then echo "libc++.1 = $LIBCXX_DYLIB"; fi)
+libicucore = $BUILD_DIR/libsystem_shim.so
 libiconv = libc.so.6
-libresolv = SKIP
-Security = SKIP
+libresolv = $BUILD_DIR/libsystem_shim.so
+Security = $BUILD_DIR/libsystem_shim.so
 Foundation = SKIP
-IOKit = SKIP
+IOKit = $BUILD_DIR/libsystem_shim.so
 SystemConfiguration = SKIP
 AppKit = SKIP
-CoreServices = libm.so.6
+CoreServices = $BUILD_DIR/libsystem_shim.so
 OpenDirectory = SKIP
 EOF
 
@@ -105,7 +107,11 @@ extract_binary()
             ;;
     esac
 
-    cp "$extract_dir/$binary_path" "$dest"
+    if [ "$binary_path" = "cmake-4.3.3-macos-universal/CMake.app/Contents/bin/cmake" ]; then
+        ln -sf "$extract_dir/$binary_path" "$dest"
+    else
+        cp "$extract_dir/$binary_path" "$dest"
+    fi
     chmod +x "$dest"
 }
 

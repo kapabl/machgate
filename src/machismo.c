@@ -50,6 +50,9 @@
 #	define PAGE_SIZE	4096
 #endif
 #define PAGE_ALIGN(x) ((x) & ~(PAGE_SIZE-1))
+#define MAIN_LSE_POOL_MIN_SIZE (2 * 1024 * 1024)
+#define MAIN_LSE_POOL_SLACK_SIZE (64 * 1024)
+#define ARM64_DIRECT_BRANCH_RANGE (128 * 1024 * 1024)
 
 static void load64(int fd, bool expect_dylinker, struct load_results* lr);
 static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
@@ -58,6 +61,8 @@ static void fixup_darwin_pthread_data(struct load_results* lr);
 static void setup_tlv_image(struct load_results* lr);
 static int native_prot(int prot);
 static void setup_space(struct load_results* lr, bool is_64_bit);
+static size_t align_page_size(size_t size);
+static size_t estimate_main_lse_pool_size(struct load_results* lr);
 static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
                                         uintptr_t text_end,
                                         size_t pool_size,
@@ -77,6 +82,49 @@ void* __machismo_main_stack_top = NULL;
 size_t __machismo_main_stack_size = 0;
 int __machismo_guest_argc = 0;
 char** __machismo_guest_argv = NULL;
+const char* __machismo_guest_executable_path = NULL;
+
+static size_t align_page_size(size_t size)
+{
+	size_t page_mask = (size_t)PAGE_SIZE - 1;
+	return (size + page_mask) & ~page_mask;
+}
+
+static size_t estimate_main_lse_pool_size(struct load_results* lr)
+{
+	if (!lr->mh)
+		return MAIN_LSE_POOL_MIN_SIZE;
+
+	struct mach_header_64* mh = (struct mach_header_64*)lr->mh;
+	uint8_t* cmds = (uint8_t*)(mh + 1);
+	uint32_t p = 0;
+	size_t estimated_size = 0;
+
+	for (uint32_t i = 0; i < mh->ncmds && p < mh->sizeofcmds; i++) {
+		struct load_command* lc = (struct load_command*)(cmds + p);
+		if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			if (seg->maxprot & VM_PROT_EXECUTE) {
+				struct section_64* sect = (struct section_64*)(seg + 1);
+				for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+					if (!(sect->flags & S_ATTR_SOME_INSTRUCTIONS) &&
+					    !(sect->flags & S_ATTR_PURE_INSTRUCTIONS))
+						continue;
+					uint32_t* code = (uint32_t*)(sect->addr + lr->slide);
+					estimated_size += isa_emul_estimate_pool_size(code, sect->size);
+				}
+			}
+		}
+		p += lc->cmdsize;
+	}
+
+	if (estimated_size > 0)
+		estimated_size += MAIN_LSE_POOL_SLACK_SIZE;
+	if (estimated_size < MAIN_LSE_POOL_MIN_SIZE)
+		estimated_size = MAIN_LSE_POOL_MIN_SIZE;
+
+	return align_page_size(estimated_size);
+}
 
 static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
                                         uintptr_t text_end,
@@ -85,20 +133,28 @@ static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
 {
 	if (text_begin && text_end > text_begin) {
 #ifdef MAP_FIXED_NOREPLACE
-		uintptr_t page_mask = (uintptr_t)PAGE_SIZE - 1;
-		uintptr_t aligned_size = (pool_size + page_mask) & ~page_mask;
+		uintptr_t aligned_size = align_page_size(pool_size);
 		uintptr_t span = text_end - text_begin;
 
-		if (span + aligned_size < 128 * 1024 * 1024) {
-			uintptr_t preferred = (text_begin - aligned_size) & ~page_mask;
-			void* mapped = mmap((void*)preferred, aligned_size,
-			                    PROT_READ | PROT_WRITE | PROT_EXEC,
-			                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
-			                    -1, 0);
-			if (mapped != MAP_FAILED) {
-				fprintf(stderr, "machismo: LSE island pool at %p (before __TEXT)\n",
-				        mapped);
-				return (uint32_t*)mapped;
+		if (span + aligned_size < ARM64_DIRECT_BRANCH_RANGE && text_begin > aligned_size) {
+			uintptr_t page_mask = (uintptr_t)PAGE_SIZE - 1;
+			uintptr_t highest = (text_begin - aligned_size) & ~page_mask;
+			uintptr_t lowest = 0;
+			if (text_end > ARM64_DIRECT_BRANCH_RANGE + aligned_size)
+				lowest = (text_end - ARM64_DIRECT_BRANCH_RANGE - aligned_size) & ~page_mask;
+
+			for (uintptr_t preferred = highest; preferred >= lowest; preferred -= PAGE_SIZE) {
+				void* mapped = mmap((void*)preferred, aligned_size,
+				                    PROT_READ | PROT_WRITE | PROT_EXEC,
+				                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+				                    -1, 0);
+				if (mapped != MAP_FAILED) {
+					fprintf(stderr, "machismo: LSE island pool at %p (before __TEXT, %zu KB)\n",
+					        mapped, aligned_size / 1024);
+					return (uint32_t*)mapped;
+				}
+				if (preferred < PAGE_SIZE)
+					break;
 			}
 		}
 #endif
@@ -106,8 +162,8 @@ static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
 
 	uint32_t* result = (uint32_t*)machismo_pool_alloc(lr, pool_size);
 	if (result) {
-		fprintf(stderr, "machismo: LSE island pool at %p (adjacent to segments)\n",
-		        result);
+		fprintf(stderr, "machismo: LSE island pool at %p (adjacent to segments, %zu KB)\n",
+		        result, pool_size / 1024);
 	}
 	return result;
 }
@@ -159,6 +215,7 @@ int main(int argc, char** argv, char** envp)
 	machismo_load_results.argv = argv + arg_idx;
 	__machismo_guest_argc = (int)machismo_load_results.argc;
 	__machismo_guest_argv = machismo_load_results.argv;
+	__machismo_guest_executable_path = filename;
 
 	/* Load config file — look next to the binary, or use MACHISMO_CONFIG */
 	machismo_config_t cfg = {0};
@@ -242,18 +299,24 @@ int main(int argc, char** argv, char** envp)
 			struct load_command* llc = (struct load_command*)(cmds + lp);
 			if (llc->cmd == LC_SEGMENT_64) {
 				struct segment_command_64* lseg = (struct segment_command_64*)llc;
-				uintptr_t seg_start = lseg->vmaddr + machismo_load_results.slide;
-				uintptr_t seg_end = lseg->vmaddr + machismo_load_results.slide + lseg->vmsize;
 				if (lseg->maxprot & VM_PROT_EXECUTE) {
-					if (!text_begin || seg_start < text_begin)
-						text_begin = seg_start;
-					if (seg_end > text_end)
-						text_end = seg_end;
+					struct section_64* lsect = (struct section_64*)(lseg + 1);
+					for (uint32_t s = 0; s < lseg->nsects; s++, lsect++) {
+						if (!(lsect->flags & S_ATTR_SOME_INSTRUCTIONS) &&
+						    !(lsect->flags & S_ATTR_PURE_INSTRUCTIONS))
+							continue;
+						uintptr_t sect_start = lsect->addr + machismo_load_results.slide;
+						uintptr_t sect_end = sect_start + lsect->size;
+						if (!text_begin || sect_start < text_begin)
+							text_begin = sect_start;
+						if (sect_end > text_end)
+							text_end = sect_end;
+					}
 				}
 			}
 			lp += llc->cmdsize;
 		}
-		size_t lse_pool_size = 2 * 1024 * 1024;
+		size_t lse_pool_size = estimate_main_lse_pool_size(&machismo_load_results);
 		uint32_t* lse_pool = allocate_main_lse_pool(text_begin, text_end,
 		                                            lse_pool_size,
 		                                            &machismo_load_results);

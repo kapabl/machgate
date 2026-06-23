@@ -24,4 +24,6 @@
 int isa_emul_patch(uint32_t *code, size_t code_size,
                    uint32_t **pool, uint32_t *pool_end);
 
+size_t isa_emul_estimate_pool_size(uint32_t *code, size_t code_size);
+
 #endif /* _ISA_EMUL_H_ */

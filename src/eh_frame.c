@@ -923,6 +923,7 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 	size_t unwind_size = 0;
 	const uint8_t* native_eh_frame = NULL;
 	size_t native_eh_frame_size = 0;
+	int native_fde_count = 0;
 
 	for (uint32_t i = 0; i < header->ncmds; i++) {
 		struct load_command* lc = (struct load_command*)cmd_ptr;
@@ -1115,6 +1116,7 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 		if (native_eh_frame && native_eh_frame_size > 0) {
 			nat_count = parse_native_eh_frame_fdes(native_eh_frame,
 				native_eh_frame_size, &nat_entries);
+			native_fde_count = nat_count;
 			fprintf(stderr, "eh_frame: parsed %d native FDEs from __eh_frame (%zu bytes)\n",
 			        nat_count, native_eh_frame_size);
 		}
@@ -1175,9 +1177,8 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 			fprintf(stderr, "eh_frame: registered %d synthetic FDEs via __register_frame\n",
 			        fdes_emitted);
 			if (native_eh_frame && native_eh_frame_size > 0) {
-				reg_frame(native_eh_frame);
-				fprintf(stderr, "eh_frame: registered native __eh_frame (%zu bytes) via __register_frame\n",
-				        native_eh_frame_size);
+				fprintf(stderr, "eh_frame: native __eh_frame served by _dl_find_object hook (%zu bytes, %d FDEs)\n",
+				        native_eh_frame_size, native_fde_count);
 			}
 		} else {
 			fprintf(stderr, "eh_frame: WARNING: __register_frame not found\n");
