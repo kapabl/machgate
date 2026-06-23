@@ -28,14 +28,20 @@
 #include <sys/types.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/select.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <dirent.h>
 #include <stdarg.h>
+#include <malloc.h>
+#include <locale.h>
 
 extern char **environ;
+
+static int shim_hw_ncpu(void);
 
 struct darwin_sigaltstack {
 	uint64_t sp;
@@ -114,6 +120,33 @@ uint64_t clock_gettime_nsec_np(int clock_id)
 uint32_t mach_task_self_ = 0x103; /* dummy port number */
 uint32_t vm_page_size = 4096;
 
+struct machgate_mach_semaphore {
+	uint32_t name;
+	int value;
+	int used;
+};
+
+#define MACHGATE_MACH_SEMAPHORE_MAX 64
+
+static struct machgate_mach_semaphore
+	machgate_mach_semaphores[MACHGATE_MACH_SEMAPHORE_MAX];
+static uint32_t next_mach_semaphore_name = 0x4000;
+
+uint32_t mach_host_self(void)
+{
+	return 0x104;
+}
+
+uint32_t mach_thread_self(void)
+{
+	return (uint32_t)syscall(SYS_gettid);
+}
+
+uint64_t mach_continuous_time(void)
+{
+	return mach_absolute_time();
+}
+
 /* task_info — stub, returns KERN_FAILURE */
 int task_info(uint32_t target_task, uint32_t flavor,
               void *task_info_out, uint32_t *task_info_count)
@@ -121,6 +154,27 @@ int task_info(uint32_t target_task, uint32_t flavor,
 	(void)target_task; (void)flavor;
 	(void)task_info_out; (void)task_info_count;
 	return 5; /* KERN_FAILURE */
+}
+
+int task_policy_set(uint32_t task, int flavor, void* policy_info,
+                    uint32_t policy_info_count)
+{
+	(void)task;
+	(void)flavor;
+	(void)policy_info;
+	(void)policy_info_count;
+	return 0;
+}
+
+int thread_info(uint32_t target_thread, int flavor, void* thread_info_out,
+                uint32_t* thread_info_count)
+{
+	(void)target_thread;
+	(void)flavor;
+
+	if (thread_info_out && thread_info_count)
+		memset(thread_info_out, 0, (size_t)*thread_info_count * sizeof(int));
+	return 0;
 }
 
 /* mach_msg — stub, returns MACH_MSG_SUCCESS (0) */
@@ -139,6 +193,115 @@ int mach_port_deallocate(uint32_t task, uint32_t name)
 	(void)task; (void)name;
 	return 0;
 }
+
+int vm_deallocate(uint32_t target_task, uint64_t address, uint64_t size)
+{
+	(void)target_task;
+
+	if (!address || !size)
+		return 0;
+	if (munmap((void*)(uintptr_t)address, (size_t)size) == 0)
+		return 0;
+	return 5;
+}
+
+int host_statistics(uint32_t host_priv, int flavor, void* host_info_out,
+                    uint32_t* host_info_count)
+{
+	(void)host_priv;
+	(void)flavor;
+
+	if (host_info_out && host_info_count)
+		memset(host_info_out, 0, (size_t)*host_info_count * sizeof(int));
+	return 0;
+}
+
+int host_processor_info(uint32_t host, int flavor, uint32_t* out_processor_count,
+                        void** out_processor_info,
+                        uint32_t* out_processor_info_count)
+{
+	(void)host;
+	(void)flavor;
+
+	if (out_processor_count)
+		*out_processor_count = (uint32_t)shim_hw_ncpu();
+	if (out_processor_info)
+		*out_processor_info = NULL;
+	if (out_processor_info_count)
+		*out_processor_info_count = 0;
+	return 0;
+}
+
+static struct machgate_mach_semaphore* find_mach_semaphore(uint32_t name)
+{
+	for (int index = 0; index < MACHGATE_MACH_SEMAPHORE_MAX; index++) {
+		if (machgate_mach_semaphores[index].used &&
+		    machgate_mach_semaphores[index].name == name)
+			return &machgate_mach_semaphores[index];
+	}
+	return NULL;
+}
+
+int semaphore_create(uint32_t task, uint32_t* semaphore, int policy,
+                     int value)
+{
+	(void)task;
+	(void)policy;
+
+	if (!semaphore)
+		return 4;
+
+	for (int index = 0; index < MACHGATE_MACH_SEMAPHORE_MAX; index++) {
+		struct machgate_mach_semaphore* slot =
+			&machgate_mach_semaphores[index];
+		if (slot->used)
+			continue;
+		slot->used = 1;
+		slot->value = value;
+		slot->name = next_mach_semaphore_name++;
+		*semaphore = slot->name;
+		return 0;
+	}
+
+	return 3;
+}
+
+int semaphore_destroy(uint32_t task, uint32_t semaphore)
+{
+	(void)task;
+
+	struct machgate_mach_semaphore* slot = find_mach_semaphore(semaphore);
+	if (!slot)
+		return 0;
+	memset(slot, 0, sizeof(*slot));
+	return 0;
+}
+
+int semaphore_signal(uint32_t semaphore)
+{
+	struct machgate_mach_semaphore* slot = find_mach_semaphore(semaphore);
+	if (slot)
+		slot->value++;
+	return 0;
+}
+
+int semaphore_wait(uint32_t semaphore)
+{
+	struct machgate_mach_semaphore* slot = find_mach_semaphore(semaphore);
+	if (slot && slot->value > 0)
+		slot->value--;
+	return 0;
+}
+
+int semaphore_timedwait(uint32_t semaphore, uint32_t seconds,
+                        uint32_t nanoseconds)
+{
+	(void)seconds;
+	(void)nanoseconds;
+	return semaphore_wait(semaphore);
+}
+
+uint8_t NDR_record[8] = { 0 };
 
 /* ===== dyld / process bootstrap compatibility ===== */
 
@@ -233,6 +396,95 @@ int CCRandomGenerateBytes(void* bytes, size_t count)
 	return 0;
 }
 
+int CCCryptorCreateWithMode(uint32_t operation, uint32_t mode,
+                            uint32_t algorithm, uint32_t padding,
+                            const void* iv, const void* key,
+                            size_t key_length, const void* tweak,
+                            size_t tweak_length, int num_rounds,
+                            uint32_t options, void** cryptor_ref)
+{
+	(void)operation;
+	(void)mode;
+	(void)algorithm;
+	(void)padding;
+	(void)iv;
+	(void)key;
+	(void)key_length;
+	(void)tweak;
+	(void)tweak_length;
+	(void)num_rounds;
+	(void)options;
+
+	if (cryptor_ref)
+		*cryptor_ref = NULL;
+	return -4;
+}
+
+int CCCryptorReset(void* cryptor_ref, const void* iv)
+{
+	(void)cryptor_ref;
+	(void)iv;
+	return -4;
+}
+
+int CCCryptorUpdate(void* cryptor_ref, const void* data_in,
+                    size_t data_in_length, void* data_out,
+                    size_t data_out_available,
+                    size_t* data_out_moved)
+{
+	(void)cryptor_ref;
+	(void)data_in;
+	(void)data_in_length;
+	(void)data_out;
+	(void)data_out_available;
+
+	if (data_out_moved)
+		*data_out_moved = 0;
+	return -4;
+}
+
+void CCHmacInit(void* context, uint32_t algorithm, const void* key,
+                size_t key_length)
+{
+	(void)context;
+	(void)algorithm;
+	(void)key;
+	(void)key_length;
+}
+
+void CCHmacUpdate(void* context, const void* data, size_t data_length)
+{
+	(void)context;
+	(void)data;
+	(void)data_length;
+}
+
+void CCHmacFinal(void* context, void* mac_out)
+{
+	(void)context;
+	if (mac_out)
+		memset(mac_out, 0, 64);
+}
+
+int CCKeyDerivationPBKDF(uint32_t algorithm, const char* password,
+                         size_t password_length, const uint8_t* salt,
+                         size_t salt_length, uint32_t prf,
+                         uint32_t rounds, uint8_t* derived_key,
+                         size_t derived_key_length)
+{
+	(void)algorithm;
+	(void)password;
+	(void)password_length;
+	(void)salt;
+	(void)salt_length;
+	(void)prf;
+	(void)rounds;
+
+	if (derived_key && derived_key_length)
+		memset(derived_key, 0, derived_key_length);
+	return -4;
+}
+
 void sys_icache_invalidate(void* start, size_t len)
 {
 	if (!start || len == 0)
@@ -242,20 +494,64 @@ void sys_icache_invalidate(void* start, size_t len)
 
 typedef int64_t CFIndex;
 typedef uint32_t CFStringEncoding;
+typedef const void* CFAllocatorRef;
+typedef const void* CFArrayRef;
+typedef void* CFMutableArrayRef;
+typedef const void* CFDataRef;
+typedef const void* CFErrorRef;
 typedef const void* CFStringRef;
 typedef const void* CFTimeZoneRef;
+typedef const void* CFDictionaryRef;
+typedef double CFAbsoluteTime;
 
 struct cf_range {
 	CFIndex location;
 	CFIndex length;
 };
 
+struct cf_array {
+	CFIndex count;
+	CFIndex capacity;
+	const void** values;
+};
+
+struct cf_data {
+	CFIndex length;
+	uint8_t bytes[];
+};
+
+struct cf_dictionary {
+	CFIndex count;
+	const void** keys;
+	const void** values;
+};
+
+CFDataRef CFDataCreate(CFAllocatorRef allocator, const uint8_t* bytes,
+                       CFIndex length);
+
 static const char cf_timezone_name[] = "UTC";
 static const char cf_timezone_object[] = "MachGate/UTC";
+static const char cf_error_description[] = "MachGate CoreFoundation error";
+static const char cf_allocator_default_object[] = "MachGate/CFAllocatorDefault";
+static const char cf_boolean_true_object[] = "MachGate/kCFBooleanTrue";
+static const char cf_type_array_callbacks_object[] = "MachGate/kCFTypeArrayCallBacks";
+static const char cf_type_dictionary_key_callbacks_object[] = "MachGate/kCFTypeDictionaryKeyCallBacks";
+static const char cf_type_dictionary_value_callbacks_object[] = "MachGate/kCFTypeDictionaryValueCallBacks";
+
+const void* kCFAllocatorDefault = cf_allocator_default_object;
+const void* kCFBooleanTrue = cf_boolean_true_object;
+const void* kCFTypeArrayCallBacks = cf_type_array_callbacks_object;
+const void* kCFTypeDictionaryKeyCallBacks = cf_type_dictionary_key_callbacks_object;
+const void* kCFTypeDictionaryValueCallBacks = cf_type_dictionary_value_callbacks_object;
 
 CFTimeZoneRef CFTimeZoneCopySystem(void)
 {
 	return cf_timezone_object;
+}
+
+CFTimeZoneRef CFTimeZoneCopyDefault(void)
+{
+	return CFTimeZoneCopySystem();
 }
 
 void CFTimeZoneResetSystem(void)
@@ -279,6 +575,28 @@ const char* CFStringGetCStringPtr(CFStringRef string, CFStringEncoding encoding)
 {
 	(void)encoding;
 	return (const char*)string;
+}
+
+uint8_t CFStringGetCString(CFStringRef string, char* buffer,
+                           CFIndex buffer_size, CFStringEncoding encoding)
+{
+	(void)encoding;
+
+	if (!string || !buffer || buffer_size <= 0)
+		return 0;
+
+	snprintf(buffer, (size_t)buffer_size, "%s", (const char*)string);
+	return 1;
+}
+
+CFIndex CFStringGetMaximumSizeForEncoding(CFIndex length,
+                                          CFStringEncoding encoding)
+{
+	(void)encoding;
+
+	if (length < 0)
+		return 0;
+	return length * 4 + 1;
 }
 
 CFIndex CFStringGetBytes(CFStringRef string, struct cf_range range,
@@ -314,9 +632,503 @@ CFIndex CFStringGetBytes(CFStringRef string, struct cf_range range,
 	return copied;
 }
 
+CFStringRef CFStringCreateWithBytes(CFAllocatorRef allocator,
+                                    const uint8_t* bytes,
+                                    CFIndex number_of_bytes,
+                                    CFStringEncoding encoding,
+                                    uint8_t is_external_representation)
+{
+	(void)allocator;
+	(void)encoding;
+	(void)is_external_representation;
+
+	if (!bytes && number_of_bytes > 0)
+		return NULL;
+
+	if (number_of_bytes < 0)
+		return NULL;
+
+	char* string = calloc((size_t)number_of_bytes + 1, 1);
+	if (!string)
+		return NULL;
+
+	if (number_of_bytes > 0)
+		memcpy(string, bytes, (size_t)number_of_bytes);
+	return string;
+}
+
+CFDataRef CFStringCreateExternalRepresentation(CFAllocatorRef allocator,
+                                               CFStringRef string,
+                                               CFStringEncoding encoding,
+                                               uint8_t loss_byte)
+{
+	(void)allocator;
+	(void)encoding;
+	(void)loss_byte;
+
+	if (!string)
+		return NULL;
+
+	const char* bytes = (const char*)string;
+	CFIndex length = (CFIndex)strlen(bytes);
+	return CFDataCreate(NULL, (const uint8_t*)bytes, length);
+}
+
+CFDataRef CFDataCreate(CFAllocatorRef allocator, const uint8_t* bytes,
+                       CFIndex length)
+{
+	(void)allocator;
+
+	if (!bytes && length > 0)
+		return NULL;
+
+	if (length < 0)
+		return NULL;
+
+	struct cf_data* data = malloc(sizeof(*data) + (size_t)length);
+	if (!data)
+		return NULL;
+
+	data->length = length;
+	if (length > 0)
+		memcpy(data->bytes, bytes, (size_t)length);
+	return data;
+}
+
+const uint8_t* CFDataGetBytePtr(CFDataRef data)
+{
+	if (!data)
+		return NULL;
+	return ((const struct cf_data*)data)->bytes;
+}
+
+CFIndex CFDataGetLength(CFDataRef data)
+{
+	if (!data)
+		return 0;
+	return ((const struct cf_data*)data)->length;
+}
+
+CFMutableArrayRef CFArrayCreateMutable(CFAllocatorRef allocator,
+                                       CFIndex capacity,
+                                       const void* callbacks)
+{
+	(void)allocator;
+	(void)callbacks;
+
+	if (capacity < 0)
+		return NULL;
+
+	struct cf_array* array = calloc(1, sizeof(*array));
+	if (!array)
+		return NULL;
+
+	array->capacity = capacity > 0 ? capacity : 4;
+	array->values = calloc((size_t)array->capacity, sizeof(*array->values));
+	if (!array->values) {
+		free(array);
+		return NULL;
+	}
+	return array;
+}
+
+void CFArrayAppendValue(CFMutableArrayRef array_ref, const void* value)
+{
+	struct cf_array* array = array_ref;
+	if (!array)
+		return;
+
+	if (array->count == array->capacity) {
+		CFIndex new_capacity = array->capacity * 2;
+		const void** values = realloc(array->values,
+		                              (size_t)new_capacity *
+		                              sizeof(*array->values));
+		if (!values)
+			return;
+		array->values = values;
+		array->capacity = new_capacity;
+	}
+
+	array->values[array->count] = value;
+	array->count++;
+}
+
+void CFArraySetValueAtIndex(CFMutableArrayRef array_ref, CFIndex index,
+                            const void* value)
+{
+	struct cf_array* array = array_ref;
+	if (!array || index < 0)
+		return;
+
+	while (index >= array->capacity) {
+		CFIndex new_capacity = array->capacity * 2;
+		const void** values = realloc(array->values,
+		                              (size_t)new_capacity *
+		                              sizeof(*array->values));
+		if (!values)
+			return;
+		memset(values + array->capacity, 0,
+		       (size_t)(new_capacity - array->capacity) *
+		       sizeof(*array->values));
+		array->values = values;
+		array->capacity = new_capacity;
+	}
+
+	array->values[index] = value;
+	if (index >= array->count)
+		array->count = index + 1;
+}
+
+CFIndex CFArrayGetCount(CFArrayRef array_ref)
+{
+	const struct cf_array* array = array_ref;
+	if (!array)
+		return 0;
+	return array->count;
+}
+
+const void* CFArrayGetValueAtIndex(CFArrayRef array_ref, CFIndex index)
+{
+	const struct cf_array* array = array_ref;
+	if (!array || index < 0 || index >= array->count)
+		return NULL;
+	return array->values[index];
+}
+
+uint8_t CFEqual(const void* object_a, const void* object_b)
+{
+	return object_a == object_b;
+}
+
+CFDictionaryRef CFDictionaryCreate(CFAllocatorRef allocator,
+                                   const void** keys,
+                                   const void** values,
+                                   CFIndex number_of_values,
+                                   const void* key_callbacks,
+                                   const void* value_callbacks)
+{
+	(void)allocator;
+	(void)key_callbacks;
+	(void)value_callbacks;
+
+	if (number_of_values < 0)
+		return NULL;
+
+	struct cf_dictionary* dictionary = calloc(1, sizeof(*dictionary));
+	if (!dictionary)
+		return NULL;
+
+	dictionary->count = number_of_values;
+	if (number_of_values == 0)
+		return dictionary;
+
+	dictionary->keys = calloc((size_t)number_of_values,
+	                          sizeof(*dictionary->keys));
+	dictionary->values = calloc((size_t)number_of_values,
+	                            sizeof(*dictionary->values));
+	if (!dictionary->keys || !dictionary->values) {
+		free(dictionary->keys);
+		free(dictionary->values);
+		free(dictionary);
+		return NULL;
+	}
+
+	for (CFIndex index = 0; index < number_of_values; index++) {
+		dictionary->keys[index] = keys ? keys[index] : NULL;
+		dictionary->values[index] = values ? values[index] : NULL;
+	}
+	return dictionary;
+}
+
+uint8_t CFDictionaryContainsKey(CFDictionaryRef dictionary_ref,
+                                const void* key)
+{
+	const struct cf_dictionary* dictionary = dictionary_ref;
+	if (!dictionary)
+		return 0;
+
+	for (CFIndex index = 0; index < dictionary->count; index++) {
+		if (CFEqual(dictionary->keys[index], key))
+			return 1;
+	}
+	return 0;
+}
+
+const void* CFDictionaryGetValue(CFDictionaryRef dictionary_ref,
+                                 const void* key)
+{
+	const struct cf_dictionary* dictionary = dictionary_ref;
+	if (!dictionary)
+		return NULL;
+
+	for (CFIndex index = 0; index < dictionary->count; index++) {
+		if (CFEqual(dictionary->keys[index], key))
+			return dictionary->values[index];
+	}
+	return NULL;
+}
+
+uint8_t CFNumberGetValue(const void* number, int type, void* value)
+{
+	(void)type;
+
+	if (!number || !value)
+		return 0;
+
+	if (number == kCFBooleanTrue) {
+		*(int*)value = 1;
+		return 1;
+	}
+
+	*(int*)value = 0;
+	return 0;
+}
+
+const void* CFDateCreate(CFAllocatorRef allocator, CFAbsoluteTime at)
+{
+	(void)allocator;
+
+	double* date = malloc(sizeof(*date));
+	if (!date)
+		return NULL;
+	*date = at;
+	return date;
+}
+
+CFStringRef CFErrorCopyDescription(CFErrorRef error)
+{
+	(void)error;
+	return cf_error_description;
+}
+
+CFIndex CFErrorGetCode(CFErrorRef error)
+{
+	(void)error;
+	return 0;
+}
+
 void CFRelease(const void* object)
 {
 	(void)object;
+}
+
+/* ===== Darwin process and filesystem surface ===== */
+
+int mach_vm_region(uint32_t target_task, uint64_t* address, uint64_t* size,
+                   int flavor, void* info, uint32_t* info_count,
+                   uint32_t* object_name)
+{
+	(void)target_task;
+	(void)address;
+	(void)size;
+	(void)flavor;
+	(void)info;
+	(void)info_count;
+	(void)object_name;
+	return 1;
+}
+
+int proc_regionfilename(int pid, uint64_t address, void* buffer,
+                        uint32_t buffer_size)
+{
+	(void)pid;
+	(void)address;
+	if (buffer && buffer_size)
+		((char*)buffer)[0] = '\0';
+	return 0;
+}
+
+int proc_listpids(uint32_t type, uint32_t typeinfo, void* buffer,
+                  int buffer_size)
+{
+	(void)type;
+	(void)typeinfo;
+
+	if (!buffer)
+		return (int)sizeof(pid_t);
+
+	if (buffer_size < (int)sizeof(pid_t))
+		return 0;
+
+	pid_t pid = getpid();
+	memcpy(buffer, &pid, sizeof(pid));
+	return (int)sizeof(pid);
+}
+
+int proc_pid_rusage(int pid, int flavor, void* buffer)
+{
+	(void)pid;
+	(void)flavor;
+	(void)buffer;
+	errno = ENOTSUP;
+	return -1;
+}
+
+int proc_pidfdinfo(int pid, int fd, int flavor, void* buffer, int buffer_size)
+{
+	(void)pid;
+	(void)fd;
+	(void)flavor;
+	(void)buffer;
+	(void)buffer_size;
+	errno = ENOTSUP;
+	return -1;
+}
+
+int proc_pidinfo(int pid, int flavor, uint64_t arg, void* buffer,
+                 int buffer_size)
+{
+	(void)pid;
+	(void)flavor;
+	(void)arg;
+	(void)buffer;
+	(void)buffer_size;
+	return 0;
+}
+
+int posix_spawn_file_actions_addinherit_np(void* file_actions, int filedes)
+{
+	(void)file_actions;
+	(void)filedes;
+	return 0;
+}
+
+ssize_t recvmsg_x(int fd, void* msgp, unsigned int cnt, int flags)
+{
+	(void)fd;
+	(void)msgp;
+	(void)cnt;
+	(void)flags;
+	errno = ENOSYS;
+	return -1;
+}
+
+ssize_t sendmsg_x(int fd, void* msgp, unsigned int cnt, int flags)
+{
+	(void)fd;
+	(void)msgp;
+	(void)cnt;
+	(void)flags;
+	errno = ENOSYS;
+	return -1;
+}
+
+int sscanf_l(const char* string, locale_t locale, const char* format, ...)
+{
+	(void)locale;
+
+	va_list args;
+	va_start(args, format);
+	int result = vsscanf(string, format, args);
+	va_end(args);
+	return result;
+}
+
+int __darwin_check_fd_set_overflow(int fd, const void* fd_set,
+                                   int select_size)
+{
+	(void)fd_set;
+	(void)select_size;
+	return fd >= 0 && fd < FD_SETSIZE;
+}
+
+int sysctlnametomib(const char* name, int* mib, size_t* mib_length)
+{
+	if (!name || !mib_length) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct mib_entry {
+		const char* name;
+		int values[2];
+		size_t length;
+	};
+
+	static const struct mib_entry entries[] = {
+		{ "kern.ostype", { 1, 1 }, 2 },
+		{ "kern.osrelease", { 1, 2 }, 2 },
+		{ "kern.version", { 1, 4 }, 2 },
+		{ "kern.argmax", { 1, 8 }, 2 },
+		{ "hw.machine", { 6, 1 }, 2 },
+		{ "hw.model", { 6, 2 }, 2 },
+		{ "hw.ncpu", { 6, 3 }, 2 },
+		{ "hw.byteorder", { 6, 4 }, 2 },
+		{ "hw.memsize", { 6, 24 }, 2 },
+		{ "hw.pagesize", { 6, 7 }, 2 },
+		{ "hw.logicalcpu", { 6, 103 }, 2 },
+		{ "hw.physicalcpu", { 6, 101 }, 2 },
+		{ "hw.activecpu", { 6, 25 }, 2 },
+	};
+
+	for (size_t index = 0; index < sizeof(entries) / sizeof(entries[0]);
+	     index++) {
+		if (strcmp(name, entries[index].name) != 0)
+			continue;
+		if (!mib || *mib_length < entries[index].length) {
+			*mib_length = entries[index].length;
+			errno = ENOMEM;
+			return -1;
+		}
+		memcpy(mib, entries[index].values,
+		       entries[index].length * sizeof(*mib));
+		*mib_length = entries[index].length;
+		return 0;
+	}
+
+	errno = ENOENT;
+	return -1;
+}
+
+int getfsstat(struct statfs* buffer, int buffer_size, int flags)
+{
+	(void)buffer;
+	(void)buffer_size;
+	(void)flags;
+	return 0;
+}
+
+int fsctl(const char* path, unsigned long request, void* data,
+          unsigned int options)
+{
+	(void)path;
+	(void)request;
+	(void)data;
+	(void)options;
+	errno = ENOTSUP;
+	return -1;
+}
+
+int gethostuuid(uint8_t* uuid, const struct timespec* wait)
+{
+	(void)wait;
+
+	static const uint8_t machgate_uuid[16] = {
+		0x6d, 0x61, 0x63, 0x68, 0x67, 0x61, 0x74, 0x65,
+		0x2d, 0x6c, 0x69, 0x6e, 0x75, 0x78, 0x00, 0x01
+	};
+
+	if (!uuid) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	memcpy(uuid, machgate_uuid, sizeof(machgate_uuid));
+	return 0;
+}
+
+void srandomdev(void)
+{
+	unsigned int seed = 0;
+	if (syscall(SYS_getrandom, &seed, sizeof(seed), 0) != sizeof(seed))
+		seed = (unsigned int)time(NULL) ^ (unsigned int)getpid();
+	srandom(seed);
+}
+
+int atexit(void (*function)(void))
+{
+	(void)function;
+	return 0;
 }
 
 /* ===== Apple stdio globals ===== */
@@ -1726,6 +2538,17 @@ int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
 
 void *_NSConcreteGlobalBlock = NULL;
 void *_NSConcreteStackBlock = NULL;
+void *_NSConcreteMallocBlock = NULL;
+
+void* _Block_copy(const void* block)
+{
+	return (void*)block;
+}
+
+void _Block_release(const void* block)
+{
+	(void)block;
+}
 
 void _Block_object_assign(void *dst, const void *src, int flags)
 {
@@ -2024,15 +2847,14 @@ static void tlv_destructor(void* block)
 	free(block);
 }
 
-void* _tlv_bootstrap(struct tlv_descriptor* desc)
+void* _tlv_bootstrap_impl(struct tlv_descriptor* desc)
 {
-	/* Lazily create a pthread key for this TLV group */
 	if (desc->key == 0) {
 		pthread_mutex_lock(&tlv_mutex);
 		if (desc->key == 0) {
 			pthread_key_t key;
 			pthread_key_create(&key, tlv_destructor);
-			desc->key = (unsigned long)key + 1; /* +1 so 0 means uninitialized */
+			desc->key = (unsigned long)key + 1;
 		}
 		pthread_mutex_unlock(&tlv_mutex);
 	}
@@ -2055,6 +2877,24 @@ void* _tlv_bootstrap(struct tlv_descriptor* desc)
 
 	return (char*)block + desc->offset;
 }
+
+#if defined(__aarch64__)
+__asm__(
+	".text\n"
+	".global _tlv_bootstrap\n"
+	".type _tlv_bootstrap, %function\n"
+	"_tlv_bootstrap:\n"
+	"stp x8, x30, [sp, #-16]!\n"
+	"bl _tlv_bootstrap_impl\n"
+	"ldp x8, x30, [sp], #16\n"
+	"ret\n"
+);
+#else
+void* _tlv_bootstrap(struct tlv_descriptor* desc)
+{
+	return _tlv_bootstrap_impl(desc);
+}
+#endif
 
 /* ===== Darwin-suffixed symbol variants ===== */
 
@@ -2832,4 +3672,57 @@ void *shim_realloc(void *ptr, size_t size)
 	if (!real_realloc) return NULL;
 	void *new_ptr = real_realloc(ptr, size);
 	return new_ptr;
+}
+
+struct machgate_malloc_zone {
+	const char* name;
+};
+
+static struct machgate_malloc_zone default_malloc_zone = {
+	"MachGate default malloc zone"
+};
+
+void* malloc_default_zone(void)
+{
+	return &default_malloc_zone;
+}
+
+void* malloc_create_zone(size_t start_size, unsigned int flags)
+{
+	(void)start_size;
+	(void)flags;
+	return &default_malloc_zone;
+}
+
+void malloc_set_zone_name(void* zone, const char* name)
+{
+	struct machgate_malloc_zone* machgate_zone = zone;
+	if (!machgate_zone)
+		return;
+	machgate_zone->name = name;
+}
+
+void* malloc_zone_malloc(void* zone, size_t size)
+{
+	(void)zone;
+	return shim_malloc(size);
+}
+
+void* malloc_zone_realloc(void* zone, void* ptr, size_t size)
+{
+	(void)zone;
+	return shim_realloc(ptr, size);
+}
+
+void malloc_zone_free(void* zone, void* ptr)
+{
+	(void)zone;
+	shim_free(ptr);
+}
+
+size_t malloc_size(const void* ptr)
+{
+	if (!ptr)
+		return 0;
+	return malloc_usable_size((void*)ptr);
 }

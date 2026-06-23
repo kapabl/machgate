@@ -1,0 +1,14 @@
+# Worker 2 external ARM64 macOS Go CLI probes.
+#
+# Format:
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+fzf|https://github.com/junegunn/fzf/releases/download/v0.73.1/fzf-0.73.1-darwin_arm64.tar.gz|d27fd68c04fb9b42f7c73a3f7d38069a74d308e40174f64a072c747213e97286|fzf|--version
+gh|https://github.com/cli/cli/releases/download/v2.95.0/gh_2.95.0_macOS_arm64.zip|3677f9c27965825f9c7d50395473c134edaea4b484373ef6b25de653570a0489|gh_2.95.0_macOS_arm64/bin/gh|--version
+lazygit|https://github.com/jesseduffield/lazygit/releases/download/v0.62.2/lazygit_0.62.2_darwin_arm64.tar.gz|f311d96b666b4865760e39f3967edfd7bf30b5d09e52a1bc7ae511f6bdfdd02c|lazygit|--version
+glow|https://github.com/charmbracelet/glow/releases/download/v2.1.2/glow_2.1.2_Darwin_arm64.tar.gz|6f7abfb47de69fbf7b0e67d2fa019cc554916e8b6694f9877212be89fc7ebb8c|glow_2.1.2_Darwin_arm64/glow|--version
+gum|https://github.com/charmbracelet/gum/releases/download/v0.17.0/gum_0.17.0_Darwin_arm64.tar.gz|e2a4b8596efa05821d8c58d0c1afbcd7ad1699ba69c689cc3ff23a4a99c8b237|gum_0.17.0_Darwin_arm64/gum|--version
+goreleaser|https://github.com/goreleaser/goreleaser/releases/download/v2.16.0/goreleaser_Darwin_arm64.tar.gz|8f6898256f35531165d90f2db581c5ee0d32bda83ebc25ac231ff5bdb9d2071a|goreleaser|--version
+chezmoi|https://github.com/twpayne/chezmoi/releases/download/v2.70.5/chezmoi_2.70.5_darwin_arm64.tar.gz|c3531896769175089b9b2e9cf99b15a2357427f776289b66583a2432d69cd3cc|chezmoi|--version
+duf|https://github.com/muesli/duf/releases/download/v0.9.1/duf_0.9.1_darwin_arm64.tar.gz|512ba0ff3585bb8c65841de557a4c4b8712332db005dc952fa98d373a05d01df|duf|--version
+shfmt|https://github.com/mvdan/sh/releases/download/v3.13.1/shfmt_v3.13.1_darwin_arm64|9680526be4a66ea1ffe988ed08af58e1400fe1e4f4aef5bd88b20bb9b3da33f8|.|--version
+fx|https://github.com/antonmedv/fx/releases/download/39.2.0/fx_darwin_arm64|5d7dadbf8ac4e4a55b5b6d31bdd958b90823292997ba9ddae395f66417bb4a9b|.|--version

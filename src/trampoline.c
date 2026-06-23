@@ -603,6 +603,9 @@ static struct {
 	size_t size;
 } guarded_pages[MAX_GUARDED_PAGES];
 static int num_guarded_pages = 0;
+static void* signal_diag_mh = NULL;
+static uintptr_t signal_diag_slide = 0;
+static int signal_diag_installed = 0;
 
 static uintptr_t ucontext_pc(const void* ucontext)
 {
@@ -616,6 +619,90 @@ static uintptr_t ucontext_pc(const void* ucontext)
 	(void)uc;
 	return 0;
 #endif
+}
+
+static uintptr_t ucontext_reg(const void* ucontext, int reg)
+{
+	const ucontext_t* uc = (const ucontext_t*)ucontext;
+
+#ifdef __aarch64__
+	if (reg >= 0 && reg <= 30)
+		return uc->uc_mcontext.regs[reg];
+	if (reg == 31)
+		return uc->uc_mcontext.sp;
+	return 0;
+#elif defined(__x86_64__)
+	switch (reg) {
+	case 29: return uc->uc_mcontext.gregs[REG_RBP];
+	case 30: return 0;
+	case 31: return uc->uc_mcontext.gregs[REG_RSP];
+	default: return 0;
+	}
+#else
+	(void)uc;
+	(void)reg;
+	return 0;
+#endif
+}
+
+static void print_signal_macho_context(uintptr_t pc)
+{
+	if (!signal_diag_mh)
+		return;
+
+	struct mach_header_64* header = (struct mach_header_64*)signal_diag_mh;
+	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
+
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		struct load_command* lc = (struct load_command*)cmd_ptr;
+		if (lc->cmd != LC_SEGMENT_64) {
+			cmd_ptr += lc->cmdsize;
+			continue;
+		}
+
+		struct segment_command_64* seg = (struct segment_command_64*)lc;
+		uintptr_t seg_start = seg->vmaddr + signal_diag_slide;
+		uintptr_t seg_end = seg_start + seg->vmsize;
+		if (pc < seg_start || pc >= seg_end) {
+			cmd_ptr += lc->cmdsize;
+			continue;
+		}
+
+		const char* section_name = "<none>";
+		uint64_t section_fileoff = seg->fileoff + (pc - seg_start);
+		struct section_64* sect = (struct section_64*)(seg + 1);
+		for (uint32_t section_index = 0; section_index < seg->nsects; section_index++, sect++) {
+			uintptr_t section_start = sect->addr + signal_diag_slide;
+			uintptr_t section_end = section_start + sect->size;
+			if (pc >= section_start && pc < section_end) {
+				section_name = sect->sectname;
+				section_fileoff = sect->offset + (pc - section_start);
+				break;
+			}
+		}
+
+		uint32_t prev_insn = 0;
+		uint32_t insn = 0;
+		uint32_t next_insn = 0;
+		if (pc >= seg_start + 4 && pc + 8 <= seg_end) {
+			prev_insn = *(uint32_t*)(pc - 4);
+			insn = *(uint32_t*)pc;
+			next_insn = *(uint32_t*)(pc + 4);
+		} else if (pc + 4 <= seg_end) {
+			insn = *(uint32_t*)pc;
+		}
+
+		fprintf(stderr,
+		        "machismo: guest context pc=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
+		        (void*)pc, (unsigned long)(pc - signal_diag_slide),
+		        16, seg->segname, 16, section_name,
+		        (unsigned long long)section_fileoff,
+		        insn, prev_insn, next_insn);
+		return;
+	}
+
+	fprintf(stderr, "machismo: guest context pc=%p outside main Mach-O image\n",
+	        (void*)pc);
 }
 
 static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
@@ -639,8 +726,25 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 
 	if (getenv("MACHGATE_TRACE_SIGNALS")) {
 		uintptr_t pc = ucontext_pc(ucontext);
-		fprintf(stderr, "machismo: SIGSEGV at %p from PC=%p\n",
-		        (void*)fault_addr, (void*)pc);
+		uintptr_t lr = ucontext_reg(ucontext, 30);
+		uintptr_t sp = ucontext_reg(ucontext, 31);
+		uintptr_t fp = ucontext_reg(ucontext, 29);
+		fprintf(stderr,
+		        "machismo: SIGSEGV code=%d addr=%p pc=%p lr=%p sp=%p fp=%p\n",
+		        info->si_code, (void*)fault_addr, (void*)pc,
+		        (void*)lr, (void*)sp, (void*)fp);
+		fprintf(stderr,
+		        "machismo: regs x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p\n",
+		        (void*)ucontext_reg(ucontext, 0),
+		        (void*)ucontext_reg(ucontext, 1),
+		        (void*)ucontext_reg(ucontext, 2),
+		        (void*)ucontext_reg(ucontext, 3),
+		        (void*)ucontext_reg(ucontext, 4),
+		        (void*)ucontext_reg(ucontext, 5),
+		        (void*)ucontext_reg(ucontext, 6),
+		        (void*)ucontext_reg(ucontext, 7),
+		        (void*)ucontext_reg(ucontext, 8));
+		print_signal_macho_context(pc);
 	}
 
 	/* Not our fault — re-raise with default handler */
@@ -650,6 +754,22 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 	sa.sa_flags = 0;
 	sigaction(SIGSEGV, &sa, NULL);
 	raise(SIGSEGV);
+}
+
+void trampoline_install_signal_diagnostics(void* mh, uintptr_t slide)
+{
+	signal_diag_mh = mh;
+	signal_diag_slide = slide;
+
+	if (signal_diag_installed)
+		return;
+
+	struct sigaction sa;
+	sa.sa_sigaction = stale_data_sigsegv;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_SIGINFO;
+	sigaction(SIGSEGV, &sa, NULL);
+	signal_diag_installed = 1;
 }
 
 void trampoline_guard_stale_data(void* mh, uintptr_t slide,
@@ -766,11 +886,7 @@ void trampoline_guard_stale_data(void* mh, uintptr_t slide,
 
 	/* Install SIGSEGV handler */
 	if (guarded > 0) {
-		struct sigaction sa;
-		sa.sa_sigaction = stale_data_sigsegv;
-		sigemptyset(&sa.sa_mask);
-		sa.sa_flags = SA_SIGINFO;
-		sigaction(SIGSEGV, &sa, NULL);
+		trampoline_install_signal_diagnostics(mh, slide);
 	}
 
 	fprintf(stderr, "trampoline: __DATA guard: %d library data symbols, "

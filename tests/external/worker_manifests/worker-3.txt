@@ -1,0 +1,14 @@
+# Worker 3: Kubernetes/cloud CLIs.
+#
+# Format:
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+kubectl|https://dl.k8s.io/release/v1.36.2/bin/darwin/arm64/kubectl|4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d|.|version --client
+helm|https://get.helm.sh/helm-v4.2.2-darwin-arm64.tar.gz|5410a0dae3d5d91f45653b161260d9301aabc4ae80ae50a6605d66884b6df8ea|darwin-arm64/helm|version --client
+k9s|https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Darwin_arm64.tar.gz|9b8c0e8f461e5d33aeee43a67f5ef4aff646a008a786887b8266cbb153c610cc|k9s|version
+kind|https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-darwin-arm64|dca67911095a110c2b5c36e26df6cac860c602033e456c0db47be498cdef1ebb|.|version
+minikube|https://github.com/kubernetes/minikube/releases/download/v1.38.1/minikube-darwin-arm64|f9b0c70bb7daf38c683c0b6e46dc1b612600247ae826bf74576807746a919ee8|.|version
+tilt|https://github.com/tilt-dev/tilt/releases/download/v0.37.4/tilt.0.37.4.mac.arm64.tar.gz|d25cd4470480325b31effa787e46f002601205c81e41b3c7f412e2defec6c4aa|tilt|version
+argocd|https://github.com/argoproj/argo-cd/releases/download/v3.4.4/argocd-darwin-arm64|300470f888139217590c3e6a7f05ee9f1ca0ea27e8f9587e14d02952505b4845|.|version --client
+flux|https://github.com/fluxcd/flux2/releases/download/v2.8.8/flux_2.8.8_darwin_arm64.tar.gz|f54bb4d83cfc9563fd3213381d50fe1102215ef904ecf9c38afa183b02c74eb7|flux|--version
+kubeseal|https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.38.1/kubeseal-0.38.1-darwin-arm64.tar.gz|c1103c48582a8d932fee2ab4153ec4fe099a98969eafd570b82f7de8ac1cac42|kubeseal|--version
+stern|https://github.com/stern/stern/releases/download/v1.34.0/stern_1.34.0_darwin_arm64.tar.gz|4014d84096e1e603ee115864e03a1e15fb9bae9876647bf7bb8031eee278dcd3|stern|--version

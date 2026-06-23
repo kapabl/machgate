@@ -1,0 +1,14 @@
+# Worker 1: Rust terminal tools.
+#
+# Format:
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+zoxide|https://github.com/ajeetdsouza/zoxide/releases/download/v0.9.9/zoxide-0.9.9-aarch64-apple-darwin.tar.gz|57e733d0436309dae2ed97e46bba43937209395298e1d88812d4e893900cb40a|zoxide|--version
+sd|https://github.com/chmln/sd/releases/download/v1.1.0/sd-v1.1.0-aarch64-apple-darwin.tar.gz|4bd3c09226376ca0a1d69589c91e86276fae36c5fbaaee669afce583f6682030|sd-v1.1.0-aarch64-apple-darwin/sd|--version
+procs|https://github.com/dalance/procs/releases/download/v0.14.11/procs-v0.14.11-aarch64-mac.zip|6650e7f354c07d0319d0f771ef8bb898ce8d0c841865a96c23281eebb033cac3|procs|--version
+git-cliff|https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-aarch64-apple-darwin.tar.gz|21547ae4a0421164070ab75c2522864ea5565858a011fabc5f583061b20f1226|git-cliff-2.13.1/git-cliff|--version
+sccache|https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-aarch64-apple-darwin.tar.gz|ded590cae2c72042c61178632906bef62d635fa20d45f8b22110a2241f430960|sccache-v0.16.0-aarch64-apple-darwin/sccache|--version
+cargo-binstall|https://github.com/cargo-bins/cargo-binstall/releases/download/v1.20.1/cargo-binstall-aarch64-apple-darwin.zip|691c4fda20d2e58920dc056e4eb7dacec6de448bb547aca17b0ae819716ebef6|cargo-binstall|-V
+hexyl|https://github.com/sharkdp/hexyl/releases/download/v0.17.0/hexyl-v0.17.0-aarch64-apple-darwin.tar.gz|d8c50f5ec688faf566ea4c13d6aa12a5681dc370dab3ffba0a9db935a5986630|hexyl-v0.17.0-aarch64-apple-darwin/hexyl|--version
+pastel|https://github.com/sharkdp/pastel/releases/download/v0.12.0/pastel-v0.12.0-aarch64-apple-darwin.tar.gz|7fd81518fac1dab7bd60e4759194a942c51bb911ef5de4513f4a9e3fb4b8ac1c|pastel-v0.12.0-aarch64-apple-darwin/pastel|--version
+atuin|https://github.com/atuinsh/atuin/releases/download/v18.16.1/atuin-aarch64-apple-darwin.tar.gz|0a3fdc4cfa18758d6a872950625f2042233df0412a0c10d0dadf30bfc3bc6d6b|atuin-aarch64-apple-darwin/atuin|--version
+nu|https://github.com/nushell/nushell/releases/download/0.113.1/nu-0.113.1-aarch64-apple-darwin.tar.gz|458aa21674221b2e8adbd784f9ba8113288b78f3c352465cef37b114ff3dffd5|nu-0.113.1-aarch64-apple-darwin/nu|--version

@@ -16,3 +16,12 @@ starship|https://github.com/starship/starship/releases/download/v1.25.1/starship
 delta|https://github.com/dandavison/delta/releases/download/0.19.2/delta-0.19.2-aarch64-apple-darwin.tar.gz|9be36612a5a13e9e386dc498fb8e50dc87c72ee42b63db0ea05b32f99a72a69a|delta-0.19.2-aarch64-apple-darwin/delta|--version
 bottom|https://github.com/ClementTsang/bottom/releases/download/0.14.1/bottom_aarch64-apple-darwin.tar.gz|1e7f03acb9189a4ad79c20fdef0bd7163265fa56ab75fc54b19f1dde5aaea5ae|btm|--version
 just|https://github.com/casey/just/releases/download/1.53.0/just-1.53.0-aarch64-apple-darwin.tar.gz|27f1361f2e4fb5d733837f1a9f80f85c237e5a36c75ee14961e59141713aa4ed|just|--version
+zoxide|https://github.com/ajeetdsouza/zoxide/releases/download/v0.9.9/zoxide-0.9.9-aarch64-apple-darwin.tar.gz|57e733d0436309dae2ed97e46bba43937209395298e1d88812d4e893900cb40a|zoxide|--version
+sd|https://github.com/chmln/sd/releases/download/v1.1.0/sd-v1.1.0-aarch64-apple-darwin.tar.gz|4bd3c09226376ca0a1d69589c91e86276fae36c5fbaaee669afce583f6682030|sd-v1.1.0-aarch64-apple-darwin/sd|--version
+git-cliff|https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-aarch64-apple-darwin.tar.gz|21547ae4a0421164070ab75c2522864ea5565858a011fabc5f583061b20f1226|git-cliff-2.13.1/git-cliff|--version
+sccache|https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-aarch64-apple-darwin.tar.gz|ded590cae2c72042c61178632906bef62d635fa20d45f8b22110a2241f430960|sccache-v0.16.0-aarch64-apple-darwin/sccache|--version
+cargo-binstall|https://github.com/cargo-bins/cargo-binstall/releases/download/v1.20.1/cargo-binstall-aarch64-apple-darwin.zip|691c4fda20d2e58920dc056e4eb7dacec6de448bb547aca17b0ae819716ebef6|cargo-binstall|-V
+hexyl|https://github.com/sharkdp/hexyl/releases/download/v0.17.0/hexyl-v0.17.0-aarch64-apple-darwin.tar.gz|d8c50f5ec688faf566ea4c13d6aa12a5681dc370dab3ffba0a9db935a5986630|hexyl-v0.17.0-aarch64-apple-darwin/hexyl|--version
+pastel|https://github.com/sharkdp/pastel/releases/download/v0.12.0/pastel-v0.12.0-aarch64-apple-darwin.tar.gz|7fd81518fac1dab7bd60e4759194a942c51bb911ef5de4513f4a9e3fb4b8ac1c|pastel-v0.12.0-aarch64-apple-darwin/pastel|--version
+atuin|https://github.com/atuinsh/atuin/releases/download/v18.16.1/atuin-aarch64-apple-darwin.tar.gz|0a3fdc4cfa18758d6a872950625f2042233df0412a0c10d0dadf30bfc3bc6d6b|atuin-aarch64-apple-darwin/atuin|--version
+ninja|https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-mac.zip|c99048673aa765960a99cf10c6ddb9f1fad506099ff0a0e137ad8960a88f321b|ninja|--version

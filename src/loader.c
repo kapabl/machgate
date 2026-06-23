@@ -99,13 +99,15 @@ void FUNCTION_NAME(int fd, bool expect_dylinker, struct load_results* lr)
 		{
 			struct SEGMENT_STRUCT* seg = (struct SEGMENT_STRUCT*) &cmds[p];
 
-			if (seg->cmd == SEGMENT_COMMAND && strcmp(seg->segname, "__PAGEZERO") != 0)
+			if (seg->cmd == SEGMENT_COMMAND && strcmp(seg->segname, "__PAGEZERO") != 0 && seg->vmsize != 0)
 			{
 				if (base == (uintptr_t)-1)
 				{
 					base = seg->vmaddr;
 				}
-				mmapSize = seg->vmaddr + seg->vmsize - base;
+				uintptr_t seg_end = seg->vmaddr + seg->vmsize - base;
+				if (seg_end > mmapSize)
+					mmapSize = seg_end;
 			}
 
 			p += seg->cmdsize;
@@ -167,6 +169,11 @@ void FUNCTION_NAME(int fd, bool expect_dylinker, struct load_results* lr)
 					continue;
 				}
 
+				if (seg->vmsize == 0)
+				{
+					break;
+				}
+
 				if (seg->filesize < seg->vmsize)
 				{
 					unsigned long addr = seg->vmaddr + slide;
@@ -183,7 +190,9 @@ void FUNCTION_NAME(int fd, bool expect_dylinker, struct load_results* lr)
 				if (seg->filesize > 0)
 				{
 					unsigned long addr = seg->vmaddr + slide;
-					rv = mmap((void*)addr, seg->filesize, useprot,
+					uint64_t map_size = seg->filesize < seg->vmsize
+						? seg->filesize : seg->vmsize;
+					rv = mmap((void*)addr, map_size, useprot,
 							MAP_FIXED | MAP_PRIVATE, fd, seg->fileoff + fat_offset);
 					if (rv == (void*)MAP_FAILED)
 					{

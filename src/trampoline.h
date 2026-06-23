@@ -65,4 +65,6 @@ int trampoline_patch(void* mh, uintptr_t slide);
 void trampoline_guard_stale_data(void* mh, uintptr_t slide,
                                   const char** prefixes, int num_prefixes);
 
+void trampoline_install_signal_diagnostics(void* mh, uintptr_t slide);
+
 #endif /* _TRAMPOLINE_H_ */

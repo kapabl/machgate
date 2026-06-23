@@ -2,7 +2,7 @@
 
 ## Scope
 
-This report tracks real ARM64 macOS command-line Mach-O binaries downloaded from public GitHub releases and run through MachGate inside the ARM64 Linux container.
+This report tracks real ARM64 macOS command-line Mach-O binaries downloaded from public releases and run through MachGate inside the ARM64 Linux container.
 
 The binaries are not vendored in this repository. The test harness downloads release assets into `tests/external/cache/`, verifies pinned SHA256 checksums, extracts the Mach-O executables into `tests/external/work/`, and writes diagnostics to `tests/external/logs/`.
 
@@ -20,27 +20,50 @@ The binaries are not vendored in this repository. The test harness downloads rel
 | `delta` | 0.19.2 | `dandavison/delta` GitHub release | `--version` |
 | `bottom` | 0.14.1 | `ClementTsang/bottom` GitHub release | `--version` |
 | `just` | 1.53.0 | `casey/just` GitHub release | `--version` |
+| `zoxide` | 0.9.9 | `ajeetdsouza/zoxide` GitHub release | `--version` |
+| `sd` | 1.1.0 | `chmln/sd` GitHub release | `--version` |
+| `git-cliff` | 2.13.1 | `orhun/git-cliff` GitHub release | `--version` |
+| `sccache` | 0.16.0 | `mozilla/sccache` GitHub release | `--version` |
+| `cargo-binstall` | 1.20.1 | `cargo-bins/cargo-binstall` GitHub release | `-V` |
+| `hexyl` | 0.17.0 | `sharkdp/hexyl` GitHub release | `--version` |
+| `pastel` | 0.12.0 | `sharkdp/pastel` GitHub release | `--version` |
+| `atuin` | 18.16.1 | `atuinsh/atuin` GitHub release | `--version` |
+| `ninja` | 1.13.2 | `ninja-build/ninja` GitHub release | `--version` |
 
 Manifest with exact URLs, archive paths, and SHA256 pins:
 
 - `tests/external/arm64_macho_cli_manifest.txt`
 
+Canonical row count:
+
+- 19 total rows
+- 31 additional reproducible passing rows needed to reach the 50-row target
+
 ## Current Result
 
-External probes currently pass for 8 of 10 binaries.
+External probes currently pass for 18 of 19 binaries.
 
 | Binary | Status | Observed output or failure |
 | --- | --- | --- |
-| `ripgrep` | PASS | `ripgrep 15.1.0` |
+| `ripgrep` | PASS | `ripgrep 15.1.0 (rev af60c2de9d)` |
 | `fd` | PASS | `fd 10.4.2` |
 | `hyperfine` | PASS | `hyperfine 1.20.0` |
-| `bat` | PASS | `bat 0.26.1` |
+| `bat` | PASS | `bat 0.26.1 (979ba22)` |
 | `jq` | PASS | `jq-1.8.2` |
-| `yq` | FAIL | `SIGSEGV`, `si_addr=NULL`, immediately after entering `_main` |
+| `yq` | FAIL | `SIGSEGV`, status 139, after entering `_main` |
 | `starship` | PASS | `starship 1.25.1` |
 | `delta` | PASS | `delta 0.19.2` |
 | `bottom` | PASS | `bottom 0.14.1` |
-| `just` | FAIL | `SIGSEGV`, `si_addr=NULL`, during early Rust thread/signal setup |
+| `just` | PASS | `just 1.53.0` |
+| `zoxide` | PASS | `zoxide 0.9.9` |
+| `sd` | PASS | `sd 1.0.0` |
+| `git-cliff` | PASS | `git-cliff 2.13.1` |
+| `sccache` | PASS | `sccache 0.16.0` |
+| `cargo-binstall` | PASS | `1.20.1` |
+| `hexyl` | PASS | `hexyl 0.17.0` |
+| `pastel` | PASS | `pastel 0.12.0` |
+| `atuin` | PASS | `atuin 18.16.1 (671f96b60dac49d1d2de73cc0812986a5e22ce7b)` |
+| `ninja` | PASS | `1.13.2` |
 
 ## Fixes Driven By The Probes
 
@@ -51,24 +74,30 @@ The external binaries exposed runtime ABI gaps that the smaller unit fixtures di
 - `_NSGetArgc`, `_NSGetArgv`, and `_NSGetEnviron` bootstrap compatibility.
 - Darwin `mmap` flag handling for imported libSystem calls.
 - Darwin `pthread_setname_np`, `pthread_threadid_np`, `sigaltstack`, `sigaction`, `pthread_sigmask`, `sigemptyset`, `sigaddset`, `sigfillset`, and `sigwait` ABI wrappers.
-- Minimal CoreFoundation timezone/string stubs for Rust CLI startup paths.
+- Minimal CoreFoundation timezone/string/data/array/error stubs for CLI startup paths.
+- Nearby branch-island fixes for LSE emulation and Darwin syscall gateway patching.
+- Loader segment-span fixes for large external Mach-O images with zero-sized debug segments.
 - QEMU user-mode syscall diagnostic logs for external failures.
 
 ## Validation
 
 Normal test suite:
 
-- `27/27 passed, 0 failed`
+- Command: `docker run --rm --platform linux/arm64 -v /home/kapablanka/repos/machgate:/work -w /work machgate-arm64-toolchain bash -lc 'set -euo pipefail; cmake --build build-arm64 --parallel; bash tests/fixtures/build_fixtures.sh; BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh'`
+- Result: `27/27 passed, 0 failed`
 
 External corpus:
 
-- `8/10 external Mach-O CLI probes passed, 2 failed`
+- Command: `docker run --rm --platform linux/arm64 -v /home/kapablanka/repos/machgate:/work -w /work machgate-arm64-toolchain bash -lc 'set -euo pipefail; MACHGATE_RUN_EXTERNAL=1 BUILD_DIR=/work/build-arm64 MACHGATE_EXTERNAL_MANIFEST=/work/tests/external/arm64_macho_cli_manifest.txt MACHGATE_EXTERNAL_LOGS=/work/tests/external/logs/canonical-merge-attempt1 MACHGATE_EXTERNAL_WORK=/work/tests/external/work/canonical-merge-attempt1 MACHGATE_EXTERNAL_TIMEOUT=30 bash tests/test_external_macho_cli.sh'`
+- Result: `18/19 external Mach-O CLI probes passed, 1 failed`
 
-The two remaining failures both have QEMU diagnostic logs:
+The remaining failure has diagnostics at:
 
-- `tests/external/logs/yq.qemu-strace`
-- `tests/external/logs/just.qemu-strace`
+- `tests/external/logs/canonical-merge-attempt1/yq.err`
+- `tests/external/logs/canonical-merge-attempt1/yq.qemu-strace`
 
 ## Remaining Work
 
-`yq` and `just` still fail before producing version output. Both failures now occur with all currently visible imports resolved, so the next debugging step is ABI-level tracing around early runtime bootstrap rather than adding more download fixtures.
+`yq` still fails before producing version output. Its current canonical run resolves all binds, enters `_main`, and then segfaults, matching the Go LC_MAIN startup class tracked by Worker F.
+
+The canonical manifest is intentionally below the 50-row target because only 9 additional passing rows were known at merge time. Add 31 more reproducible passing external rows before raising the canonical corpus to 50.

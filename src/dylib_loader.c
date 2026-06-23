@@ -143,7 +143,7 @@ struct macho_dylib_info *dylib_loader_load(const char *path)
 	uintptr_t vm_low = (uintptr_t)-1, vm_high = 0;
 	for (uint32_t i = 0, p = 0; i < header.ncmds && p < header.sizeofcmds; i++) {
 		struct segment_command_64 *seg = (struct segment_command_64 *)&cmds[p];
-		if (seg->cmd == LC_SEGMENT_64 && strcmp(seg->segname, "__PAGEZERO") != 0) {
+		if (seg->cmd == LC_SEGMENT_64 && strcmp(seg->segname, "__PAGEZERO") != 0 && seg->vmsize != 0) {
 			if (seg->vmaddr < vm_low)
 				vm_low = seg->vmaddr;
 			if (seg->vmaddr + seg->vmsize > vm_high)
@@ -192,6 +192,11 @@ struct macho_dylib_info *dylib_loader_load(const char *path)
 			int initprot = native_prot(seg->initprot);
 			int useprot = (initprot & PROT_EXEC) ? maxprot : initprot;
 
+			if (seg->vmsize == 0) {
+				p += seg->cmdsize;
+				continue;
+			}
+
 			/* Map anonymous for zero-fill portion.
 			 * MAP_FIXED is safe — we just reserved this range above. */
 			if (seg->vmsize > 0) {
@@ -208,7 +213,9 @@ struct macho_dylib_info *dylib_loader_load(const char *path)
 
 			/* Map file-backed portion over the anonymous mapping */
 			if (seg->filesize > 0) {
-				void *rv = mmap((void *)addr, seg->filesize, useprot,
+				uint64_t map_size = seg->filesize < seg->vmsize
+					? seg->filesize : seg->vmsize;
+				void *rv = mmap((void *)addr, map_size, useprot,
 				                MAP_FIXED | MAP_PRIVATE, fd, seg->fileoff + fat_offset);
 				if (rv == MAP_FAILED) {
 					fprintf(stderr, "dylib_loader: cannot mmap segment %s file data: %s\n",

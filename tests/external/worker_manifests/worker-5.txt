@@ -1,0 +1,12 @@
+# Worker 5 external ARM64 macOS CLI fixtures.
+#
+# Format:
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+ninja|https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-mac.zip|c99048673aa765960a99cf10c6ddb9f1fad506099ff0a0e137ad8960a88f321b|ninja|--version
+cmake|https://github.com/Kitware/CMake/releases/download/v4.3.3/cmake-4.3.3-macos-universal.tar.gz|5221a13450c7a0219a2a0d1b6c9085eb06489721fafd8488ccebc1584175d2fb|cmake-4.3.3-macos-universal/CMake.app/Contents/bin/cmake|--version
+sqlite3|https://www.sqlite.org/2026/sqlite-tools-osx-arm64-3530200.zip|43ec32933b8f9ba66cd73da1e1f32bca8407365a930b587935f834df2c1effbb|sqlite3|--version
+duckdb|https://github.com/duckdb/duckdb/releases/download/v1.5.4/duckdb_cli-osx-arm64.zip|d6c35195683fd1378e5624b01ca390069d399f8341c38986b7e3dfa0b3470d10|duckdb|--version
+node|https://nodejs.org/dist/latest/node-v26.3.1-darwin-arm64.tar.gz|3f624ab0d774553c0d28b968e141d8c676a35a2811fb0b7b356ba9cbdce15f74|node-v26.3.1-darwin-arm64/bin/node|--version
+bun|https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip|d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620|bun-darwin-aarch64/bun|--version
+protoc|https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip|193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2|bin/protoc|--version
+nvim|https://github.com/neovim/neovim/releases/download/v0.12.3/nvim-macos-arm64.tar.gz|532da1d00e465a660fa01c3d4991333d09c52107dce7df937368545daca0a14e|nvim-macos-arm64/bin/nvim|--version

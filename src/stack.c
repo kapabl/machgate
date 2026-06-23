@@ -49,12 +49,19 @@ void FUNCTION_NAME(const char* filepath, struct load_results* lr)
 	char __user* elfcalls_user;
 	char elfcalls[27];
 	static char __user* applep_contents[4];
+	char** original_argv;
+	char** original_envp;
+	char** guest_argv;
+	char** guest_envp;
+	char** guest_applep;
 
 	(void)err;
 
 #define user_long_count(_val) (((_val) + (sizeof(user_long_t) - 1)) / sizeof(user_long_t))
 
 	elfcalls_make(&_elfcalls);
+	original_argv = lr->argv;
+	original_envp = lr->envp;
 
 	executable_buf[sizeof(executable_buf) - 1] = '\0';
 	strncpy(executable_buf, filepath, sizeof(executable_buf) - 1);
@@ -129,13 +136,14 @@ void FUNCTION_NAME(const char* filepath, struct load_results* lr)
 	}
 
 	argv = sp;
+	guest_argv = (char**)argv;
 	for (int i = 0; i < lr->argc; ++i)
 	{
-		if (!lr->argv[i]) {
+		if (!original_argv[i]) {
 			lr->argc = i;
 			break;
 		}
-		if (__put_user((user_long_t) lr->argv[i], argv++))
+		if (__put_user((user_long_t) original_argv[i], argv++))
 		{
 			fprintf(stderr, "Failed to copy an argument pointer to stack\n");
 			exit(1);
@@ -148,14 +156,15 @@ void FUNCTION_NAME(const char* filepath, struct load_results* lr)
 	}
 
 	envp = argv;
+	guest_envp = (char**)envp;
 	for (int i = 0; i < lr->envc; ++i)
 	{
-		if (!lr->envp[i]) {
+		if (!original_envp[i]) {
 			lr->envc = i;
 			break;
 		}
 
-		if (__put_user((user_long_t) lr->envp[i], envp++))
+		if (__put_user((user_long_t) original_envp[i], envp++))
 		{
 			fprintf(stderr, "Failed to copy an environment variable pointer to stack\n");
 			exit(1);
@@ -168,6 +177,7 @@ void FUNCTION_NAME(const char* filepath, struct load_results* lr)
 	}
 
 	applep = envp;
+	guest_applep = (char**)applep;
 
 	for (int i = 0; i < sizeof(applep_contents)/sizeof(applep_contents[0]); i++)
 	{
@@ -177,6 +187,10 @@ void FUNCTION_NAME(const char* filepath, struct load_results* lr)
 			exit(1);
 		}
 	}
+
+	lr->argv = guest_argv;
+	lr->envp = guest_envp;
+	lr->applep = guest_applep;
 }
 
 #undef FUNCTION_NAME

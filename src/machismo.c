@@ -60,6 +60,8 @@ static int native_prot(int prot);
 static void setup_space(struct load_results* lr, bool is_64_bit);
 static void start_thread(struct load_results* lr);
 static void setup_stack64(const char* filepath, struct load_results* lr);
+static void lc_main_return(int status) __attribute__((noreturn));
+static void trace_lc_main_abi(struct load_results* lr);
 
 /* UUID of the main executable */
 uint8_t exe_uuid[16];
@@ -208,7 +210,7 @@ int main(int argc, char** argv, char** envp)
 			lp += llc->cmdsize;
 		}
 		/* Carve LSE pool from the adjacent pool reserved by the loader */
-		size_t lse_pool_size = 512 * 1024;
+		size_t lse_pool_size = 2 * 1024 * 1024;
 		uint32_t* lse_pool = (uint32_t*)machismo_pool_alloc(
 			&machismo_load_results, lse_pool_size);
 		if (lse_pool) {
@@ -567,6 +569,11 @@ int main(int argc, char** argv, char** envp)
 			fprintf(stderr, "machismo: syscall gate patching failed — aborting\n");
 			abort();
 		}
+	}
+
+	if (machismo_load_results.mh && getenv("MACHGATE_TRACE_SIGNALS")) {
+		trampoline_install_signal_diagnostics((void*)machismo_load_results.mh,
+		                                      machismo_load_results.slide);
 	}
 
 	/* Set up the Mach-O stack layout */
@@ -945,13 +952,38 @@ static void run_init_offsets(struct load_results* lr) {
 	}
 }
 
+static void lc_main_return(int status)
+{
+	_exit(status);
+}
+
+static void trace_lc_main_abi(struct load_results* lr)
+{
+	if (!getenv("MACHGATE_TRACE_LCMAIN"))
+		return;
+
+	char** env_from_argv = lr->argv + lr->argc + 1;
+	char** apple_from_argv = env_from_argv;
+	while (*apple_from_argv)
+		apple_from_argv++;
+	apple_from_argv++;
+
+	fprintf(stderr, "machismo: lcmain abi stack=%p argc=%zu argv=%p envp=%p applep=%p\n",
+	        (void*)lr->stack_top, lr->argc, (void*)lr->argv, (void*)lr->envp,
+	        (void*)lr->applep);
+	fprintf(stderr, "machismo: lcmain abi derived envp=%p applep=%p\n",
+	        (void*)env_from_argv, (void*)apple_from_argv);
+	fprintf(stderr, "machismo: lcmain abi argv0=%p '%s' argv1=%p '%s'\n",
+	        lr->argv[0], lr->argv[0] ? lr->argv[0] : "",
+	        lr->argc > 1 ? lr->argv[1] : NULL,
+	        lr->argc > 1 && lr->argv[1] ? lr->argv[1] : "");
+	fprintf(stderr, "machismo: lcmain abi env0=%p '%s' apple0=%p '%s'\n",
+	        lr->envp[0], lr->envp[0] ? lr->envp[0] : "",
+	        lr->applep[0], lr->applep[0] ? lr->applep[0] : "");
+}
+
 static void start_thread(struct load_results* lr) {
 	if (lr->lc_main) {
-		/* LC_MAIN: entry point is main(argc, argv, envp, applep).
-		 * Call it as a C function with args in registers. */
-		typedef int (*main_func_t)(int, char**, char**, char**);
-		main_func_t entry = (main_func_t)lr->entry_point;
-
 		/* pthread fixup and TLV setup are done earlier in main(),
 		 * before the __DATA guard locks down pages. */
 
@@ -972,9 +1004,34 @@ static void start_thread(struct load_results* lr) {
 
 		fprintf(stderr, "machismo: calling _main at %p (argc=%zu)\n",
 				(void*)lr->entry_point, lr->argc);
+		trace_lc_main_abi(lr);
 
+#ifdef __aarch64__
+		__asm__ volatile(
+			"mov x0, %x[argc]\n"
+			"mov x1, %x[argv]\n"
+			"mov x2, %x[envp]\n"
+			"mov x3, %x[applep]\n"
+			"mov x29, #0\n"
+			"mov x30, %x[return_address]\n"
+			"mov sp, %x[stack_top]\n"
+			"br %x[entry_point]\n"
+			:
+			: [argc] "r"((uintptr_t)lr->argc),
+			  [argv] "r"(lr->argv),
+			  [envp] "r"(lr->envp),
+			  [applep] "r"(lr->applep),
+			  [return_address] "r"(lc_main_return),
+			  [stack_top] "r"(lr->stack_top),
+			  [entry_point] "r"(lr->entry_point)
+			: "x0", "x1", "x2", "x3", "memory");
+		__builtin_unreachable();
+#else
+		typedef int (*main_func_t)(int, char**, char**, char**);
+		main_func_t entry = (main_func_t)lr->entry_point;
 		int ret = entry((int)lr->argc, lr->argv, lr->envp, lr->applep);
 		_exit(ret);
+#endif
 	}
 
 	/* LC_UNIXTHREAD: set up stack and jump directly */

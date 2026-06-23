@@ -1,0 +1,12 @@
+# Worker 4: HashiCorp and infrastructure CLIs.
+# Format:
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+terraform|https://releases.hashicorp.com/terraform/1.15.6/terraform_1.15.6_darwin_arm64.zip|8d4c6791a744332bc7ca3962c61ab2ed8e5d25a7299f176f5edffb9cb525e85f|terraform|--version
+packer|https://releases.hashicorp.com/packer/1.15.4/packer_1.15.4_darwin_arm64.zip|d95ba177dd2ebb84d7d155493b4188ec2a519d2c3b041528db5b63a6aff9da80|packer|--version
+vault|https://releases.hashicorp.com/vault/2.0.3/vault_2.0.3_darwin_arm64.zip|abf89e4e56a3af41471ccccdaac1b691874c5e8b20e72c053133d948be0cec42|vault|--version
+consul|https://releases.hashicorp.com/consul/2.0.1/consul_2.0.1_darwin_arm64.zip|ab6f2baa756b7ade58b335ec98312ff8235bc3d6d520de9c7ec95bd9c8a13485|consul|--version
+nomad|https://releases.hashicorp.com/nomad/2.0.3/nomad_2.0.3_darwin_arm64.zip|e482c25c608ea7c40bcc75a6802c51580e3fa08e3a78e387faf62b6d499ecb0b|nomad|--version
+boundary|https://releases.hashicorp.com/boundary/0.21.3/boundary_0.21.3_darwin_arm64.zip|7d64c6bf6ca437b10a143d47bb85cfaff0af7ba83c598a38b1ac275d2acc75c1|boundary|--version
+tofu|https://github.com/opentofu/opentofu/releases/download/v1.12.3/tofu_1.12.3_darwin_arm64.zip|2b81c065cdcf5e573cfb5d9e0c663ac4cfc32512927078b645b58ef81cec2474|tofu|--version
+terragrunt|https://github.com/gruntwork-io/terragrunt/releases/download/v1.0.8/terragrunt_darwin_arm64|7acf580bb22736299e86837f36ef663c3b7eb7ab20e36c810f92a2bb10016441|.|--version
+pulumi|https://github.com/pulumi/pulumi/releases/download/v3.247.0/pulumi-v3.247.0-darwin-arm64.tar.gz|3b37d840550c6250ccfa9996d7d4b0372864ecf2a47b1a184f3d903874cd1d34|pulumi/pulumi|--version

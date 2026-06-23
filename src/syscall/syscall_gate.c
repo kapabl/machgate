@@ -47,9 +47,22 @@
 #define SYSCALL_GATE_POOL_SIZE (256 * 1024)
 #define SYSCALL_GATE_ISLAND_WORDS 96
 #define SYSCALL_GATE_CARRY 0x20000000u
+#define SYSCALL_GATE_MAX_POOLS 256
+#define SYSCALL_GATE_SEARCH_STEP (1024 * 1024)
 
-static uint32_t* gate_pool_cur;
-static uint32_t* gate_pool_end;
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
+struct syscall_gate_pool {
+	uint32_t* cur;
+	uint32_t* end;
+	void* base;
+	size_t size;
+};
+
+static struct syscall_gate_pool gate_pools[SYSCALL_GATE_MAX_POOLS];
+static size_t gate_pool_count;
 
 static uint32_t enc_stp_sp(int rt, int rt2, int offset)
 {
@@ -370,24 +383,144 @@ static int emit_island(uint32_t* island, uint32_t* original)
 	return 0;
 }
 
+static size_t page_size(void)
+{
+	long result = sysconf(_SC_PAGESIZE);
+	if (result <= 0)
+		return 4096;
+	return (size_t)result;
+}
+
+static uintptr_t align_down(uintptr_t value, size_t alignment)
+{
+	return value & ~((uintptr_t)alignment - 1);
+}
+
+static uintptr_t align_up(uintptr_t value, size_t alignment)
+{
+	return (value + alignment - 1) & ~((uintptr_t)alignment - 1);
+}
+
+static int island_reachable(uint32_t* instr, uint32_t* island)
+{
+	int64_t byte_offset = (char*)island - (char*)instr;
+	return arm64_branch_in_range(byte_offset);
+}
+
+static struct syscall_gate_pool* register_gate_pool(void* base, size_t size)
+{
+	if (!base || size < SYSCALL_GATE_ISLAND_WORDS * sizeof(uint32_t))
+		return NULL;
+	if (gate_pool_count >= SYSCALL_GATE_MAX_POOLS) {
+		fprintf(stderr, "syscall_gate: too many island pools\n");
+		return NULL;
+	}
+
+	struct syscall_gate_pool* pool = &gate_pools[gate_pool_count++];
+	pool->base = base;
+	pool->size = size;
+	pool->cur = (uint32_t*)base;
+	pool->end = pool->cur + size / sizeof(uint32_t);
+	return pool;
+}
+
+static struct syscall_gate_pool* find_gate_pool(uint32_t* instr)
+{
+	for (size_t i = 0; i < gate_pool_count; i++) {
+		struct syscall_gate_pool* pool = &gate_pools[i];
+		if (pool->cur + SYSCALL_GATE_ISLAND_WORDS > pool->end)
+			continue;
+		if (island_reachable(instr, pool->cur))
+			return pool;
+	}
+	return NULL;
+}
+
+static void* map_gate_pool_at(uintptr_t address, size_t size)
+{
+	void* result = mmap((void*)address, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+	                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+	                    -1, 0);
+	if (result == MAP_FAILED)
+		return NULL;
+	if ((uintptr_t)result == address)
+		return result;
+	munmap(result, size);
+	return NULL;
+}
+
+static struct syscall_gate_pool* allocate_gate_pool_below(uint32_t* instr,
+                                                          size_t size,
+                                                          size_t page)
+{
+	uintptr_t site = (uintptr_t)instr;
+	uintptr_t range = (uintptr_t)(1u << 27);
+	uintptr_t start = align_down(site > size ? site - size : page, page);
+	uintptr_t minimum = site > range ? align_up(site - range, page) : page;
+
+	for (uintptr_t address = start; address >= minimum; ) {
+		void* base = map_gate_pool_at(address, size);
+		if (base)
+			return register_gate_pool(base, size);
+		if (address < minimum + SYSCALL_GATE_SEARCH_STEP)
+			break;
+		address -= SYSCALL_GATE_SEARCH_STEP;
+	}
+
+	void* base = map_gate_pool_at(minimum, size);
+	if (base)
+		return register_gate_pool(base, size);
+	return NULL;
+}
+
+static struct syscall_gate_pool* allocate_gate_pool_above(uint32_t* instr,
+                                                          size_t size,
+                                                          size_t page)
+{
+	uintptr_t site = (uintptr_t)instr;
+	uintptr_t range = (uintptr_t)(1u << 27);
+	uintptr_t start = align_up(site + page, page);
+	uintptr_t maximum = align_down(site + range - size, page);
+
+	for (uintptr_t address = start; address <= maximum; address += SYSCALL_GATE_SEARCH_STEP) {
+		void* base = map_gate_pool_at(address, size);
+		if (base)
+			return register_gate_pool(base, size);
+		if (maximum - address < SYSCALL_GATE_SEARCH_STEP)
+			break;
+	}
+
+	void* base = map_gate_pool_at(maximum, size);
+	if (base)
+		return register_gate_pool(base, size);
+	return NULL;
+}
+
+static struct syscall_gate_pool* allocate_gate_pool_near(uint32_t* instr)
+{
+	size_t page = page_size();
+	size_t size = align_up(SYSCALL_GATE_POOL_SIZE, page);
+	struct syscall_gate_pool* result = allocate_gate_pool_below(instr, size, page);
+	if (result)
+		return result;
+	return allocate_gate_pool_above(instr, size, page);
+}
+
 static int patch_instruction(uint32_t* instr)
 {
-	if (gate_pool_cur + SYSCALL_GATE_ISLAND_WORDS > gate_pool_end) {
-		fprintf(stderr, "syscall_gate: island pool exhausted\n");
+	struct syscall_gate_pool* pool = find_gate_pool(instr);
+	if (!pool)
+		pool = allocate_gate_pool_near(instr);
+	if (!pool) {
+		fprintf(stderr, "syscall_gate: no island pool within B range of %p\n",
+		        (void*)instr);
 		return -1;
 	}
 
-	uint32_t* island = gate_pool_cur;
-	int64_t byte_offset = (char*)island - (char*)instr;
-	if (!arm64_branch_in_range(byte_offset)) {
-		fprintf(stderr, "syscall_gate: island at %p too far from %p\n",
-		        (void*)island, (void*)instr);
-		return -1;
-	}
-
+	uint32_t* island = pool->cur;
 	emit_island(island, instr);
 	*instr = enc_b((int32_t)(island - instr));
-	gate_pool_cur += SYSCALL_GATE_ISLAND_WORDS;
+	pool->cur += SYSCALL_GATE_ISLAND_WORDS;
 	return 0;
 }
 
@@ -412,14 +545,14 @@ int syscall_gate_patch(struct load_results* lr)
 	if (!lr || !lr->mh)
 		return 0;
 
+	gate_pool_count = 0;
+
 	void* pool = machismo_pool_alloc(lr, SYSCALL_GATE_POOL_SIZE);
 	if (!pool) {
-		fprintf(stderr, "syscall_gate: no pool space for syscall islands\n");
+		fprintf(stderr, "syscall_gate: no adjacent pool space for syscall islands\n");
+	} else if (!register_gate_pool(pool, SYSCALL_GATE_POOL_SIZE)) {
 		return -1;
 	}
-
-	gate_pool_cur = (uint32_t*)pool;
-	gate_pool_end = gate_pool_cur + SYSCALL_GATE_POOL_SIZE / 4;
 
 	struct mach_header_64* mh = (struct mach_header_64*)lr->mh;
 	uint8_t* cmds = (uint8_t*)(mh + 1);
@@ -453,7 +586,10 @@ int syscall_gate_patch(struct load_results* lr)
 		offset += lc->cmdsize;
 	}
 
-	__builtin___clear_cache((char*)pool, (char*)pool + SYSCALL_GATE_POOL_SIZE);
+	for (size_t i = 0; i < gate_pool_count; i++) {
+		char* base = (char*)gate_pools[i].base;
+		__builtin___clear_cache(base, base + gate_pools[i].size);
+	}
 	if (total > 0)
 		fprintf(stderr, "syscall_gate: patched %d Darwin syscalls\n", total);
 	return total;

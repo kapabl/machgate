@@ -8,7 +8,7 @@
 /* Pool space reserved adjacent to the Mach-O segments for branch islands.
  * Guaranteed within ±128MB of __TEXT. Carved out by the LSE and trampoline
  * code via machismo_pool_alloc(). */
-#define MACHISMO_POOL_PADDING (2 * 1024 * 1024)  /* 2MB */
+#define MACHISMO_POOL_PADDING (4 * 1024 * 1024)  /* 4MB */
 
 struct load_results {
 	unsigned long mh;
