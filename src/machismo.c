@@ -68,6 +68,9 @@ __attribute__((used))
 struct load_results machismo_load_results = {0};
 
 void* __machismo_main_stack_top = NULL;
+size_t __machismo_main_stack_size = 0;
+int __machismo_guest_argc = 0;
+char** __machismo_guest_argv = NULL;
 
 int machismo_verbose = 0;
 
@@ -114,6 +117,8 @@ int main(int argc, char** argv, char** envp)
 	/* Adjust argv: remove machismo args so the loaded binary sees its path as argv[0] */
 	machismo_load_results.argc = argc - arg_idx;
 	machismo_load_results.argv = argv + arg_idx;
+	__machismo_guest_argc = (int)machismo_load_results.argc;
+	__machismo_guest_argv = machismo_load_results.argv;
 
 	/* Load config file — look next to the binary, or use MACHISMO_CONFIG */
 	machismo_config_t cfg = {0};
@@ -567,8 +572,6 @@ int main(int argc, char** argv, char** envp)
 	/* Set up the Mach-O stack layout */
 	setup_stack64(filename, &machismo_load_results);
 
-	__machismo_main_stack_top = (void*)machismo_load_results.stack_top;
-
 	start_thread(&machismo_load_results);
 
 	__builtin_unreachable();
@@ -715,7 +718,7 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 
 	struct rlimit limit;
 	getrlimit(RLIMIT_STACK, &limit);
-	unsigned long size = PAGE_SIZE * 16;
+	unsigned long size = PAGE_SIZE * 4096;
 	if (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur < size) {
 		size = limit.rlim_cur;
 	}
@@ -725,6 +728,9 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 		fprintf(stderr, "Failed to allocate stack of %lu bytes: %d (%s)\n", size, errno, strerror(errno));
 		exit(1);
 	}
+
+	__machismo_main_stack_top = (void*)lr->stack_top;
+	__machismo_main_stack_size = size;
 
 	lr->kernfd = -1;
 }

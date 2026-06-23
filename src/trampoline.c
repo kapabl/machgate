@@ -637,6 +637,12 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		}
 	}
 
+	if (getenv("MACHGATE_TRACE_SIGNALS")) {
+		uintptr_t pc = ucontext_pc(ucontext);
+		fprintf(stderr, "machismo: SIGSEGV at %p from PC=%p\n",
+		        (void*)fault_addr, (void*)pc);
+	}
+
 	/* Not our fault — re-raise with default handler */
 	struct sigaction sa;
 	sa.sa_handler = SIG_DFL;

@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     clang-18 \
     cmake \
+    curl \
     file \
     git \
     lld-18 \
@@ -14,6 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     llvm-18-tools \
     ninja-build \
     pkg-config \
+    strace \
+    unzip \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 

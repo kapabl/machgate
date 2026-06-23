@@ -1,0 +1,18 @@
+# External ARM64 macOS CLI fixtures.
+#
+# Format:
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+#
+# These binaries are not vendored. The integration harness downloads them into
+# tests/external/cache, verifies sha256, extracts the named Mach-O executable,
+# and runs it through build-arm64/machismo.
+ripgrep|https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-aarch64-apple-darwin.tar.gz|378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715|ripgrep-15.1.0-aarch64-apple-darwin/rg|--version
+fd|https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-aarch64-apple-darwin.tar.gz|623dc0afc81b92e4d4606b380d7bc91916ba7b97814263e554d50923a39e480a|fd-v10.4.2-aarch64-apple-darwin/fd|--version
+hyperfine|https://github.com/sharkdp/hyperfine/releases/download/v1.20.0/hyperfine-v1.20.0-aarch64-apple-darwin.tar.gz|8ee7067016620447c9d2d6234ec9a4680f958b7ad983549b56334668f63075b5|hyperfine-v1.20.0-aarch64-apple-darwin/hyperfine|--version
+bat|https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-aarch64-apple-darwin.tar.gz|e30beff26779c9bf60bb541e1d79046250cb74378f2757f8eb250afddb19e114|bat-v0.26.1-aarch64-apple-darwin/bat|--version
+jq|https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-macos-arm64|2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e|.|--version
+yq|https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_darwin_arm64.tar.gz|8415210a2c06e706e4037ccbbfc0d0e35c2518683da21a432d28258752567474|yq_darwin_arm64|--version
+starship|https://github.com/starship/starship/releases/download/v1.25.1/starship-aarch64-apple-darwin.tar.gz|1062a2363489b9335529b83204472f02633c08fc3609f1b325be5eba36feb631|starship|--version
+delta|https://github.com/dandavison/delta/releases/download/0.19.2/delta-0.19.2-aarch64-apple-darwin.tar.gz|9be36612a5a13e9e386dc498fb8e50dc87c72ee42b63db0ea05b32f99a72a69a|delta-0.19.2-aarch64-apple-darwin/delta|--version
+bottom|https://github.com/ClementTsang/bottom/releases/download/0.14.1/bottom_aarch64-apple-darwin.tar.gz|1e7f03acb9189a4ad79c20fdef0bd7163265fa56ab75fc54b19f1dde5aaea5ae|btm|--version
+just|https://github.com/casey/just/releases/download/1.53.0/just-1.53.0-aarch64-apple-darwin.tar.gz|27f1361f2e4fb5d733837f1a9f80f85c237e5a36c75ee14961e59141713aa4ed|just|--version

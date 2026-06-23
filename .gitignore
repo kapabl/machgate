@@ -49,6 +49,9 @@ tests/fixtures/with_lc_main
 tests/fixtures/trampoline_target
 tests/fixtures/libtest_native.so
 tests/test_bgfx_gles
+tests/external/cache/
+tests/external/work/
+tests/external/logs/
 
 # Runtime
 userdata/

@@ -23,14 +23,32 @@
 #include <wctype.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <dirent.h>
 #include <stdarg.h>
+
+extern char **environ;
+
+struct darwin_sigaltstack {
+	uint64_t sp;
+	uint64_t size;
+	uint32_t flags;
+	uint32_t pad;
+};
+
+struct darwin_sigaction {
+	uint64_t handler;
+	uint32_t mask;
+	uint32_t flags;
+};
 
 /* ===== Mach time ===== */
 
@@ -94,6 +112,7 @@ uint64_t clock_gettime_nsec_np(int clock_id)
 
 /* mach_task_self_ is a global variable in libSystem, not a function */
 uint32_t mach_task_self_ = 0x103; /* dummy port number */
+uint32_t vm_page_size = 4096;
 
 /* task_info — stub, returns KERN_FAILURE */
 int task_info(uint32_t target_task, uint32_t flavor,
@@ -119,6 +138,185 @@ int mach_port_deallocate(uint32_t task, uint32_t name)
 {
 	(void)task; (void)name;
 	return 0;
+}
+
+/* ===== dyld / process bootstrap compatibility ===== */
+
+void dyld_stub_binder(void)
+{
+}
+
+int* _NSGetArgc(void)
+{
+	static int argc = 0;
+	int* machismo_argc = dlsym(RTLD_DEFAULT, "__machismo_guest_argc");
+
+	if (machismo_argc)
+		return machismo_argc;
+	return &argc;
+}
+
+char*** _NSGetArgv(void)
+{
+	static char** argv = NULL;
+	char*** machismo_argv = dlsym(RTLD_DEFAULT, "__machismo_guest_argv");
+
+	if (machismo_argv)
+		return machismo_argv;
+	return &argv;
+}
+
+char*** _NSGetEnviron(void)
+{
+	return &environ;
+}
+
+uint32_t _dyld_image_count(void)
+{
+	return 1;
+}
+
+const void* _dyld_get_image_header(uint32_t image_index)
+{
+	(void)image_index;
+	return NULL;
+}
+
+const char* _dyld_get_image_name(uint32_t image_index)
+{
+	(void)image_index;
+	return NULL;
+}
+
+intptr_t _dyld_get_image_vmaddr_slide(uint32_t image_index)
+{
+	(void)image_index;
+	return 0;
+}
+
+int issetugid(void)
+{
+	return 0;
+}
+
+int CCRandomGenerateBytes(void* bytes, size_t count)
+{
+	if (!bytes && count)
+		return -1;
+
+	size_t offset = 0;
+	while (offset < count) {
+		long result = syscall(SYS_getrandom, (char*)bytes + offset,
+		                      count - offset, 0);
+		if (result < 0) {
+			if (errno == EINTR)
+				continue;
+			int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+			if (fd < 0)
+				return -1;
+			while (offset < count) {
+				ssize_t nread = read(fd, (char*)bytes + offset,
+				                     count - offset);
+				if (nread < 0 && errno == EINTR)
+					continue;
+				if (nread <= 0) {
+					close(fd);
+					return -1;
+				}
+				offset += (size_t)nread;
+			}
+			close(fd);
+			return 0;
+		}
+		offset += (size_t)result;
+	}
+	return 0;
+}
+
+void sys_icache_invalidate(void* start, size_t len)
+{
+	if (!start || len == 0)
+		return;
+	__builtin___clear_cache((char*)start, (char*)start + len);
+}
+
+typedef int64_t CFIndex;
+typedef uint32_t CFStringEncoding;
+typedef const void* CFStringRef;
+typedef const void* CFTimeZoneRef;
+
+struct cf_range {
+	CFIndex location;
+	CFIndex length;
+};
+
+static const char cf_timezone_name[] = "UTC";
+static const char cf_timezone_object[] = "MachGate/UTC";
+
+CFTimeZoneRef CFTimeZoneCopySystem(void)
+{
+	return cf_timezone_object;
+}
+
+void CFTimeZoneResetSystem(void)
+{
+}
+
+CFStringRef CFTimeZoneGetName(CFTimeZoneRef tz)
+{
+	(void)tz;
+	return cf_timezone_name;
+}
+
+CFIndex CFStringGetLength(CFStringRef string)
+{
+	if (!string)
+		return 0;
+	return (CFIndex)strlen((const char*)string);
+}
+
+const char* CFStringGetCStringPtr(CFStringRef string, CFStringEncoding encoding)
+{
+	(void)encoding;
+	return (const char*)string;
+}
+
+CFIndex CFStringGetBytes(CFStringRef string, struct cf_range range,
+                         CFStringEncoding encoding, uint8_t loss_byte,
+                         uint8_t is_external_representation, uint8_t* buffer,
+                         CFIndex max_buffer_length, CFIndex* used_buffer_length)
+{
+	(void)encoding;
+	(void)loss_byte;
+	(void)is_external_representation;
+
+	if (!string) {
+		if (used_buffer_length)
+			*used_buffer_length = 0;
+		return 0;
+	}
+
+	const char* source = (const char*)string;
+	CFIndex source_length = (CFIndex)strlen(source);
+	if (range.location < 0 || range.location > source_length) {
+		if (used_buffer_length)
+			*used_buffer_length = 0;
+		return 0;
+	}
+
+	CFIndex available = source_length - range.location;
+	CFIndex requested = range.length < available ? range.length : available;
+	CFIndex copied = requested < max_buffer_length ? requested : max_buffer_length;
+	if (buffer && copied > 0)
+		memcpy(buffer, source + range.location, (size_t)copied);
+	if (used_buffer_length)
+		*used_buffer_length = copied;
+	return copied;
+}
+
+void CFRelease(const void* object)
+{
+	(void)object;
 }
 
 /* ===== Apple stdio globals ===== */
@@ -612,6 +810,12 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex)
 	return real_pthread_mutex_destroy(mutex);
 }
 
+static int shim_trace_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_SHIM");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
 /* Same issue for pthread_cond_t */
 static inline void fixup_cond(pthread_cond_t *cond)
 {
@@ -620,6 +824,285 @@ static inline void fixup_cond(pthread_cond_t *cond)
 		memset(cond, 0, sizeof(pthread_cond_t));
 		real_pthread_cond_init(cond, NULL);
 	}
+}
+
+#define ATTR_SLOT_COUNT 64
+
+struct pthread_attr_slot {
+	const void* key;
+	pthread_attr_t native;
+	int used;
+};
+
+static struct pthread_attr_slot pthread_attr_slots[ATTR_SLOT_COUNT];
+
+static struct pthread_attr_slot* pthread_attr_slot_find(const void* key)
+{
+	for (int i = 0; i < ATTR_SLOT_COUNT; i++) {
+		if (pthread_attr_slots[i].used && pthread_attr_slots[i].key == key)
+			return &pthread_attr_slots[i];
+	}
+	return NULL;
+}
+
+static struct pthread_attr_slot* pthread_attr_slot_alloc(const void* key)
+{
+	struct pthread_attr_slot* slot = pthread_attr_slot_find(key);
+	if (slot)
+		return slot;
+
+	for (int i = 0; i < ATTR_SLOT_COUNT; i++) {
+		if (!pthread_attr_slots[i].used) {
+			pthread_attr_slots[i].used = 1;
+			pthread_attr_slots[i].key = key;
+			return &pthread_attr_slots[i];
+		}
+	}
+	return NULL;
+}
+
+int pthread_attr_init(pthread_attr_t* attr)
+{
+	static int (*real_pthread_attr_init)(pthread_attr_t*) = NULL;
+	struct pthread_attr_slot* slot = pthread_attr_slot_alloc(attr);
+
+	if (!real_pthread_attr_init)
+		real_pthread_attr_init = dlsym(RTLD_NEXT, "pthread_attr_init");
+	if (!real_pthread_attr_init)
+		return ENOSYS;
+	if (!slot)
+		return ENOMEM;
+
+	int result = real_pthread_attr_init(&slot->native);
+	if (result == 0)
+		memset(attr, 0, sizeof(uint64_t));
+	return result;
+}
+
+int pthread_attr_destroy(pthread_attr_t* attr)
+{
+	static int (*real_pthread_attr_destroy)(pthread_attr_t*) = NULL;
+	struct pthread_attr_slot* slot = pthread_attr_slot_find(attr);
+
+	if (!real_pthread_attr_destroy)
+		real_pthread_attr_destroy = dlsym(RTLD_NEXT, "pthread_attr_destroy");
+	if (!real_pthread_attr_destroy)
+		return ENOSYS;
+	if (!slot)
+		return real_pthread_attr_destroy(attr);
+
+	int result = real_pthread_attr_destroy(&slot->native);
+	slot->used = 0;
+	slot->key = NULL;
+	return result;
+}
+
+int pthread_attr_setstacksize(pthread_attr_t* attr, size_t stack_size)
+{
+	static int (*real_pthread_attr_setstacksize)(pthread_attr_t*, size_t) = NULL;
+	struct pthread_attr_slot* slot = pthread_attr_slot_find(attr);
+
+	if (!real_pthread_attr_setstacksize)
+		real_pthread_attr_setstacksize = dlsym(RTLD_NEXT, "pthread_attr_setstacksize");
+	if (!real_pthread_attr_setstacksize)
+		return ENOSYS;
+	return real_pthread_attr_setstacksize(slot ? &slot->native : attr, stack_size);
+}
+
+int pthread_attr_getstacksize(const pthread_attr_t* attr, size_t* stack_size)
+{
+	static int (*real_pthread_attr_getstacksize)(const pthread_attr_t*, size_t*) = NULL;
+	struct pthread_attr_slot* slot = pthread_attr_slot_find(attr);
+
+	if (!real_pthread_attr_getstacksize)
+		real_pthread_attr_getstacksize = dlsym(RTLD_NEXT, "pthread_attr_getstacksize");
+	if (!real_pthread_attr_getstacksize)
+		return ENOSYS;
+	return real_pthread_attr_getstacksize(slot ? &slot->native : attr, stack_size);
+}
+
+int pthread_attr_setdetachstate(pthread_attr_t* attr, int detach_state)
+{
+	static int (*real_pthread_attr_setdetachstate)(pthread_attr_t*, int) = NULL;
+	struct pthread_attr_slot* slot = pthread_attr_slot_find(attr);
+	int linux_state = detach_state;
+
+	if (!real_pthread_attr_setdetachstate)
+		real_pthread_attr_setdetachstate = dlsym(RTLD_NEXT, "pthread_attr_setdetachstate");
+	if (!real_pthread_attr_setdetachstate)
+		return ENOSYS;
+
+	if (detach_state == 1)
+		linux_state = PTHREAD_CREATE_JOINABLE;
+	else if (detach_state == 2)
+		linux_state = PTHREAD_CREATE_DETACHED;
+	return real_pthread_attr_setdetachstate(slot ? &slot->native : attr, linux_state);
+}
+
+int pthread_create(pthread_t* thread, const pthread_attr_t* attr,
+                   void* (*start_routine)(void*), void* arg)
+{
+	static int (*real_pthread_create)(pthread_t*, const pthread_attr_t*,
+	                                  void* (*)(void*), void*) = NULL;
+	struct pthread_attr_slot* slot = pthread_attr_slot_find(attr);
+
+	if (!real_pthread_create)
+		real_pthread_create = dlsym(RTLD_NEXT, "pthread_create");
+	if (!real_pthread_create)
+		return ENOSYS;
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_create(start=%p arg=%p attr=%p native=%p)\n",
+		        start_routine, arg, attr, slot ? (void*)&slot->native : NULL);
+	return real_pthread_create(thread, slot ? &slot->native : attr,
+	                           start_routine, arg);
+}
+
+void* pthread_get_stackaddr_np(pthread_t thread)
+{
+	pthread_attr_t attr;
+	void* stack_addr = NULL;
+	size_t stack_size = 0;
+	void** machismo_stack_top;
+
+	machismo_stack_top = dlsym(RTLD_DEFAULT, "__machismo_main_stack_top");
+	if (machismo_stack_top && *machismo_stack_top && pthread_equal(thread, pthread_self())) {
+		if (shim_trace_enabled())
+			fprintf(stderr, "libsystem_shim: pthread_get_stackaddr_np main -> %p\n", *machismo_stack_top);
+		return *machismo_stack_top;
+	}
+	if (pthread_getattr_np(thread, &attr) != 0)
+		return NULL;
+	pthread_attr_getstack(&attr, &stack_addr, &stack_size);
+	pthread_attr_destroy(&attr);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_get_stackaddr_np host -> %p\n", (char*)stack_addr + stack_size);
+	return (char*)stack_addr + stack_size;
+}
+
+size_t pthread_get_stacksize_np(pthread_t thread)
+{
+	pthread_attr_t attr;
+	void* stack_addr = NULL;
+	size_t stack_size = 0;
+	size_t* machismo_stack_size;
+
+	machismo_stack_size = dlsym(RTLD_DEFAULT, "__machismo_main_stack_size");
+	if (machismo_stack_size && *machismo_stack_size && pthread_equal(thread, pthread_self())) {
+		if (shim_trace_enabled())
+			fprintf(stderr, "libsystem_shim: pthread_get_stacksize_np main -> %zu\n", *machismo_stack_size);
+		return *machismo_stack_size;
+	}
+	if (pthread_getattr_np(thread, &attr) != 0)
+		return 0;
+	pthread_attr_getstack(&attr, &stack_addr, &stack_size);
+	pthread_attr_destroy(&attr);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_get_stacksize_np host -> %zu\n", stack_size);
+	return stack_size;
+}
+
+void pthread_jit_write_protect_np(int enabled)
+{
+	(void)enabled;
+}
+
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void))
+{
+	static int (*real_pthread_atfork)(void (*)(void), void (*)(void), void (*)(void));
+
+	if (!real_pthread_atfork)
+		real_pthread_atfork = dlsym(RTLD_NEXT, "pthread_atfork");
+	if (!real_pthread_atfork)
+		return 0;
+	return real_pthread_atfork(prepare, parent, child);
+}
+
+#define DARWIN_SC_PAGESIZE 29
+#define DARWIN_SC_PAGE_SIZE 29
+#define DARWIN_SC_NPROCESSORS_CONF 57
+#define DARWIN_SC_NPROCESSORS_ONLN 58
+
+long sysconf(int name)
+{
+	static long (*real_sysconf)(int) = NULL;
+
+	if (!real_sysconf)
+		real_sysconf = dlsym(RTLD_NEXT, "sysconf");
+
+	switch (name) {
+	case DARWIN_SC_PAGESIZE:
+		return real_sysconf(_SC_PAGESIZE);
+	case DARWIN_SC_NPROCESSORS_CONF:
+		return real_sysconf(_SC_NPROCESSORS_CONF);
+	case DARWIN_SC_NPROCESSORS_ONLN:
+		return real_sysconf(_SC_NPROCESSORS_ONLN);
+	default:
+		return real_sysconf(name);
+	}
+}
+
+int pthread_cond_timedwait_relative_np(pthread_cond_t* cond,
+                                       pthread_mutex_t* mutex,
+                                       const struct timespec* relative)
+{
+	if (!relative)
+		return pthread_cond_wait(cond, mutex);
+
+	struct timespec deadline;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += relative->tv_sec;
+	deadline.tv_nsec += relative->tv_nsec;
+	if (deadline.tv_nsec >= 1000000000L) {
+		deadline.tv_sec += deadline.tv_nsec / 1000000000L;
+		deadline.tv_nsec %= 1000000000L;
+	}
+	return pthread_cond_timedwait(cond, mutex, &deadline);
+}
+
+int kqueue(void)
+{
+	return eventfd(0, EFD_CLOEXEC);
+}
+
+struct darwin_kevent_placeholder {
+	uint64_t ident;
+	int16_t filter;
+	uint16_t flags;
+	uint32_t fflags;
+	int64_t data;
+	void* udata;
+};
+
+int kevent(int kq, const struct darwin_kevent_placeholder* changelist,
+           int nchanges, struct darwin_kevent_placeholder* eventlist,
+           int nevents, const struct timespec* timeout)
+{
+	(void)changelist;
+	(void)nchanges;
+
+	if (kq < 0) {
+		errno = EBADF;
+		return -1;
+	}
+	if (nevents < 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (eventlist && nevents > 0 && timeout &&
+	    timeout->tv_sec == 0 && timeout->tv_nsec == 0)
+		return 0;
+	return 0;
+}
+
+int notify_is_valid_token(int token)
+{
+	(void)token;
+	return 0;
+}
+
+void* xpc_date_create_from_current(void)
+{
+	return NULL;
 }
 
 int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
@@ -705,7 +1188,425 @@ int pthread_threadid_np(pthread_t thread, uint64_t *thread_id)
 	(void)thread;
 	if (!thread_id) return EINVAL;
 	*thread_id = (uint64_t)syscall(SYS_gettid);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_threadid_np -> %llu\n",
+		        (unsigned long long)*thread_id);
 	return 0;
+}
+
+int pthread_setname_np(pthread_t thread, const char *name)
+{
+	static int (*real_pthread_setname_np)(pthread_t, const char*) = NULL;
+	char truncated_name[16];
+	const char* darwin_name = (const char*)thread;
+
+	(void)name;
+
+	if (!real_pthread_setname_np)
+		real_pthread_setname_np = dlsym(RTLD_NEXT, "pthread_setname_np");
+	if (!real_pthread_setname_np)
+		return 0;
+	if (!darwin_name)
+		return EINVAL;
+
+	snprintf(truncated_name, sizeof(truncated_name), "%s", darwin_name);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_setname_np('%s')\n",
+		        truncated_name);
+	return real_pthread_setname_np(pthread_self(), truncated_name);
+}
+
+#define DARWIN_SS_ONSTACK 1
+#define DARWIN_SS_DISABLE 4
+#define DARWIN_SA_ONSTACK   0x0001
+#define DARWIN_SA_RESTART   0x0002
+#define DARWIN_SA_RESETHAND 0x0004
+#define DARWIN_SA_NOCLDSTOP 0x0008
+#define DARWIN_SA_NODEFER   0x0010
+#define DARWIN_SA_NOCLDWAIT 0x0020
+#define DARWIN_SA_SIGINFO   0x0040
+#define DARWIN_SA_USERSPACE_MASK \
+	(DARWIN_SA_ONSTACK | DARWIN_SA_RESTART | DARWIN_SA_RESETHAND | \
+	 DARWIN_SA_NOCLDSTOP | DARWIN_SA_NODEFER | DARWIN_SA_NOCLDWAIT | \
+	 DARWIN_SA_SIGINFO)
+
+#ifdef SA_RESTORER
+#define LINUX_SA_RESTORER SA_RESTORER
+#else
+#define LINUX_SA_RESTORER 0x04000000
+#endif
+
+static int darwin_sigaltstack_flags_to_linux(uint32_t darwin_flags,
+                                             int* linux_flags)
+{
+	*linux_flags = 0;
+	if (darwin_flags & DARWIN_SS_ONSTACK)
+		*linux_flags |= SS_ONSTACK;
+	if (darwin_flags & DARWIN_SS_DISABLE)
+		*linux_flags |= SS_DISABLE;
+	if (darwin_flags & ~(DARWIN_SS_ONSTACK | DARWIN_SS_DISABLE))
+		return 0;
+	return 1;
+}
+
+static uint32_t linux_sigaltstack_flags_to_darwin(int linux_flags)
+{
+	uint32_t result = 0;
+	if (linux_flags & SS_ONSTACK)
+		result |= DARWIN_SS_ONSTACK;
+	if (linux_flags & SS_DISABLE)
+		result |= DARWIN_SS_DISABLE;
+	return result;
+}
+
+static int darwin_sigaction_flags_to_linux(uint32_t darwin_flags,
+                                           int* linux_flags)
+{
+	int result = 0;
+
+	if (darwin_flags & ~DARWIN_SA_USERSPACE_MASK)
+		return 0;
+	if (darwin_flags & DARWIN_SA_ONSTACK)
+		result |= SA_ONSTACK;
+	if (darwin_flags & DARWIN_SA_RESTART)
+		result |= SA_RESTART;
+	if (darwin_flags & DARWIN_SA_RESETHAND)
+		result |= SA_RESETHAND;
+	if (darwin_flags & DARWIN_SA_NOCLDSTOP)
+		result |= SA_NOCLDSTOP;
+	if (darwin_flags & DARWIN_SA_NODEFER)
+		result |= SA_NODEFER;
+	if (darwin_flags & DARWIN_SA_NOCLDWAIT)
+		result |= SA_NOCLDWAIT;
+	if (darwin_flags & DARWIN_SA_SIGINFO)
+		result |= SA_SIGINFO;
+	*linux_flags = result;
+	return 1;
+}
+
+static uint32_t linux_sigaction_flags_to_darwin(int linux_flags)
+{
+	uint32_t result = 0;
+	int supported_flags = SA_ONSTACK | SA_RESTART | SA_RESETHAND |
+	                      SA_NOCLDSTOP | SA_NODEFER | SA_NOCLDWAIT |
+	                      SA_SIGINFO | LINUX_SA_RESTORER;
+
+	linux_flags &= supported_flags;
+	if (linux_flags & SA_ONSTACK)
+		result |= DARWIN_SA_ONSTACK;
+	if (linux_flags & SA_RESTART)
+		result |= DARWIN_SA_RESTART;
+	if (linux_flags & SA_RESETHAND)
+		result |= DARWIN_SA_RESETHAND;
+	if (linux_flags & SA_NOCLDSTOP)
+		result |= DARWIN_SA_NOCLDSTOP;
+	if (linux_flags & SA_NODEFER)
+		result |= DARWIN_SA_NODEFER;
+	if (linux_flags & SA_NOCLDWAIT)
+		result |= DARWIN_SA_NOCLDWAIT;
+	if (linux_flags & SA_SIGINFO)
+		result |= DARWIN_SA_SIGINFO;
+	return result;
+}
+
+static int darwin_signal_to_linux(int darwin_signal)
+{
+	switch (darwin_signal) {
+	case 1: return SIGHUP;
+	case 2: return SIGINT;
+	case 3: return SIGQUIT;
+	case 4: return SIGILL;
+	case 5: return SIGTRAP;
+	case 6: return SIGABRT;
+	case 7: return 7;
+	case 8: return SIGFPE;
+	case 9: return SIGKILL;
+	case 10: return SIGBUS;
+	case 11: return SIGSEGV;
+	case 12: return SIGSYS;
+	case 13: return SIGPIPE;
+	case 14: return SIGALRM;
+	case 15: return SIGTERM;
+	case 17: return SIGSTOP;
+	case 18: return SIGTSTP;
+	case 19: return SIGCONT;
+	case 20: return SIGCHLD;
+	case 21: return SIGTTIN;
+	case 22: return SIGTTOU;
+	case 23: return SIGIO;
+	case 24: return SIGXCPU;
+	case 25: return SIGXFSZ;
+	case 26: return SIGVTALRM;
+	case 27: return SIGPROF;
+	case 28: return SIGWINCH;
+	case 30: return SIGUSR1;
+	case 31: return SIGUSR2;
+	default: return darwin_signal;
+	}
+}
+
+static int linux_signal_to_darwin(int linux_signal)
+{
+	switch (linux_signal) {
+	case SIGHUP: return 1;
+	case SIGINT: return 2;
+	case SIGQUIT: return 3;
+	case SIGILL: return 4;
+	case SIGTRAP: return 5;
+	case SIGABRT: return 6;
+	case SIGBUS: return 10;
+	case SIGSEGV: return 11;
+	case SIGSYS: return 12;
+	case SIGPIPE: return 13;
+	case SIGALRM: return 14;
+	case SIGTERM: return 15;
+	case SIGSTOP: return 17;
+	case SIGTSTP: return 18;
+	case SIGCONT: return 19;
+	case SIGCHLD: return 20;
+	case SIGTTIN: return 21;
+	case SIGTTOU: return 22;
+	case SIGIO: return 23;
+	case SIGXCPU: return 24;
+	case SIGXFSZ: return 25;
+	case SIGVTALRM: return 26;
+	case SIGPROF: return 27;
+	case SIGWINCH: return 28;
+	case SIGUSR1: return 30;
+	case SIGUSR2: return 31;
+	default: return linux_signal;
+	}
+}
+
+static int darwin_sigprocmask_how_to_linux(int darwin_how)
+{
+	switch (darwin_how) {
+	case 1: return SIG_BLOCK;
+	case 2: return SIG_UNBLOCK;
+	case 3: return SIG_SETMASK;
+	default: return -1;
+	}
+}
+
+static int linux_sigemptyset(sigset_t* set)
+{
+	static int (*real_sigemptyset)(sigset_t*) = NULL;
+
+	if (!real_sigemptyset)
+		real_sigemptyset = dlsym(RTLD_NEXT, "sigemptyset");
+	return real_sigemptyset(set);
+}
+
+static int linux_sigaddset(sigset_t* set, int signum)
+{
+	static int (*real_sigaddset)(sigset_t*, int) = NULL;
+
+	if (!real_sigaddset)
+		real_sigaddset = dlsym(RTLD_NEXT, "sigaddset");
+	return real_sigaddset(set, signum);
+}
+
+static void darwin_sigset_to_linux(uint32_t darwin_set, sigset_t* linux_set)
+{
+	linux_sigemptyset(linux_set);
+	for (int bit = 1; bit < 32; bit++) {
+		if (darwin_set & (1u << (bit - 1)))
+			linux_sigaddset(linux_set, darwin_signal_to_linux(bit));
+	}
+}
+
+static uint32_t linux_sigset_to_darwin(const sigset_t* linux_set)
+{
+	uint32_t result = 0;
+	for (int linux_bit = 1; linux_bit < 32; linux_bit++) {
+		if (sigismember(linux_set, linux_bit) == 1) {
+			int darwin_bit = linux_signal_to_darwin(linux_bit);
+			if (darwin_bit > 0 && darwin_bit < 32)
+				result |= 1u << (darwin_bit - 1);
+		}
+	}
+	return result;
+}
+
+int sigaltstack(const stack_t *new_stack, stack_t *old_stack)
+{
+	static int (*real_sigaltstack)(const stack_t*, stack_t*) = NULL;
+	const struct darwin_sigaltstack* darwin_new_stack =
+		(const struct darwin_sigaltstack*)new_stack;
+	struct darwin_sigaltstack* darwin_old_stack =
+		(struct darwin_sigaltstack*)old_stack;
+	stack_t linux_new_stack;
+	stack_t linux_old_stack;
+	stack_t* linux_new_stack_ptr = NULL;
+	stack_t* linux_old_stack_ptr = darwin_old_stack ? &linux_old_stack : NULL;
+
+	if (!real_sigaltstack)
+		real_sigaltstack = dlsym(RTLD_NEXT, "sigaltstack");
+	if (!real_sigaltstack)
+		return -1;
+
+	if (darwin_new_stack) {
+		int linux_flags;
+		if (!darwin_sigaltstack_flags_to_linux(darwin_new_stack->flags,
+		                                       &linux_flags)) {
+			errno = EINVAL;
+			return -1;
+		}
+		linux_new_stack.ss_sp = (void*)darwin_new_stack->sp;
+		linux_new_stack.ss_size = darwin_new_stack->size;
+		linux_new_stack.ss_flags = linux_flags;
+		linux_new_stack_ptr = &linux_new_stack;
+	}
+
+	int result = real_sigaltstack(linux_new_stack_ptr, linux_old_stack_ptr);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: sigaltstack(new=%p old=%p) -> %d errno=%d\n",
+		        new_stack, old_stack, result, result < 0 ? errno : 0);
+	if (result < 0)
+		return result;
+
+	if (darwin_old_stack) {
+		darwin_old_stack->sp = (uint64_t)linux_old_stack.ss_sp;
+		darwin_old_stack->size = linux_old_stack.ss_size;
+		darwin_old_stack->flags =
+			linux_sigaltstack_flags_to_darwin(linux_old_stack.ss_flags);
+		darwin_old_stack->pad = 0;
+	}
+
+	return result;
+}
+
+int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
+{
+	static int (*real_sigaction)(int, const struct sigaction*, struct sigaction*) = NULL;
+	const struct darwin_sigaction* darwin_act =
+		(const struct darwin_sigaction*)act;
+	struct darwin_sigaction* darwin_oldact =
+		(struct darwin_sigaction*)oldact;
+	struct sigaction linux_act;
+	struct sigaction linux_oldact;
+	struct sigaction* linux_act_ptr = NULL;
+	struct sigaction* linux_oldact_ptr = darwin_oldact ? &linux_oldact : NULL;
+	int linux_signal = darwin_signal_to_linux(signum);
+
+	if (!real_sigaction)
+		real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+	if (!real_sigaction)
+		return -1;
+
+	if (darwin_act) {
+		int linux_flags;
+		if (!darwin_sigaction_flags_to_linux(darwin_act->flags,
+		                                     &linux_flags)) {
+			errno = EINVAL;
+			return -1;
+		}
+		memset(&linux_act, 0, sizeof(linux_act));
+		linux_act.sa_handler = (void (*)(int))(uintptr_t)darwin_act->handler;
+		linux_act.sa_flags = linux_flags;
+		linux_sigemptyset(&linux_act.sa_mask);
+		for (int bit = 1; bit < 32; bit++) {
+			if (darwin_act->mask & (1u << (bit - 1)))
+				linux_sigaddset(&linux_act.sa_mask, darwin_signal_to_linux(bit));
+		}
+		linux_act_ptr = &linux_act;
+	}
+
+	int result = real_sigaction(linux_signal, linux_act_ptr, linux_oldact_ptr);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: sigaction(%d->%d act=%p old=%p) -> %d errno=%d\n",
+		        signum, linux_signal, act, oldact, result, result < 0 ? errno : 0);
+	if (result < 0)
+		return result;
+
+	if (darwin_oldact) {
+		darwin_oldact->handler = (uint64_t)(uintptr_t)linux_oldact.sa_handler;
+		darwin_oldact->mask = 0;
+		for (int linux_bit = 1; linux_bit < 32; linux_bit++) {
+			if (sigismember(&linux_oldact.sa_mask, linux_bit) == 1) {
+				int darwin_bit = linux_signal_to_darwin(linux_bit);
+				if (darwin_bit > 0 && darwin_bit < 32)
+					darwin_oldact->mask |= 1u << (darwin_bit - 1);
+			}
+		}
+		darwin_oldact->flags =
+			linux_sigaction_flags_to_darwin(linux_oldact.sa_flags);
+	}
+
+	return result;
+}
+
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset)
+{
+	static int (*real_pthread_sigmask)(int, const sigset_t*, sigset_t*) = NULL;
+	sigset_t linux_set;
+	sigset_t linux_oldset;
+	const sigset_t* linux_set_ptr = NULL;
+	sigset_t* linux_oldset_ptr = oldset ? &linux_oldset : NULL;
+	int linux_how = darwin_sigprocmask_how_to_linux(how);
+
+	if (!real_pthread_sigmask)
+		real_pthread_sigmask = dlsym(RTLD_NEXT, "pthread_sigmask");
+	if (!real_pthread_sigmask)
+		return ENOSYS;
+	if (linux_how < 0)
+		return EINVAL;
+	if (set) {
+		darwin_sigset_to_linux(*(const uint32_t*)set, &linux_set);
+		linux_set_ptr = &linux_set;
+	}
+	int result = real_pthread_sigmask(linux_how, linux_set_ptr, linux_oldset_ptr);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_sigmask(%d->%d set=%p old=%p) -> %d\n",
+		        how, linux_how, set, oldset, result);
+	if (result == 0 && oldset)
+		*(uint32_t*)oldset = linux_sigset_to_darwin(&linux_oldset);
+	return result;
+}
+
+int sigemptyset(sigset_t *set)
+{
+	*(uint32_t*)set = 0;
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: sigemptyset(%p)\n", set);
+	return 0;
+}
+
+int sigfillset(sigset_t *set)
+{
+	*(uint32_t*)set = 0xffffffffu;
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: sigfillset(%p)\n", set);
+	return 0;
+}
+
+int sigaddset(sigset_t *set, int signum)
+{
+	if (signum <= 0 || signum >= 32) {
+		errno = EINVAL;
+		return -1;
+	}
+	*(uint32_t*)set |= 1u << (signum - 1);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: sigaddset(%p, %d)\n", set, signum);
+	return 0;
+}
+
+int sigwait(const sigset_t *set, int *sig)
+{
+	static int (*real_sigwait)(const sigset_t*, int*) = NULL;
+	sigset_t linux_set;
+	int linux_signal;
+
+	if (!real_sigwait)
+		real_sigwait = dlsym(RTLD_NEXT, "sigwait");
+	if (!real_sigwait)
+		return ENOSYS;
+	darwin_sigset_to_linux(*(const uint32_t*)set, &linux_set);
+	int result = real_sigwait(&linux_set, &linux_signal);
+	if (result == 0)
+		*sig = linux_signal_to_darwin(linux_signal);
+	return result;
 }
 
 /* ===== sysctl ===== */
@@ -1730,7 +2631,25 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 	/* Strip macOS-only MAP_JIT (0x0800) */
 	flags &= ~DARWIN_MAP_JIT;
 
-	return real_mmap(addr, length, prot, flags, fd, offset);
+	void* result = real_mmap(addr, length, prot, flags, fd, offset);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: mmap(%p, %zu, %#x, %#x, %d, %jd) -> %p errno=%d\n",
+		        addr, length, prot, flags, fd, (intmax_t)offset,
+		        result, result == MAP_FAILED ? errno : 0);
+	return result;
+}
+
+int mprotect(void *addr, size_t len, int prot)
+{
+	static int (*real_mprotect)(void*, size_t, int) = NULL;
+	if (!real_mprotect)
+		real_mprotect = dlsym(RTLD_NEXT, "mprotect");
+
+	int result = real_mprotect(addr, len, prot);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: mprotect(%p, %zu, %#x) -> %d errno=%d\n",
+		        addr, len, prot, result, result < 0 ? errno : 0);
+	return result;
 }
 
 /* ===== mmap registry ===== */
