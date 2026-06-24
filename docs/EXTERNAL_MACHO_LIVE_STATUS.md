@@ -18,8 +18,8 @@ docker run --rm --platform linux/arm64 \
     BUILD_DIR=/work/build-arm64 \
     MACHGATE_EXTERNAL_MANIFEST=/tmp/machgate-current-external-all.txt \
     MACHGATE_EXTERNAL_MAP_LIBCXX=1 \
-    MACHGATE_EXTERNAL_LOGS=/work/tests/external/logs/full-loop-2026-06-24-Q-functional120 \
-    MACHGATE_EXTERNAL_WORK=/work/tests/external/work/full-loop-2026-06-24-Q-functional120 \
+    MACHGATE_EXTERNAL_LOGS=/work/tests/external/logs/full-loop-2026-06-24-R-functional120 \
+    MACHGATE_EXTERNAL_WORK=/work/tests/external/work/full-loop-2026-06-24-R-functional120 \
     MACHGATE_EXTERNAL_TIMEOUT=120 \
     bash tests/test_external_macho_cli.sh'
 ```
@@ -43,6 +43,7 @@ Result:
 - Full-corpus promoted fixes since the 45/57 baseline: `vault`, `duckdb`, `node`, `protoc`, `cmake`, `nvim`, `nomad`, `terraform`, `tilt`, `bun`, `nu`, `delta`, and `packer` under the integrated 120s functional gate.
 - Agent status: Loop H/I Codex workers complete; Loop J Delta explorers complete; Loop L Grok Delta tournament complete; Grok reports collected for Delta and Packer; Loop Q Go-runtime comparison and SIGCHLD fix completed.
 - Failure-class reference: `docs/HOST_GLIBC_BYPASS_FAILURES.md` documents the host/glibc bypass pattern accepted for the targeted Delta fix.
+- Packer fix reference: `docs/PACKER_SIGCHLD_FIX.md` documents the accepted SIGCHLD policy and rejected dispatcher attempt.
 
 ## Passing Binaries
 
@@ -60,7 +61,7 @@ Strict 30s full-corpus passing set:
 Integrated 120s full-corpus pass:
 
 `node`, `tilt`, `bun`, `nu`, `delta`, and `packer` all pass in
-`full-loop-2026-06-24-Q-functional120`. `packer` also passed targeted `5 / 5`
+`full-loop-2026-06-24-R-functional120`. `packer` also passed targeted `5 / 5`
 in `loop-q4-packer-sigchld-production-attempt{1..5}` and reconfirmed `5 / 5`
 in `loop-q6-packer-post-unitfix-attempt{1..5}`.
 
@@ -68,7 +69,7 @@ in `loop-q6-packer-post-unitfix-attempt{1..5}`.
 
 | Class | Count | Binaries | Current evidence |
 | --- | ---: | --- | --- |
-| None | 0 | none | No current functional blocker remains. The latest integrated 120s full-corpus run passes `57 / 57`; strict 30s remains a timing gate because `node` needs the longer timeout under QEMU. |
+| None | 0 | none | No current functional blocker remains. The latest integrated 120s full-corpus run `full-loop-2026-06-24-R-functional120` passes `57 / 57`; strict 30s remains a timing gate because `node` needs the longer timeout under QEMU. |
 
 ## Timeout-Only Functional Passes
 
@@ -90,6 +91,8 @@ Logs for this refresh are under:
 - `tests/external/work/full-loop-2026-06-23-N-loop-g-current/`
 - `tests/external/logs/full-loop-2026-06-24-Q-functional120/`
 - `tests/external/work/full-loop-2026-06-24-Q-functional120/`
+- `tests/external/logs/full-loop-2026-06-24-R-functional120/`
+- `tests/external/work/full-loop-2026-06-24-R-functional120/`
 - `tests/external/logs/loop-g-node-long120/`
 - `tests/external/logs/loop-h-packer-current-final/`
 - `tests/external/logs/loop-h-packer-sigpipe-guard-attempt2/`
@@ -136,17 +139,17 @@ Logs for this refresh are under:
 
 Per-binary notes:
 
-- `delta`: PASS targeted `5 / 5` in `loop-m-delta-vm-interpose-attempt{1..5}`, stdout `delta 0.19.2`, and promoted by integrated functional full corpus `full-loop-2026-06-24-Q-functional120`. Loop M accepted a VM interposer fix from the Grok best-of-9 candidate family, but tightened it for the installed release layout. `libmachgate_vm_interpose.so` is preloaded by a one-time loader re-exec and interposes host/glibc `mmap` / `munmap` calls that bypass imported libSystem symbols, forwarding them to `machgate_darwin_mmap` / `machgate_darwin_munmap` and the shared sub-page VM tracker.
-- `nu`: PASS targeted in `loop-i-nu-tlv-x1-attempt1`, stdout from `nu --version`, reconfirmed in `loop-i-nu-tlv-x1-post-delta-backout`, and promoted by integrated functional full corpus `full-loop-2026-06-24-Q-functional120`. The fixed gap was `_tlv_bootstrap` clobbering `x1` across the Mach-O TLV thunk; Rust kept a `LocalKey` initialization pointer in `x1` across the thunk and later faulted in `get_or_init_slow`. The shim TLV wrapper now preserves `x1` alongside `x8` through `x11` and `x30`.
-- `tilt`: PASS targeted in `loop-h-tilt-pthread-kill-attempt1`, stdout `v0.37.4, built 2026-06-16`, and promoted by integrated functional full corpus `full-loop-2026-06-24-Q-functional120`. The exact fixed gap was flat `_pthread_kill` resolving to glibc and delivering Darwin signal `16` as Linux `SIGSTKFLT`; `pthread_kill` now prefers mapped libSystem for flat runtime lookup and reaches the existing shim path.
+- `delta`: PASS targeted `5 / 5` in `loop-m-delta-vm-interpose-attempt{1..5}`, stdout `delta 0.19.2`, and promoted by integrated functional full corpus `full-loop-2026-06-24-R-functional120`. Loop M accepted a VM interposer fix from the Grok best-of-9 candidate family, but tightened it for the installed release layout. `libmachgate_vm_interpose.so` is preloaded by a one-time loader re-exec and interposes host/glibc `mmap` / `munmap` calls that bypass imported libSystem symbols, forwarding them to `machgate_darwin_mmap` / `machgate_darwin_munmap` and the shared sub-page VM tracker.
+- `nu`: PASS targeted in `loop-i-nu-tlv-x1-attempt1`, stdout from `nu --version`, reconfirmed in `loop-i-nu-tlv-x1-post-delta-backout`, and promoted by integrated functional full corpus `full-loop-2026-06-24-R-functional120`. The fixed gap was `_tlv_bootstrap` clobbering `x1` across the Mach-O TLV thunk; Rust kept a `LocalKey` initialization pointer in `x1` across the thunk and later faulted in `get_or_init_slow`. The shim TLV wrapper now preserves `x1` alongside `x8` through `x11` and `x30`.
+- `tilt`: PASS targeted in `loop-h-tilt-pthread-kill-attempt1`, stdout `v0.37.4, built 2026-06-16`, and promoted by integrated functional full corpus `full-loop-2026-06-24-R-functional120`. The exact fixed gap was flat `_pthread_kill` resolving to glibc and delivering Darwin signal `16` as Linux `SIGSTKFLT`; `pthread_kill` now prefers mapped libSystem for flat runtime lookup and reaches the existing shim path.
 - `terraform`: PASS in `full-loop-2026-06-23-N-loop-g-current` after Darwin-shaped `getaddrinfo`, `freeaddrinfo`, and `gai_strerror`. Guard run `loop-g-getaddrinfo-guards` kept `lazygit` and `nomad` passing.
-- `packer`: PASS targeted `5 / 5` in `loop-q4-packer-sigchld-production-attempt{1..5}`, reconfirmed `5 / 5` in `loop-q6-packer-post-unitfix-attempt{1..5}`, and promoted by integrated functional full corpus `full-loop-2026-06-24-Q-functional120`; stdout `Packer v1.15.4`. Source context is available at `.source-context/packer-1.15.4` and `.source-context/panicwrap-1.0.0`. Loop Q proved the remaining failure was Linux `SIGCHLD=17` being delivered into Darwin Go runtime signal machinery that expects Darwin `SIGCHLD=20`; a broad C signal-dispatch experiment crashed because it did not preserve Go's signal trampoline ABI. The accepted shim policy reports success for Darwin `sigaction(SIGCHLD, ...)` but leaves the host Linux `SIGCHLD` disposition at default unless `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER=1` is explicitly set. Blocking `wait4` still carries the child result, and normal Packer parent/child flow exits `0`.
+- `packer`: PASS targeted `5 / 5` in `loop-q4-packer-sigchld-production-attempt{1..5}`, reconfirmed `5 / 5` in `loop-q6-packer-post-unitfix-attempt{1..5}`, and promoted by integrated functional full corpus `full-loop-2026-06-24-R-functional120`; stdout `Packer v1.15.4`. Source context is available at `.source-context/packer-1.15.4` and `.source-context/panicwrap-1.0.0`. Loop Q proved the remaining failure was Linux `SIGCHLD=17` being delivered into Darwin Go runtime signal machinery that expects Darwin `SIGCHLD=20`; a broad C signal-dispatch experiment crashed because it did not preserve Go's signal trampoline ABI. The accepted shim policy reports success for Darwin `sigaction(SIGCHLD, ...)` but leaves the host Linux `SIGCHLD` disposition at default unless `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER=1` is explicitly set. Blocking `wait4` still carries the child result, and normal Packer parent/child flow exits `0`.
 - `vault`: PASS in full-loop `full-loop-2026-06-23-D-libcxx` after `libsystem_shim.c` sysctl/sysctlbyname/uname-style coverage; prints `Vault v2.0.3`.
 - `nomad`: PASS in `full-loop-2026-06-23-N-loop-g-current`; Loop F fixed its `host_processor_info` Darwin CPU-load layout crash.
 - `cmake`: PASS in `full-loop-2026-06-23-K-loop-e-final` after mapping `libcurl.4.dylib` to host `libcurl.so.4` and translating Darwin `dlsym` special handles such as `RTLD_DEFAULT=-2` before calling glibc.
 - `duckdb`: PASS in full-loop `full-loop-2026-06-23-D-libcxx` with opt-in libc++ mapping.
-- `node`: strict 30s full run `full-loop-2026-06-23-N-loop-g-current` timed out during startup, but integrated functional full corpus `full-loop-2026-06-24-Q-functional120` passes. Remaining work is startup-cost/timeout tuning only if strict 30s is a release gate.
-- `bun`: PASS targeted in `bun-loop-h-attempt1-tpidr-rt`, stdout `1.3.14`, and promoted by integrated functional full corpus `full-loop-2026-06-24-Q-functional120`. The old clean-import crash at `pc=0x1007d0a5c` was an inlined lock/runtime path reading `TPIDRRO_EL0` into `x9`; the loader now rewrites all `MRS TPIDRRO_EL0, Xt` encodings to `MRS TPIDR_EL0, Xt` instead of only the `x0` encoding.
+- `node`: strict 30s full run `full-loop-2026-06-23-N-loop-g-current` timed out during startup, but integrated functional full corpus `full-loop-2026-06-24-R-functional120` passes. Remaining work is startup-cost/timeout tuning only if strict 30s is a release gate.
+- `bun`: PASS targeted in `bun-loop-h-attempt1-tpidr-rt`, stdout `1.3.14`, and promoted by integrated functional full corpus `full-loop-2026-06-24-R-functional120`. The old clean-import crash at `pc=0x1007d0a5c` was an inlined lock/runtime path reading `TPIDRRO_EL0` into `x9`; the loader now rewrites all `MRS TPIDRRO_EL0, Xt` encodings to `MRS TPIDR_EL0, Xt` instead of only the `x0` encoding.
 - `protoc`: PASS in `full-loop-2026-06-23-K-loop-e-final`; native Mach-O `__eh_frame` is served by `_dl_find_object` instead of direct `__register_frame`.
 - `nvim`: PASS in `full-loop-2026-06-23-K-loop-e-final` after the `ioctl(FIONBIO)` stack-argument thunk and native Mach-O `__eh_frame` hook-only registration path.
 - `sqlite3`: targeted PASS in `sqlite3-variadic-vfprintf-attempt7` after Darwin-shaped malloc zone, `vfprintf` variadic adapter, and access wrappers.

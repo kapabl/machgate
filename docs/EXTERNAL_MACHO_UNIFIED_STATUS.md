@@ -6,6 +6,9 @@ binaries currently tracked by MachGate.
 Related failure-class note: `docs/HOST_GLIBC_BYPASS_FAILURES.md` documents the
 host/glibc bypass class used by the targeted Delta fix.
 
+Packer fix note: `docs/PACKER_SIGCHLD_FIX.md` documents the accepted SIGCHLD
+policy and rejected dispatcher attempt.
+
 Last refreshed: 2026-06-24
 
 ## Summary
@@ -75,12 +78,12 @@ Functional completion: `70 / 70` working (`100.0%`).
 | `duckdb` | external-57 | WORKING-strict | Passed full corpus with opt-in libc++ mapping. |
 | `protoc` | external-57 | WORKING-strict | Passed after native Mach-O `__eh_frame` is served by `_dl_find_object`. |
 | `nvim` | external-57 | WORKING-strict | Passed after `ioctl(FIONBIO)` stack-argument thunk and native Mach-O `__eh_frame` hook-only registration. |
-| `node` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`; strict 30s QEMU full-corpus run still times out. Not an active functional blocker. |
-| `tilt` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`; original targeted fix was `loop-h-tilt-pthread-kill-attempt1`. |
-| `bun` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`; original targeted fix was `bun-loop-h-attempt1-tpidr-rt`. |
-| `nu` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`; original targeted fix was `loop-i-nu-tlv-x1-attempt1`. |
-| `delta` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120` and targeted `5 / 5` in `loop-m-delta-vm-interpose-attempt{1..5}` after adding `libmachgate_vm_interpose.so` and loader re-exec with `LD_PRELOAD`. The fix catches host/glibc `mmap` / `munmap` paths that bypass imported libSystem symbols and routes them through the shared Darwin VM tracker. |
-| `packer` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`, targeted `5 / 5` in `loop-q4-packer-sigchld-production-attempt{1..5}`, and reconfirmed `5 / 5` in `loop-q6-packer-post-unitfix-attempt{1..5}`. The accepted fix keeps host Linux `SIGCHLD` at default for guest Darwin `sigaction(SIGCHLD, ...)`, avoiding delivery of Linux signal `17` into Darwin Go code expecting signal `20`; blocking `wait4` still carries child status. |
+| `node` | external-57 | WORKING-functional120 | Passed latest integrated full corpus `full-loop-2026-06-24-R-functional120`; strict 30s QEMU full-corpus run still times out. Not an active functional blocker. |
+| `tilt` | external-57 | WORKING-functional120 | Passed latest integrated full corpus `full-loop-2026-06-24-R-functional120`; original targeted fix was `loop-h-tilt-pthread-kill-attempt1`. |
+| `bun` | external-57 | WORKING-functional120 | Passed latest integrated full corpus `full-loop-2026-06-24-R-functional120`; original targeted fix was `bun-loop-h-attempt1-tpidr-rt`. |
+| `nu` | external-57 | WORKING-functional120 | Passed latest integrated full corpus `full-loop-2026-06-24-R-functional120`; original targeted fix was `loop-i-nu-tlv-x1-attempt1`. |
+| `delta` | external-57 | WORKING-functional120 | Passed latest integrated full corpus `full-loop-2026-06-24-R-functional120` and targeted `5 / 5` in `loop-m-delta-vm-interpose-attempt{1..5}` after adding `libmachgate_vm_interpose.so` and loader re-exec with `LD_PRELOAD`. The fix catches host/glibc `mmap` / `munmap` paths that bypass imported libSystem symbols and routes them through the shared Darwin VM tracker. |
+| `packer` | external-57 | WORKING-functional120 | Passed latest integrated full corpus `full-loop-2026-06-24-R-functional120`, targeted `5 / 5` in `loop-q4-packer-sigchld-production-attempt{1..5}`, and reconfirmed `5 / 5` in `loop-q6-packer-post-unitfix-attempt{1..5}`. The accepted fix keeps host Linux `SIGCHLD` at default for guest Darwin `sigaction(SIGCHLD, ...)`, avoiding delivery of Linux signal `17` into Darwin Go code expecting signal `20`; blocking `wait4` still carries child status. |
 | `xh` | rust-expansion | WORKING-rust | Passed clean repeats; classified pass-surface due optional unresolved bindings. |
 | `uv` | rust-expansion | WORKING-rust | Passed clean repeats; classified pass-surface due optional unresolved bindings. |
 | `mise` | rust-expansion | WORKING-rust | Passed targeted `5 / 5` after Darwin `F_DUPFD_CLOEXEC`, kqueue aliasing, `EV_RECEIPT`, and `EVFILT_USER` fixes. |
@@ -213,10 +216,12 @@ Validation:
 
 Final accepted Rust expansion state:
 
-- `tests/external/rust_expansion_manifest.txt`: `13 / 13` passing.
+- `tests/external/rust_expansion_manifest.txt`: `13 / 13` passing; latest
+  rerun `tests/external/logs/rust-expansion-2026-06-24-R-full13/`.
 - `tests/external/rust_expansion_pass_only_manifest.txt`: verifier guard
-  `10 / 10` passing.
-- ARM64 project suite: `28 / 28` passing.
+  `10 / 10` passing; latest rerun
+  `tests/external/logs/rust-expansion-2026-06-24-R-full/`.
+- ARM64 project suite: `28 / 28` passing; latest rerun after Loop R.
 
 Important classification:
 

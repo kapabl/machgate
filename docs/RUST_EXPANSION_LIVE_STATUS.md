@@ -10,6 +10,13 @@ Manifest:
 
 Latest run:
 
+- Run id: `rust-expansion-2026-06-24-R-full13`
+- Command shape: `MACHGATE_RUN_EXTERNAL=1 BUILD_DIR=/work/build-arm64 MACHGATE_EXTERNAL_MANIFEST=/work/tests/external/rust_expansion_manifest.txt MACHGATE_EXTERNAL_TIMEOUT=120 MACHGATE_EXTERNAL_MAP_LIBCXX=1 bash tests/test_external_macho_cli.sh`
+- Logs: `tests/external/logs/rust-expansion-2026-06-24-R-full13/`
+- Work: `tests/external/work/rust-expansion-2026-06-24-R-full13/`
+- Result: full Rust expansion manifest passed `13 / 13`.
+- Guard rerun: `tests/external/logs/rust-expansion-2026-06-24-R-full/`
+  passed the pass-only subset `10 / 10`.
 - Run id: `rust-expansion-stability-2026-06-24-A`
 - Command shape: `MACHGATE_RUN_EXTERNAL=1 BUILD_DIR=/work/build-arm64 MACHGATE_EXTERNAL_MANIFEST=/work/tests/external/rust_expansion_pass_only_manifest.txt MACHGATE_EXTERNAL_TIMEOUT=30 MACHGATE_EXTERNAL_MAP_LIBCXX=1 bash tests/test_external_macho_cli.sh`
 - Snapshot retry command shape: `MACHGATE_RUN_EXTERNAL=1 BUILD_DIR=/work/tests/external/work/rust-expansion-stability-2026-06-24-A-repeat-4-snapshot/build-snapshot MACHGATE_EXTERNAL_MANIFEST=/work/tests/external/rust_expansion_pass_only_manifest.txt MACHGATE_EXTERNAL_TIMEOUT=30 MACHGATE_EXTERNAL_MAP_LIBCXX=1 bash tests/test_external_macho_cli.sh`
