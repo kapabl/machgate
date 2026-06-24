@@ -1,54 +1,111 @@
-# Machismo — Mach-O Loader for aarch64 Linux
+# MachGate — ARM64 Mach-O CLI Loader for ARM64 Linux
 
-Machismo loads **Apple Silicon (arm64) Mach-O binaries** on **aarch64 Linux**. Since Apple Silicon Mac builds contain native aarch64 machine code, machismo can run them without CPU emulation — no Wine, no Box64, no Rosetta.
+MachGate runs **Apple Silicon ARM64 Mach-O command-line binaries** inside
+**ARM64 Linux containers**.
 
-The key insight: if we load the Mach-O binary, set up its memory layout, and redirect its library dependencies to native Linux `.so` equivalents, the ARM instructions run natively on any aarch64 Linux system.
+It is a fork of Machismo. Machismo proved the core idea: Apple Silicon Mach-O
+binaries already contain native ARM64 instructions, so on ARM64 Linux the hard
+part is not CPU emulation. The hard part is loading Mach-O correctly and
+translating the Darwin ABI surface those binaries expect.
 
-Based on components from the [Darling](https://github.com/darlinghq/darling) project (macOS translation layer for Linux), extracted and adapted for standalone use.
+MachGate keeps Machismo's loader, fixup resolver, dylib loader, trampoline
+machinery, commpage setup, and ARM instruction patching work, then adds the
+missing production path for CLI tools:
+
+- Darwin-to-Linux syscall translation for statically linked Darwin libc /
+  libSystem code that executes `svc #0x80` directly
+- a broad `libSystem.B.dylib` shim for imported libc/libSystem calls
+- Mach-O guest re-exec support for Go/Rust process wrappers
+- host/glibc VM interposition for runtime paths that bypass imported symbols
+- external CLI corpus testing against real public macOS ARM64 binaries
+
+Current release: **v0.3.0**
+
+- GitHub release: <https://github.com/kapabl/machgate/releases/tag/v0.3.0>
+- Download: `machgate-0.3.0-linux-arm64.tar.gz`
+- Latest validation:
+  - 57 / 57 original external ARM64 macOS CLI probes pass
+  - 13 / 13 Rust expansion probes pass
+  - 28 / 28 ARM64 unit tests pass
+
+Based on components from the [Darling](https://github.com/darlinghq/darling)
+project, extracted and adapted for standalone use.
+
+## Scope
+
+Supported target:
+
+- Guest format: ARM64 Mach-O
+- Host architecture: ARM64 / aarch64
+- Host OS: Linux
+- Workload: command-line executables
+
+Current constraints:
+
+- no GUI frameworks
+- no AppKit, Metal, CoreGraphics, WindowServer, or GUI event loop support
+- no x86-64 support
+- child-process support exists for the CLI/runtime paths currently exercised by
+  the corpus, but this is not a full Darwin process model
 
 ## How It Works
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ Mach-O Game Binary (arm64 native code)          │
+│ Mach-O CLI Binary (arm64 native code)           │
 └────────────┬────────────────────────────────────┘
-             │ GOT (patched by resolver)
+             │ loader + fixups + syscall patching
              ▼
 ┌─────────────────────────────────────────────────┐
-│ Resolver — Chained Fixup Patcher                │
-│  • Patches GOT entries via dlopen/dlsym         │
-│  • C++ ctor/dtor ABI adapters                   │
-│  • Mach-O dylib loading for Apple-ABI deps      │
-│  • Stub pool for unresolved binds               │
+│ MachGate Runtime                                │
+│  • maps Mach-O segments                         │
+│  • selects arm64 slices from fat binaries       │
+│  • patches chained fixups and imports           │
+│  • patches Darwin svc #0x80 sites               │
+│  • installs branch islands for syscall gateway  │
+│  • sets up stack, apple/env vectors, commpage   │
 └────────────┬────────────────────────────────────┘
              ▼
-┌──────┬──────────┬──────────┬──────────┐
-│Native│ Apple-ABI│libsystem │Trampoline│
-│Linux │ libc++   │_shim.so  │ system   │
-│.so   │ (.so.1)  │          │          │
-└──────┴──────────┴──────────┴──────────┘
+┌─────────────────────────────────────────────────┐
+│ ABI Translation Surface                         │
+│  • Darwin syscall gateway                       │
+│  • libSystem shim                               │
+│  • Mach-O dylib loader                          │
+│  • native Linux .so mapping                     │
+│  • Mach-O dylib loading for Apple-ABI deps      │
+│  • trampoline and VM interpose machinery        │
+└────────────┬────────────────────────────────────┘
+             ▼
+┌─────────────────────────────────────────────────┐
+│ Native ARM64 Linux execution                    │
+└─────────────────────────────────────────────────┘
 ```
 
-**Machismo handles the hard parts:**
+**MachGate handles the hard parts:**
 
 - **Fat/universal binary support** — extracts the arm64 slice
 - **Mach-O segment mapping** with correct memory protections
 - **Chained fixup resolution** — patches the GOT to redirect dylib imports to native Linux `.so` libraries
-- **C++ ABI translation** — Apple ARM64 constructors return `this`, Linux doesn't; machismo wraps calls with ABI adapters
+- **Darwin syscall translation** — patches ARM64 `svc #0x80` instructions and dispatches Darwin syscall numbers to Linux-compatible behavior
+- **Darwin errno and status translation** — maps return values, carry flag semantics, errno values, wait statuses, and selected structures
+- **C++ ABI translation** — Apple ARM64 constructors return `this`, Linux doesn't; MachGate wraps calls with ABI adapters
 - **`std::string` layout compatibility** — builds libc++ with Apple's alternate SSO layout
 - **pthread ABI translation** — detects macOS mutex/condvar/rwlock signatures and reinitializes them for Linux
 - **Zero-initializing malloc** — macOS malloc returns zeroed pages; shim wraps `malloc → calloc` to match
 - **Mach-O dylib loading** — loads `.dylib` dependencies as Mach-O when native substitutes won't work (vtable layout differences, etc.)
 - **Symbol trampolining** — redirects statically-linked library calls to native `.so` implementations via 4-byte branch islands
-- **Game function replacements** — override specific game functions with native implementations via `override_lib` config
+- **Function replacements** — override specific guest functions with native implementations via `override_lib` config
 - **ARMv8.0 compatibility** — emulates ARMv8.1 LSE atomics and downgrades ARMv8.3 RCPC instructions for older cores
 - **C++ exception handling** — converts Apple compact unwind to DWARF `.eh_frame`
-- **KMSDRM display** — auto-detects KMSDRM, forces fullscreen, shares SDL's EGL context with bgfx
+- **Inherited game support** — preserves Machismo's KMSDRM, SDL/bgfx, and game-specific replacement paths
 - **Thread-local variables** — implements `_tlv_bootstrap` for Mach-O TLV descriptors
 - **GDB debug symbols** — registers Mach-O symbols with GDB's JIT interface for readable backtraces
 - **Binary patching** — applies instruction-level patches from config files
 - **Commpage emulation** — maps the macOS commpage at `0xFFFFFC000`
 - **libSystem shim** — maps Apple `libSystem.B.dylib` functions to glibc equivalents
+- **Go/Rust CLI runtime compatibility** — covers real external binaries such as
+  `packer`, `terraform`, `delta`, `nu`, `bun`, `node`, `yazi`, `mise`, and
+  `jj`
 
 ## Building
 
@@ -57,55 +114,123 @@ Based on components from the [Darling](https://github.com/darlinghq/darling) pro
 - aarch64 Linux (native, not cross-compiled)
 - GCC or Clang
 - CMake 3.16+
-- For external library builds: Ninja, clang++ (libc++), standard dev packages
+- Ninja
+- LLVM tools for fixtures (`llvm-mc`, `ld64.lld`, `llvm-lipo`)
 
 ### Build the loader
 
 ```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build --parallel
 ```
 
 This produces:
-- `machismo` — the Mach-O loader executable
+- `machgate` — the Mach-O loader executable
 - `libsystem_shim.so` — Apple libSystem.B.dylib compatibility shim
-- `libgame_patches.so` — game-specific function replacements (NecroDancer)
+- `libmachgate_vm_interpose.so` — VM syscall interposer used for selected host/glibc bypass paths
 - `wrapgen` — ELF wrapper code generator (utility)
 
-### Build external libraries (game-specific)
+### ARM64 Docker/QEMU build used by CI
 
-These scripts build native Linux libraries with Apple ABI compatibility. Run from the machismo project root:
+The repository's CI and release workflows build inside an ARM64 Docker image
+under QEMU:
 
 ```bash
-# Apple-ABI libc++ (required for any C++ Mach-O binary)
-./scripts/build-libcxx.sh
-cd build-libcxx && ninja cxx cxxabi && cd ..
+docker build --platform linux/arm64 \
+  -t machgate-arm64-toolchain \
+  -f .github/docker/arm64-toolchain.Dockerfile .
 
-# bgfx with OpenGL ES backend (for games using bgfx)
-./scripts/build-bgfx.sh
-
-# SFML 2.5.1 with Apple-ABI libc++ (for games using SFML)
-./scripts/build-sfml.sh
-
-# LuaJIT 2.1 with profiler integration (for games using LuaJIT)
-./scripts/build-luajit.sh
+docker run --rm --platform linux/arm64 \
+  -v "$PWD:/work" \
+  -w /work \
+  machgate-arm64-toolchain \
+  bash -lc '
+    cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Debug
+    cmake --build build-arm64 --parallel
+    BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh
+  '
 ```
 
 ## Usage
 
 ```bash
-./machismo /path/to/macho-binary [args...]
+./machgate /path/to/macho-binary [args...]
 ```
 
-Machismo looks for a config file in this order:
+### Run on an Intel / x86-64 Linux machine with Docker
+
+MachGate itself is an ARM64 Linux program. On an Intel host, run it inside an
+ARM64 Docker container through QEMU/binfmt.
+
+One-time host setup if your Docker installation does not already support
+`--platform linux/arm64`:
+
+```bash
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+```
+
+Run the published release against a local ARM64 macOS CLI binary:
+
+```bash
+mkdir -p macho-input
+cp /path/to/macos-arm64-binary macho-input/
+
+docker run --rm --platform linux/arm64 \
+  -v "$PWD/macho-input:/input:ro" \
+  ubuntu:24.04 \
+  bash -lc '
+    set -euo pipefail
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates curl tar
+    curl -L -o /tmp/machgate.tar.gz \
+      https://github.com/kapabl/machgate/releases/download/v0.3.0/machgate-0.3.0-linux-arm64.tar.gz
+    tar -xzf /tmp/machgate.tar.gz -C /opt
+
+    cat > /tmp/machismo.conf <<EOF
+[general]
+dylib_map = /tmp/dylib_map.conf
+EOF
+
+    cat > /tmp/dylib_map.conf <<EOF
+libSystem.B = /opt/machgate/lib/libsystem_shim.so
+CoreFoundation = /opt/machgate/lib/libsystem_shim.so
+CoreServices = /opt/machgate/lib/libsystem_shim.so
+Security = /opt/machgate/lib/libsystem_shim.so
+IOKit = /opt/machgate/lib/libsystem_shim.so
+libresolv = /opt/machgate/lib/libsystem_shim.so
+libicucore = /opt/machgate/lib/libsystem_shim.so
+libz.1 = libz.so
+libiconv = libc.so.6
+libobjc = STUB
+Foundation = SKIP
+SystemConfiguration = SKIP
+AppKit = SKIP
+EOF
+
+    export LD_LIBRARY_PATH=/opt/machgate/lib
+    export MACHISMO_CONFIG=/tmp/machismo.conf
+    /opt/machgate/bin/machgate /input/macos-arm64-binary --version
+  '
+```
+
+Replace `macos-arm64-binary` and `--version` with the binary name and arguments
+you want to run. This path is slower than native ARM64 because Docker is
+emulating the ARM64 Linux container, but it is useful for testing from an Intel
+workstation.
+
+Some C++ Mach-O binaries also need an Apple-ABI-compatible `libc++.so.1` and a
+`libc++.1 = /path/to/libc++.so.1` entry in `dylib_map.conf`. Most Go/Rust/static
+CLI probes in the current corpus do not need that extra mapping.
+
+MachGate still honors Machismo-compatible config discovery:
+
 1. `$MACHISMO_CONFIG` environment variable
 2. `machismo.conf` in the current directory
 3. `machismo.conf` next to the binary
 
 ### Configuration
 
-Machismo uses an INI-style config file:
+MachGate uses the existing Machismo-compatible INI-style config file:
 
 ```ini
 [general]
@@ -163,19 +288,41 @@ Carbon = SKIP
 | `MACHISMO_VERBOSE_BINDS` | Log all bind resolutions |
 | `MACHISMO_LUA_PROFILE` | Enable LuaJIT `jit.p` profiler, write output to given path |
 | `MACHISMO_LUA_JITV` | Enable JIT verbose logging (trace compile/abort) |
+| `MACHGATE_TRACE_SYSCALL` | Trace selected Darwin syscall gateway activity |
+| `MACHGATE_TRACE_WAIT` | Trace wait/exit process status translation |
+| `MACHGATE_TRACE_SIGNALS` | Trace signal shim translation paths |
+| `MACHGATE_EXTERNAL_MAP_LIBCXX` | Enable external-test libc++ mapping |
+| `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER` | Diagnostic opt-in for installing the host Linux SIGCHLD handler |
 
 ## Testing
 
 ```bash
-cd build && make
-cd .. && bash tests/fixtures/build_fixtures.sh
+cmake --build build --parallel
+bash tests/fixtures/build_fixtures.sh
 bash tests/run_tests.sh
 ```
+
+External real-binary probes are opt-in:
+
+```bash
+MACHGATE_RUN_EXTERNAL=1 \
+BUILD_DIR="$PWD/build" \
+MACHGATE_EXTERNAL_MANIFEST="$PWD/tests/external/arm64_macho_cli_manifest.txt" \
+MACHGATE_EXTERNAL_TIMEOUT=120 \
+bash tests/test_external_macho_cli.sh
+```
+
+Current documented validation is tracked in:
+
+- `docs/EXTERNAL_MACHO_LIVE_STATUS.md`
+- `docs/EXTERNAL_MACHO_UNIFIED_STATUS.md`
+- `docs/RUST_EXPANSION_LIVE_STATUS.md`
+- `docs/PACKER_SIGCHLD_FIX.md`
 
 ## Project Structure
 
 ```
-machismo/
+machgate/
 ├── src/                    Core loader source
 │   ├── machismo.c          Main entry point
 │   ├── loader.c/h          Mach-O parsing and segment mapping
@@ -194,6 +341,7 @@ machismo/
 │   ├── bgfx_shim.c/h       bgfx renderer integration shim
 │   ├── stubs/              Apple ABI type definitions
 │   ├── elfcalls/           ELF bridging interface
+│   ├── syscall/            Darwin syscall gateway and syscall-family translators
 │   └── shim/               libSystem.B.dylib compatibility shim
 ├── scripts/                External library build scripts
 ├── patches/                Build-time patches (libc++, bgfx)
@@ -206,7 +354,7 @@ machismo/
 
 ## Key ABI Differences Handled
 
-| Issue | macOS ARM64 | Linux ARM64 | Machismo Fix |
+| Issue | macOS ARM64 | Linux ARM64 | MachGate Fix |
 |-------|-------------|-------------|--------------|
 | Constructor return | Returns `this` in x0 | Returns void | ABI adapter trampolines |
 | `std::string` layout | Alternate SSO | Standard SSO | Apple-ABI libc++ build |
@@ -220,9 +368,13 @@ machismo/
 | `uint64_t` mangling | `y` (unsigned long long) | `m` (unsigned long) | Mangling fallback |
 | RCPC (LDAPR) | ARMv8.3 baseline | ARMv8.0 on Cortex-A35 | In-place bit flip to LDAR |
 | LSE atomics | ARMv8.1 baseline | ARMv8.0 on Cortex-A35 | Branch islands with LDXR/STXR loops |
+| Syscall ABI | x16 + `svc #0x80`, carry flag errno | Linux syscall ABI | Instruction patch to syscall gateway |
+| Signals | Darwin signal numbers | Linux signal numbers | shim translation and targeted runtime policies |
+| `wait4` status | Darwin status layout | Linux status layout | status translation in shim/syscall gateway |
 
 ## License
 
 This project is licensed under the GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
-Based on [Darling](https://github.com/darlinghq/darling) by Lubos Dolezel and contributors.
+Based on [Darling](https://github.com/darlinghq/darling) by Lubos Dolezel and
+contributors, and on the original Machismo loader work.
