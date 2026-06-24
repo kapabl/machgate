@@ -1,0 +1,230 @@
+# External Mach-O Unified Status
+
+This table is the single status board for all visible external ARM64 macOS CLI
+binaries currently tracked by MachGate.
+
+Last refreshed: 2026-06-24
+
+## Summary
+
+| Category | Count | Meaning |
+| --- | ---: | --- |
+| Working: strict full-corpus pass | 51 | Passed in the latest strict 30s 57-binary corpus run with libc++ mapping enabled. |
+| Working: targeted pass pending full-corpus promotion | 3 | Passed targeted fixes but the 57-binary full corpus has not yet been rerun for promotion. |
+| Working: timeout-only targeted pass | 1 | Fails only under strict 30s QEMU timeout; targeted longer timeout passes. |
+| Working: Rust expansion pass | 13 | Passed the Rust expansion manifest after Loop B, including targeted repeat gates for fixed rows. |
+| Not working: functional blockers | 2 | Still fail targeted acceptance gates and need engineering work. |
+| Total visible binaries | 70 | 57 original external corpus rows plus 13 Rust expansion rows. |
+
+Functional completion: `68 / 70` working (`97.1%`).
+
+## Unified Table
+
+| Binary | Corpus | Status | Current evidence / next action |
+| --- | --- | --- | --- |
+| `ripgrep` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `fd` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `hyperfine` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `bat` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `jq` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `yq` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run; Go TLS/signal group is passing. |
+| `starship` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `bottom` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `just` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run; guard row also stayed passing after TLV work. |
+| `zoxide` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `sd` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `git-cliff` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `sccache` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `cargo-binstall` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `hexyl` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `pastel` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `atuin` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `ninja` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `procs` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `fzf` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run; Go TLS/signal group is passing. |
+| `gh` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `lazygit` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run; guarded by getaddrinfo fixes. |
+| `glow` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `gum` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run; Go TLS/signal group is passing. |
+| `goreleaser` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `chezmoi` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `duf` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `shfmt` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run; Go TLS/signal group is passing. |
+| `fx` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `kubectl` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `k9s` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `kind` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `minikube` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `argocd` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `flux` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `kubeseal` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `stern` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `helm` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `terraform` | external-57 | WORKING-strict | Passed latest strict full corpus after Darwin-shaped `getaddrinfo`, `freeaddrinfo`, and `gai_strerror`. |
+| `vault` | external-57 | WORKING-strict | Passed full corpus after sysctl/sysctlbyname/uname-style shim coverage. |
+| `consul` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `nomad` | external-57 | WORKING-strict | Passed latest strict full corpus after Darwin CPU-load `host_processor_info` layout fix. |
+| `boundary` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `tofu` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `terragrunt` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `pulumi` | external-57 | WORKING-strict | Passed latest strict 30s full-corpus run. |
+| `cmake` | external-57 | WORKING-strict | Passed full corpus after libcurl mapping and Darwin `dlsym` special-handle translation. |
+| `sqlite3` | external-57 | WORKING-strict | Passed after malloc zone, Darwin-shaped variadic `vfprintf`, and access wrapper fixes. |
+| `duckdb` | external-57 | WORKING-strict | Passed full corpus with opt-in libc++ mapping. |
+| `protoc` | external-57 | WORKING-strict | Passed after native Mach-O `__eh_frame` is served by `_dl_find_object`. |
+| `nvim` | external-57 | WORKING-strict | Passed after `ioctl(FIONBIO)` stack-argument thunk and native Mach-O `__eh_frame` hook-only registration. |
+| `node` | external-57 | WORKING-timeout-120 | Targeted `MACHGATE_EXTERNAL_TIMEOUT=120` run passes; strict 30s QEMU full-corpus run still times out. Not an active functional blocker. |
+| `tilt` | external-57 | WORKING-targeted | Targeted pass in `loop-h-tilt-pthread-kill-attempt1`; pending full 57-binary rerun for promotion. |
+| `bun` | external-57 | WORKING-targeted | Targeted pass in `bun-loop-h-attempt1-tpidr-rt`; pending full 57-binary rerun for promotion. |
+| `nu` | external-57 | WORKING-targeted | Targeted pass in `loop-i-nu-tlv-x1-attempt1`; pending full 57-binary rerun for promotion. |
+| `delta` | external-57 | NOT-WORKING | Helper-thread teardown crash. Best Loop L candidate reached `1 / 5`, not the `5 / 5` acceptance gate. Current evidence: tiny helper `mmap(NULL,384)` / `munmap(addr,4096)` bypasses shim and syscall gate; `EINTR` correlates with `SIGSEGV`. |
+| `packer` | external-57 | NOT-WORKING | Process/fork-exec handoff still exits status `2`. Raw/shim write paths no longer show child `SIGPIPE`; remaining blocker is later Go process/wait/runtime timing after pipe/fork/wait activity. |
+| `xh` | rust-expansion | WORKING-rust | Passed clean repeats; classified pass-surface due optional unresolved bindings. |
+| `uv` | rust-expansion | WORKING-rust | Passed clean repeats; classified pass-surface due optional unresolved bindings. |
+| `mise` | rust-expansion | WORKING-rust | Passed targeted `5 / 5` after Darwin `F_DUPFD_CLOEXEC`, kqueue aliasing, `EV_RECEIPT`, and `EVFILT_USER` fixes. |
+| `yazi` | rust-expansion | WORKING-rust | Passed targeted `5 / 5` after kqueue startup fixes and Darwin-compatible `posix_spawn*` shim wrappers. |
+| `tealdeer` | rust-expansion | WORKING-rust | Passed clean repeats. |
+| `gping` | rust-expansion | WORKING-rust | Passed clean repeats. |
+| `bandwhich` | rust-expansion | WORKING-rust | Passed clean repeats. |
+| `difftastic` | rust-expansion | WORKING-rust | Passed clean repeats; useful comparison row for `delta`. |
+| `cargo-deny` | rust-expansion | WORKING-rust | Passed clean repeats. |
+| `zellij` | rust-expansion | WORKING-rust | Passed clean repeats; classified pass-surface due optional unresolved bindings. |
+| `jj` | rust-expansion | WORKING-rust | Passed targeted `5 / 5` after TLV register preservation fix. |
+| `lsd` | rust-expansion | WORKING-rust | Passed clean repeats. |
+| `cargo-nextest` | rust-expansion | WORKING-rust | Passed clean repeats; universal Mach-O artifact uses arm64 slice successfully. |
+
+## Action Queue
+
+1. Run the full 57-binary corpus with `MACHGATE_EXTERNAL_MAP_LIBCXX=1` to
+   promote `tilt`, `bun`, and `nu` from targeted pass to strict full-corpus
+   pass.
+2. Continue `delta` with focus on the helper-thread tiny mapping
+   `munmap(...,4096)` path that bypasses both the syscall gate and shim.
+3. Continue `packer` past the fixed SIGPIPE class into Go process/wait/runtime
+   timing.
+4. Treat `node` strict 30s startup as timeout tuning unless strict 30s is a
+   release gate.
+
+## Rust Expansion Fix Details
+
+The Rust expansion rows are unified into the table above, but their fix history
+is intentionally kept here because these failures covered distinct runtime
+classes that are likely to recur in future Rust CLI binaries.
+
+### `mise`: Tokio/mio kqueue startup
+
+Initial result:
+
+- `mise --version` did not avoid async startup. `mise v2026.6.13` builds a
+  multi-thread Tokio runtime before CLI dispatch.
+- Runtime construction reached mio's macOS kqueue backend.
+- The first failure was status `134`: Darwin `fcntl(fd, 67)` was passed to
+  Linux as command `67`, producing `EINVAL`.
+
+Root cause:
+
+- Darwin command `67` is `F_DUPFD_CLOEXEC`.
+- Linux uses `F_DUPFD_CLOEXEC=1030`.
+- mio clones the kqueue fd and expects cloned descriptors to share kqueue
+  registration state.
+
+Fixes retained:
+
+- Translate Darwin `F_DUPFD_CLOEXEC` in shim and raw syscall `fcntl` paths.
+- Track kqueue fd aliases across `F_DUPFD` / `F_DUPFD_CLOEXEC`.
+- Return Darwin-shaped `EV_RECEIPT` events synchronously during registration.
+- Poll `EVFILT_USER` on the kqueue/eventfd backing fd instead of treating
+  `ident=0` as stdin.
+
+Validation:
+
+- Targeted `mise` + `yazi` repeats:
+  `tests/external/logs/rust-expansion-spawn-shim-syscall-attempt2-repeat-{1..5}/`
+  passed `5 / 5`.
+- Verifier snapshot:
+  `tests/external/logs/rust-expansion-loop-b-verifier-2026-06-24-candidate2-mise-yazi-repeat-{1..5}/`
+  also passed `5 / 5`.
+
+### `yazi`: kqueue startup plus Darwin `posix_spawn*` ABI
+
+Initial result:
+
+- `yazi --version` also enters Tokio before version output because `yazi-fm`
+  uses `#[tokio::main]` before `yazi_boot::init()` processes `--version`.
+- The first failure matched `mise`: Darwin `F_DUPFD_CLOEXEC` reached Linux as
+  `fcntl` command `67`, then runtime construction aborted.
+- After the kqueue fixes, `yazi` no longer aborted or timed out. It reached
+  terminal/adapter startup, attempted `ueberzugpp layer -so chafa`, and then
+  panicked in Rust `std/src/sys/process/unix/common/cstring_array.rs`.
+
+Root cause:
+
+- The Mach-O imports Darwin `posix_spawn*` symbols.
+- Without shim exports, resolver fallback let those calls reach glibc
+  `posix_spawn*`.
+- glibc's opaque `posix_spawn_file_actions_t` and `posix_spawnattr_t` layouts
+  are not Darwin-compatible, corrupting Rust process-spawn state.
+
+Fixes retained:
+
+- Same kqueue startup fixes listed for `mise`.
+- Export Darwin-compatible `posix_spawn`, `posix_spawnp`,
+  `posix_spawn_file_actions_*`, and `posix_spawnattr_*` wrappers from
+  `libsystem_shim.so`.
+- Store Darwin-opaque spawn action/attr objects inside the shim.
+- Record close, dup2, and open actions.
+- Implement spawn with fork plus MachGate-aware Mach-O reexec first, then raw
+  Linux `SYS_execve` / PATH search fallback.
+
+Validation:
+
+- Targeted `mise` + `yazi` repeats:
+  `tests/external/logs/rust-expansion-spawn-shim-syscall-attempt2-repeat-{1..5}/`
+  passed `5 / 5`.
+- Full Rust expansion:
+  `tests/external/logs/rust-expansion-spawn-shim-syscall-attempt2-full/`
+  passed `13 / 13`.
+- Verifier snapshot full manifest:
+  `tests/external/logs/rust-expansion-loop-b-verifier-2026-06-24-candidate2-full-manifest/`
+  passed `13 / 13`.
+
+### `jj`: Mach-O TLV register preservation
+
+Initial result:
+
+- `jj --version` initially failed with status `139`.
+- Trace pointed at `parking_lot::once::call_once_slow`, with a NULL pointer
+  dereference shortly after a Mach-O TLV thunk call.
+
+Root cause:
+
+- The shim `_tlv_bootstrap` wrapper clobbered caller-live registers that Rust
+  code kept live across the Mach-O TLV thunk.
+
+Fix retained:
+
+- Preserve caller-live `x1` through `x18` and `x30` around `_tlv_bootstrap_impl`
+  on ARM64.
+
+Validation:
+
+- Targeted `jj --version` passed `5 / 5`.
+- Verifier guard:
+  `tests/external/logs/rust-expansion-loop-b-verifier-2026-06-24-candidate2-jj-guard-repeat-{1..5}/`
+  passed `5 / 5`.
+
+### Rust Expansion Regression Coverage
+
+Final accepted Rust expansion state:
+
+- `tests/external/rust_expansion_manifest.txt`: `13 / 13` passing.
+- `tests/external/rust_expansion_pass_only_manifest.txt`: verifier guard
+  `10 / 10` passing.
+- ARM64 project suite: `28 / 28` passing.
+
+Important classification:
+
+- The Rust expansion failing set is now empty.
+- `mise`, `yazi`, and `jj` were not the same class as `delta`.
+- Additional Rust rows did not reproduce the `delta` helper-thread teardown
+  class, which keeps `delta` isolated as a separate blocker.
