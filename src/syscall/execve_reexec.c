@@ -26,6 +26,8 @@ static pid_t machgate_execve_process_pid;
 static char machgate_execve_loader_path[MACHGATE_EXECVE_PATH_MAX];
 static char machgate_execve_machismo_config_env[MACHGATE_EXECVE_PATH_MAX];
 static char machgate_execve_ld_library_path_env[MACHGATE_EXECVE_PATH_MAX];
+static char machgate_execve_ld_preload_env[MACHGATE_EXECVE_PATH_MAX];
+static char machgate_execve_trace_file[MACHGATE_EXECVE_PATH_MAX];
 static int machgate_execve_trace_enabled_snapshot;
 
 extern const char* __machismo_guest_executable_path __attribute__((weak));
@@ -53,12 +55,27 @@ static void init_execve_process_pid(void)
 			        sizeof(machgate_execve_ld_library_path_env) - 1);
 			machgate_execve_ld_library_path_env[
 				sizeof(machgate_execve_ld_library_path_env) - 1] = '\0';
+		} else if (env_name_matches(environ[index], "LD_PRELOAD")) {
+			strncpy(machgate_execve_ld_preload_env, environ[index],
+			        sizeof(machgate_execve_ld_preload_env) - 1);
+			machgate_execve_ld_preload_env[
+				sizeof(machgate_execve_ld_preload_env) - 1] = '\0';
 		}
 	}
 
 	machgate_execve_trace_enabled_snapshot =
+		(getenv("MACHGATE_TRACE_EXECVE") != NULL) ||
 		(getenv("MACHGATE_TRACE_SYSCALL") != NULL) ||
 		(getenv("MACHGATE_TRACE_SHIM") != NULL);
+
+	const char* trace_file = getenv("MACHGATE_EXECVE_TRACE_FILE");
+	if (trace_file && *trace_file) {
+		strncpy(machgate_execve_trace_file, trace_file,
+		        sizeof(machgate_execve_trace_file) - 1);
+		machgate_execve_trace_file[
+			sizeof(machgate_execve_trace_file) - 1] = '\0';
+		machgate_execve_trace_enabled_snapshot = 1;
+	}
 }
 
 static int execve_in_fork_child(void)
@@ -71,7 +88,9 @@ static int trace_execve_enabled(void)
 {
 	if (execve_in_fork_child())
 		return machgate_execve_trace_enabled_snapshot;
-	return getenv("MACHGATE_TRACE_SYSCALL") || getenv("MACHGATE_TRACE_SHIM");
+	return getenv("MACHGATE_TRACE_EXECVE") ||
+	       getenv("MACHGATE_TRACE_SYSCALL") ||
+	       getenv("MACHGATE_TRACE_SHIM");
 }
 
 static int trace_execve_failure(const char* reason, const char* path, int error)
@@ -88,7 +107,16 @@ static void trace_execve_forksafe(const char* action, const char* p1, const char
 	if (!machgate_execve_trace_enabled_snapshot)
 		return;
 	int fd = 2;
+	int file_fd = -1;
 	const char* s;
+	if (machgate_execve_trace_file[0]) {
+		file_fd = (int)syscall(SYS_openat, AT_FDCWD,
+		                       machgate_execve_trace_file,
+		                       O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+		                       0600);
+		if (file_fd >= 0)
+			fd = file_fd;
+	}
 	s = "machgate: execve reexec forksafe ";
 	syscall(SYS_write, fd, s, strlen(s));
 	if (action) {
@@ -110,6 +138,8 @@ static void trace_execve_forksafe(const char* action, const char* p1, const char
 	}
 	s = "\n";
 	syscall(SYS_write, fd, s, 1);
+	if (file_fd >= 0)
+		syscall(SYS_close, file_fd);
 }
 
 static void trace_execve_forksafe_number(const char* action, long value)
@@ -333,6 +363,12 @@ static int build_loader_envp_forksafe(char* const guest_envp[],
 		if (result)
 			return result;
 	}
+	if (!env_has_name(loader_envp, "LD_PRELOAD")) {
+		result = append_env_snapshot(loader_envp, &loader_envc,
+		                             machgate_execve_ld_preload_env);
+		if (result)
+			return result;
+	}
 	loader_envp[loader_envc] = NULL;
 	return 0;
 }
@@ -380,7 +416,8 @@ static int append_env_value(char* loader_envp[], size_t* loader_envc,
 
 static int build_loader_envp(char* const guest_envp[], char* loader_envp[],
                              char* machismo_config_env,
-                             char* ld_library_path_env)
+                             char* ld_library_path_env,
+                             char* ld_preload_env)
 {
 	char* const* base_envp = guest_envp ? guest_envp : environ;
 	size_t loader_envc = 0;
@@ -412,6 +449,14 @@ static int build_loader_envp(char* const guest_envp[], char* loader_envp[],
 			return result;
 	}
 
+	if (!env_has_name(loader_envp, "LD_PRELOAD")) {
+		result = append_env_value(loader_envp, &loader_envc, "LD_PRELOAD",
+		                          ld_preload_env,
+		                          MACHGATE_EXECVE_PATH_MAX);
+		if (result)
+			return result;
+	}
+
 	loader_envp[loader_envc] = NULL;
 	return 0;
 }
@@ -423,6 +468,7 @@ int machgate_execve_macho_guest(const char* path, char* const guest_argv[],
 	char loader_path[MACHGATE_EXECVE_PATH_MAX];
 	char machismo_config_env[MACHGATE_EXECVE_PATH_MAX];
 	char ld_library_path_env[MACHGATE_EXECVE_PATH_MAX];
+	char ld_preload_env[MACHGATE_EXECVE_PATH_MAX];
 	char* loader_argv[MACHGATE_EXECVE_MAX_ARGS + 3];
 	char* loader_envp[MACHGATE_EXECVE_MAX_ENVS + 3];
 	int result;
@@ -448,7 +494,7 @@ int machgate_execve_macho_guest(const char* path, char* const guest_argv[],
 		return result;
 
 	result = build_loader_envp(guest_envp, loader_envp, machismo_config_env,
-	                           ld_library_path_env);
+	                           ld_library_path_env, ld_preload_env);
 	if (result)
 		return result;
 
@@ -513,8 +559,17 @@ int machgate_execve_macho_guest_forksafe(const char* path,
 	trace_execve_forksafe("argv3", loader_argv[3], NULL);
 	trace_execve_forksafe_number("fd1-flags", syscall(SYS_fcntl, 1, F_GETFD));
 	trace_execve_forksafe_number("fd2-flags", syscall(SYS_fcntl, 2, F_GETFD));
+	trace_execve_forksafe_number("env-cookie",
+	                             env_has_name(loader_envp, "PACKER_WRAP_COOKIE"));
+	trace_execve_forksafe_number("env-ld-preload",
+	                             env_has_name(loader_envp, "LD_PRELOAD"));
+	trace_execve_forksafe_number("env-ld-library-path",
+	                             env_has_name(loader_envp, "LD_LIBRARY_PATH"));
+	trace_execve_forksafe_number("env-machismo-config",
+	                             env_has_name(loader_envp, "MACHISMO_CONFIG"));
 	trace_execve_forksafe("exec", loader_path, guest_path);
 	syscall(SYS_execve, loader_path, loader_argv, loader_envp);
+	trace_execve_forksafe_number("linux-execve-errno", errno);
 	trace_execve_forksafe("post-exec-fail", NULL, NULL);
 	return execve_errno_from_linux(errno);
 }

@@ -29,11 +29,13 @@
 #include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <sys/syscall.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/select.h>
+#include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 #include <linux/futex.h>
@@ -54,11 +56,23 @@ extern char **environ;
 static int shim_hw_ncpu(void);
 static int shim_trace_enabled(void);
 static int shim_delta_vm_trace_enabled(void);
+static int shim_wait_trace_enabled(void);
+static int shim_host_sigchld_handler_enabled(void);
+static FILE* shim_open_trace_file(void);
+static void shim_fd_trace_log(const char* format, ...);
 static pid_t shim_trace_tid(void);
 static unsigned long shim_trace_pthread_self(void);
 static const char* shim_trace_path(const char* path);
+static char* getenv_from_guest_envp(const char* name);
+static int shim_errno_from_linux(int linux_errno);
 static int translate_oflags(int darwin_flags);
 static pid_t machgate_shim_process_pid;
+static int shim_last_wait_valid;
+static pid_t shim_last_wait_owner_pid;
+static pid_t shim_last_wait_result_pid;
+static int shim_last_wait_linux_status;
+static int shim_last_wait_darwin_status;
+static uintptr_t shim_last_wait_status_ptr;
 
 #if defined(__GNUC__) || defined(__clang__)
 #define SHIM_CALLER_RETURN_ADDRESS() \
@@ -90,6 +104,31 @@ struct darwin_sigaction {
 	uint64_t handler;
 	uint32_t mask;
 	uint32_t flags;
+};
+
+struct darwin_timeval {
+	int64_t tv_sec;
+	int32_t tv_usec;
+	int32_t pad;
+};
+
+struct darwin_rusage {
+	struct darwin_timeval ru_utime;
+	struct darwin_timeval ru_stime;
+	int64_t ru_maxrss;
+	int64_t ru_ixrss;
+	int64_t ru_idrss;
+	int64_t ru_isrss;
+	int64_t ru_minflt;
+	int64_t ru_majflt;
+	int64_t ru_nswap;
+	int64_t ru_inblock;
+	int64_t ru_oublock;
+	int64_t ru_msgsnd;
+	int64_t ru_msgrcv;
+	int64_t ru_nsignals;
+	int64_t ru_nvcsw;
+	int64_t ru_nivcsw;
 };
 
 /* ===== Mach time ===== */
@@ -624,6 +663,10 @@ char*** _NSGetArgv(void)
 
 char*** _NSGetEnviron(void)
 {
+	char*** machismo_envp = dlsym(RTLD_DEFAULT, "__machismo_guest_envp");
+
+	if (machismo_envp && *machismo_envp)
+		return machismo_envp;
 	return &environ;
 }
 
@@ -5448,9 +5491,6 @@ static ssize_t shim_write_with_sigpipe_guard(long syscall_number, int fd,
 	struct sigaction old_action;
 	int changed = 0;
 
-	if (!machgate_shim_in_fork_child())
-		return syscall(syscall_number, fd, buffer, size_or_count);
-
 	memset(&ignore_action, 0, sizeof(ignore_action));
 	ignore_action.sa_handler = SIG_IGN;
 	sigemptyset(&ignore_action.sa_mask);
@@ -5460,10 +5500,49 @@ static ssize_t shim_write_with_sigpipe_guard(long syscall_number, int fd,
 	errno = 0;
 	ssize_t result = syscall(syscall_number, fd, buffer, size_or_count);
 	int saved_errno = errno;
+	if (result < 0)
+		saved_errno = shim_errno_from_linux(saved_errno);
+	shim_fd_trace_log("write caller=%p fd=%d size=%zu result=%zd errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), fd, size_or_count,
+	                  result, result < 0 ? saved_errno : 0);
 
-	if (changed)
+	if (changed && old_action.sa_handler != SIG_DFL)
 		sigaction(SIGPIPE, &old_action, NULL);
 
+	errno = saved_errno;
+	return result;
+}
+
+ssize_t read(int fd, void* buffer, size_t size)
+{
+	errno = 0;
+	ssize_t result = (ssize_t)syscall(SYS_read, fd, buffer, size);
+	int saved_errno = errno;
+	if (result < 0)
+		saved_errno = shim_errno_from_linux(saved_errno);
+	shim_fd_trace_log("read caller=%p fd=%d size=%zu result=%zd errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), fd, size, result,
+	                  result < 0 ? saved_errno : 0);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: read(fd=%d size=%zu) -> %zd errno=%d\n",
+		        fd, size, result, result < 0 ? saved_errno : 0);
+	errno = saved_errno;
+	return result;
+}
+
+ssize_t readv(int fd, const struct iovec* iov, int iovcnt)
+{
+	errno = 0;
+	ssize_t result = (ssize_t)syscall(SYS_readv, fd, iov, (int)iovcnt);
+	int saved_errno = errno;
+	if (result < 0)
+		saved_errno = shim_errno_from_linux(saved_errno);
+	shim_fd_trace_log("readv caller=%p fd=%d iovcnt=%d result=%zd errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), fd, iovcnt, result,
+	                  result < 0 ? saved_errno : 0);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: readv(fd=%d iovcnt=%d) -> %zd errno=%d\n",
+		        fd, iovcnt, result, result < 0 ? saved_errno : 0);
 	errno = saved_errno;
 	return result;
 }
@@ -5835,6 +5914,55 @@ int atexit(void (*function)(void))
 	return 0;
 }
 
+static void trace_process_exit_code(const char* name, int status, void* caller)
+{
+	FILE* trace_file = shim_open_trace_file();
+	char* guest_cookie;
+	const char* host_cookie;
+
+	if (!trace_file)
+		return;
+
+	guest_cookie = getenv_from_guest_envp("PACKER_WRAP_COOKIE");
+	host_cookie = getenv("PACKER_WRAP_COOKIE");
+	fprintf(trace_file,
+	        "libsystem_shim: %s pid=%d tid=%d ppid=%d fork_child=%d status=%d caller=%p guest_cookie=%d host_cookie=%d last_wait_valid=%d last_wait_owner=%d last_wait_result=%d last_wait_linux_status=%#x last_wait_darwin_status=%#x last_wait_status_ptr=%#lx\n",
+	        name, (int)syscall(SYS_getpid), (int)shim_trace_tid(),
+	        (int)syscall(SYS_getppid), machgate_shim_in_fork_child(), status,
+	        caller, guest_cookie ? 1 : 0,
+	        host_cookie && *host_cookie ? 1 : 0, shim_last_wait_valid,
+	        (int)shim_last_wait_owner_pid,
+	        (int)shim_last_wait_result_pid,
+	        shim_last_wait_linux_status,
+	        shim_last_wait_darwin_status,
+	        (unsigned long)shim_last_wait_status_ptr);
+	fclose(trace_file);
+}
+
+void exit(int status)
+{
+	trace_process_exit_code("exit", status, SHIM_CALLER_RETURN_ADDRESS());
+	syscall(SYS_exit_group, status);
+	__builtin_unreachable();
+}
+
+void _exit(int status)
+{
+	trace_process_exit_code("_exit", status, SHIM_CALLER_RETURN_ADDRESS());
+	syscall(SYS_exit_group, status);
+	__builtin_unreachable();
+}
+
+static int shim_errno_from_linux(int linux_errno)
+{
+	switch (linux_errno) {
+	case EAGAIN:
+		return 35;
+	default:
+		return linux_errno;
+	}
+}
+
 /* ===== Apple stdio globals ===== */
 
 /* Apple's libSystem exports these as global FILE* pointers.
@@ -5963,18 +6091,49 @@ static const char* get_fake_home(void)
 	return fake_home;
 }
 
+static char* getenv_from_guest_envp(const char* name)
+{
+	char*** machismo_envp = dlsym(RTLD_DEFAULT, "__machismo_guest_envp");
+	size_t name_len;
+
+	if (!name || !machismo_envp || !*machismo_envp)
+		return NULL;
+
+	name_len = strlen(name);
+	for (size_t env_index = 0; (*machismo_envp)[env_index]; env_index++) {
+		char* entry = (*machismo_envp)[env_index];
+		if (strncmp(entry, name, name_len) == 0 && entry[name_len] == '=')
+			return entry + name_len + 1;
+	}
+
+	return NULL;
+}
+
 char *shim_getenv(const char *name) __asm__("getenv");
 char *shim_getenv(const char *name)
 {
 	if (name && strcmp(name, "HOME") == 0)
 		return (char*)get_fake_home();
 
-	/* Forward everything else to real getenv.
-	 * Use dlsym to avoid recursion since we replaced getenv. */
+	char* guest_value = getenv_from_guest_envp(name);
+	if (guest_value) {
+		if (name && strcmp(name, "PACKER_WRAP_COOKIE") == 0 &&
+		    (shim_trace_enabled() || shim_wait_trace_enabled())) {
+			fprintf(stderr, "libsystem_shim: getenv PACKER_WRAP_COOKIE guest=1\n");
+		}
+		return guest_value;
+	}
+
 	static char *(*real_getenv)(const char*) = NULL;
 	if (!real_getenv)
 		real_getenv = dlsym(RTLD_NEXT, "getenv");
-	return real_getenv(name);
+	char* result = real_getenv(name);
+	if (name && strcmp(name, "PACKER_WRAP_COOKIE") == 0 &&
+	    (shim_trace_enabled() || shim_wait_trace_enabled())) {
+		fprintf(stderr, "libsystem_shim: getenv PACKER_WRAP_COOKIE guest=0 host=%d\n",
+		        result ? 1 : 0);
+	}
+	return result;
 }
 
 /* ===== _NSGetExecutablePath ===== */
@@ -6572,6 +6731,94 @@ static int shim_signal_trace_enabled(void)
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
+static int shim_wait_trace_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_WAIT");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static int shim_host_sigchld_handler_enabled(void)
+{
+	const char* value = getenv("MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static int shim_fd_trace_fd(void)
+{
+	static int trace_fd = -2;
+	int current_fd = __atomic_load_n(&trace_fd, __ATOMIC_ACQUIRE);
+
+	if (current_fd != -2)
+		return current_fd;
+
+	const char* trace_path = getenv("MACHGATE_FD_TRACE_FILE");
+	if (!trace_path || !*trace_path) {
+		__atomic_store_n(&trace_fd, -1, __ATOMIC_RELEASE);
+		return -1;
+	}
+
+	int opened_fd = (int)syscall(SYS_openat, AT_FDCWD, trace_path,
+	                             O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+	                             0644);
+	if (opened_fd < 0) {
+		__atomic_store_n(&trace_fd, -1, __ATOMIC_RELEASE);
+		return -1;
+	}
+
+	int high_fd = (int)syscall(SYS_fcntl, opened_fd, F_DUPFD_CLOEXEC, 1000);
+	int saved_errno = errno;
+	syscall(SYS_close, opened_fd);
+	errno = saved_errno;
+	if (high_fd < 0) {
+		__atomic_store_n(&trace_fd, -1, __ATOMIC_RELEASE);
+		return -1;
+	}
+
+	if (__sync_bool_compare_and_swap(&trace_fd, -2, high_fd))
+		return high_fd;
+
+	syscall(SYS_close, high_fd);
+	return __atomic_load_n(&trace_fd, __ATOMIC_ACQUIRE);
+}
+
+static void shim_fd_trace_log(const char* format, ...)
+{
+	int trace_fd = shim_fd_trace_fd();
+	char buffer[1536];
+	int offset;
+	int length;
+	va_list args;
+
+	if (trace_fd < 0)
+		return;
+
+	offset = snprintf(buffer, sizeof(buffer), "fdtrace pid=%d tid=%d ",
+	                  (int)syscall(SYS_getpid), (int)syscall(SYS_gettid));
+	if (offset < 0 || (size_t)offset >= sizeof(buffer))
+		return;
+
+	va_start(args, format);
+	length = vsnprintf(buffer + offset, sizeof(buffer) - (size_t)offset,
+	                   format, args);
+	va_end(args);
+	if (length < 0)
+		return;
+
+	length += offset;
+	if ((size_t)length > sizeof(buffer))
+		length = (int)sizeof(buffer);
+	syscall(SYS_write, trace_fd, buffer, (size_t)length);
+}
+
+static FILE* shim_open_trace_file(void)
+{
+	const char* trace_file = getenv("MACHGATE_EXECVE_TRACE_FILE");
+
+	if (!trace_file || !*trace_file)
+		return NULL;
+	return fopen(trace_file, "a");
+}
+
 /* Same issue for pthread_cond_t */
 static inline void fixup_cond(pthread_cond_t *cond)
 {
@@ -6718,7 +6965,7 @@ int pthread_kill(pthread_t thread, int signum)
 	static int (*real_pthread_kill)(pthread_t, int) = NULL;
 	int linux_signal = darwin_signal_to_linux(signum);
 
-	if (signum == 16) {
+	if (linux_signal <= 0 || signum == 16) {
 		if (shim_trace_enabled())
 			fprintf(stderr, "libsystem_shim: pthread_kill(%lu, %d->%d) ignored\n",
 			        (unsigned long)thread, signum, linux_signal);
@@ -6852,6 +7099,9 @@ int kqueue(void)
 	int result = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	if (result >= 0)
 		remember_kqueue_fd(result, result);
+	shim_fd_trace_log("kqueue caller=%p result=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), result,
+	                  result < 0 ? errno : 0);
 	if (shim_trace_enabled())
 		fprintf(stderr, "libsystem_shim: kqueue() -> %d errno=%d\n",
 		        result, result < 0 ? errno : 0);
@@ -6872,6 +7122,7 @@ struct darwin_kevent_placeholder {
 #define DARWIN_EVFILT_USER (-10)
 #define DARWIN_EV_DELETE 0x0002
 #define DARWIN_EV_DISABLE 0x0008
+#define DARWIN_EV_CLEAR 0x0020
 #define DARWIN_EV_RECEIPT 0x0040
 #define DARWIN_EV_ERROR 0x4000
 #define DARWIN_EV_EOF 0x8000
@@ -6889,6 +7140,12 @@ struct shim_kqueue_registration {
 	int64_t data;
 	void* udata;
 	int triggered;
+	int ready;
+};
+
+struct shim_kqueue_poll_registration {
+	struct shim_kqueue_registration* registration;
+	struct shim_kqueue_registration snapshot;
 };
 
 static pthread_mutex_t kqueue_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -6930,6 +7187,43 @@ static void remember_kqueue_dup(int from_fd, int to_fd)
 	    (from_fd >= 0 && from_fd < KQUEUE_ALIAS_COUNT &&
 	     kqueue_aliases[from_fd] >= 0))
 		remember_kqueue_fd_unlocked(to_fd, canonical_fd);
+	pthread_mutex_unlock(&kqueue_mutex);
+}
+
+static void forget_kqueue_fd_unlocked(int fd)
+{
+	int canonical_fd = resolve_kqueue_fd_unlocked(fd);
+	int closing_kqueue = fd >= 0 && fd < KQUEUE_ALIAS_COUNT &&
+	    kqueue_aliases[fd] >= 0;
+
+	for (int i = 0; i < KQUEUE_REGISTRATION_COUNT; i++) {
+		struct shim_kqueue_registration* registration = &kqueue_registrations[i];
+		if (!registration->used)
+			continue;
+		if (closing_kqueue && registration->kq == canonical_fd) {
+			memset(registration, 0, sizeof(*registration));
+			continue;
+		}
+		if ((registration->filter == DARWIN_EVFILT_READ ||
+		     registration->filter == DARWIN_EVFILT_WRITE) &&
+		    (int)registration->ident == fd)
+			memset(registration, 0, sizeof(*registration));
+	}
+
+	if (fd >= 0 && fd < KQUEUE_ALIAS_COUNT)
+		kqueue_aliases[fd] = -1;
+	if (closing_kqueue && fd == canonical_fd) {
+		for (int i = 0; i < KQUEUE_ALIAS_COUNT; i++) {
+			if (kqueue_aliases[i] == canonical_fd)
+				kqueue_aliases[i] = -1;
+		}
+	}
+}
+
+static void forget_kqueue_fd(int fd)
+{
+	pthread_mutex_lock(&kqueue_mutex);
+	forget_kqueue_fd_unlocked(fd);
 	pthread_mutex_unlock(&kqueue_mutex);
 }
 
@@ -6976,6 +7270,18 @@ static int update_kqueue_registration(int kq,
 	struct shim_kqueue_registration* registration =
 		find_kqueue_registration(kq, change->ident, change->filter);
 
+	if (shim_trace_enabled())
+		fprintf(stderr,
+		        "libsystem_shim: kevent change kq=%d ident=%llu filter=%d flags=%#x fflags=%#x data=%lld udata=%p\n",
+		        kq, (unsigned long long)change->ident, change->filter,
+		        change->flags, change->fflags, (long long)change->data,
+		        change->udata);
+	shim_fd_trace_log("kevent_change caller=%p kq=%d ident=%llu filter=%d flags=%#x fflags=%#x data=%lld udata=%p\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), kq,
+	                  (unsigned long long)change->ident, change->filter,
+	                  change->flags, change->fflags, (long long)change->data,
+	                  change->udata);
+
 	if (change->flags & DARWIN_EV_DELETE) {
 		if (registration)
 			memset(registration, 0, sizeof(*registration));
@@ -7005,6 +7311,7 @@ static int update_kqueue_registration(int kq,
 	registration->fflags = change->fflags;
 	registration->data = change->data;
 	registration->udata = change->udata;
+	registration->ready = 0;
 	if (change->fflags & DARWIN_NOTE_TRIGGER)
 		registration->triggered = 1;
 	if (change->filter == DARWIN_EVFILT_USER &&
@@ -7078,7 +7385,7 @@ static short kqueue_poll_events(int16_t filter)
 }
 
 static int collect_kqueue_pollfds(int kq, struct pollfd* pollfds,
-                                  struct shim_kqueue_registration** registrations,
+                                  struct shim_kqueue_poll_registration* registrations,
                                   int max_events)
 {
 	int count = 0;
@@ -7095,18 +7402,47 @@ static int collect_kqueue_pollfds(int kq, struct pollfd* pollfds,
 			pollfds[count].events = POLLIN;
 		} else {
 			pollfds[count].fd = (int)registration->ident;
-			pollfds[count].events = kqueue_poll_events(registration->filter);
+		pollfds[count].events = kqueue_poll_events(registration->filter);
 		}
 		pollfds[count].revents = 0;
-		registrations[count] = registration;
+		registrations[count].registration = registration;
+		registrations[count].snapshot = *registration;
 		count++;
 	}
 
 	return count;
 }
 
+static int kqueue_registration_matches_snapshot(
+	const struct shim_kqueue_registration* registration,
+	const struct shim_kqueue_registration* snapshot)
+{
+	return registration && registration->used &&
+	    registration->kq == snapshot->kq &&
+	    registration->ident == snapshot->ident &&
+	    registration->filter == snapshot->filter;
+}
+
+static int64_t kqueue_event_data(const struct shim_kqueue_registration* registration,
+                                 short revents)
+{
+	if (registration->filter == DARWIN_EVFILT_READ) {
+		int available = 0;
+		if (syscall(SYS_ioctl, (int)registration->ident, FIONREAD,
+		            &available) == 0 && available > 0)
+			return available;
+		return 0;
+	}
+	if (registration->filter == DARWIN_EVFILT_WRITE) {
+		if (revents & (POLLERR | POLLHUP | POLLNVAL))
+			return 0;
+		return 1;
+	}
+	return 0;
+}
+
 static int emit_kqueue_events(struct pollfd* pollfds,
-                              struct shim_kqueue_registration** registrations,
+                              struct shim_kqueue_poll_registration* registrations,
                               int pollfd_count,
                               struct darwin_kevent_placeholder* eventlist,
                               int nevents)
@@ -7114,28 +7450,61 @@ static int emit_kqueue_events(struct pollfd* pollfds,
 	int result = 0;
 
 	for (int i = 0; i < pollfd_count && result < nevents; i++) {
-		struct shim_kqueue_registration* registration = registrations[i];
+		struct shim_kqueue_registration* live_registration =
+			registrations[i].registration;
+		struct shim_kqueue_registration* registration =
+			&registrations[i].snapshot;
+		int live_matches = kqueue_registration_matches_snapshot(
+			live_registration, registration);
 		short revents = pollfds[i].revents;
+		int ready = revents != 0;
 
-		if (!revents && registration->filter != DARWIN_EVFILT_USER)
+		if (!ready && registration->filter != DARWIN_EVFILT_USER) {
+			if (live_matches)
+				live_registration->ready = 0;
 			continue;
-		if (!revents && !registration->triggered)
+		}
+		if (!ready && !registration->triggered)
 			continue;
+		if ((registration->flags & DARWIN_EV_CLEAR) &&
+		    registration->filter == DARWIN_EVFILT_WRITE) {
+			if (live_matches && live_registration->ready)
+				continue;
+			if (live_matches)
+				live_registration->ready = 1;
+		}
 
 		eventlist[result].ident = registration->ident;
 		eventlist[result].filter = registration->filter;
 		eventlist[result].flags = registration->flags;
 		eventlist[result].fflags = registration->fflags;
-		eventlist[result].data = 0;
+		eventlist[result].data = kqueue_event_data(registration, revents);
 		eventlist[result].udata = registration->udata;
 		if (revents & (POLLHUP | POLLERR | POLLNVAL))
 			eventlist[result].flags |= DARWIN_EV_EOF;
+
+		if (shim_trace_enabled())
+			fprintf(stderr,
+			        "libsystem_shim: kevent event ident=%llu filter=%d flags=%#x fflags=%#x data=%lld udata=%p revents=%#x\n",
+			        (unsigned long long)eventlist[result].ident,
+			        eventlist[result].filter, eventlist[result].flags,
+			        eventlist[result].fflags,
+			        (long long)eventlist[result].data,
+			        eventlist[result].udata, revents);
+		shim_fd_trace_log("kevent_event caller=%p ident=%llu filter=%d flags=%#x fflags=%#x data=%lld udata=%p revents=%#x\n",
+		                  SHIM_CALLER_RETURN_ADDRESS(),
+		                  (unsigned long long)eventlist[result].ident,
+		                  eventlist[result].filter, eventlist[result].flags,
+		                  eventlist[result].fflags,
+		                  (long long)eventlist[result].data,
+		                  eventlist[result].udata, revents);
 
 		if (registration->filter == DARWIN_EVFILT_USER) {
 			uint64_t value;
 			while (read(registration->kq, &value, sizeof(value)) > 0) {
 			}
-			registration->triggered = 0;
+			if (live_matches)
+				live_registration->triggered = 0;
 		}
 
 		result++;
@@ -7191,12 +7560,15 @@ int kevent(int kq, const struct darwin_kevent_placeholder* changelist,
 		if (shim_trace_enabled())
 			fprintf(stderr, "libsystem_shim: kevent(kq=%d nchanges=%d nevents=%d receipts=%d) -> %d errno=0\n",
 			        kq, nchanges, nevents, result, result);
+		shim_fd_trace_log("kevent caller=%p kq=%d nchanges=%d nevents=%d receipts=%d result=%d errno=0\n",
+		                  SHIM_CALLER_RETURN_ADDRESS(), kq, nchanges,
+		                  nevents, result, result);
 		return result;
 	}
 
 	if (eventlist && nevents > 0) {
 		struct pollfd pollfds[64];
-		struct shim_kqueue_registration* registrations[64];
+		struct shim_kqueue_poll_registration registrations[64];
 		int max_events = nevents < 64 ? nevents : 64;
 		int pollfd_count;
 		int poll_result;
@@ -7229,6 +7601,11 @@ int kevent(int kq, const struct darwin_kevent_placeholder* changelist,
 		        timeout ? (long long)timeout->tv_sec : -1,
 		        timeout ? timeout->tv_nsec : -1L,
 		        result, result < 0 ? errno : 0);
+	shim_fd_trace_log("kevent caller=%p kq=%d nchanges=%d nevents=%d timeout=%p timeout_value=%lld.%09ld result=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), kq, nchanges, nevents,
+	                  timeout, timeout ? (long long)timeout->tv_sec : -1,
+	                  timeout ? timeout->tv_nsec : -1L, result,
+	                  result < 0 ? errno : 0);
 	return result;
 }
 
@@ -7567,6 +7944,170 @@ static int linux_signal_to_darwin(int linux_signal)
 	}
 }
 
+static int darwin_wait_options_to_linux(int darwin_options, int* linux_options)
+{
+	int result = 0;
+	int supported = WNOHANG | WUNTRACED;
+
+#ifdef WCONTINUED
+	supported |= 0x10;
+#endif
+
+	if (darwin_options & ~supported)
+		return 0;
+
+	if (darwin_options & WNOHANG)
+		result |= WNOHANG;
+	if (darwin_options & WUNTRACED)
+		result |= WUNTRACED;
+#ifdef WCONTINUED
+	if (darwin_options & 0x10)
+		result |= WCONTINUED;
+#endif
+
+	*linux_options = result;
+	return 1;
+}
+
+static int linux_wait_status_to_darwin(int linux_status)
+{
+	int darwin_signal;
+
+	if (WIFSIGNALED(linux_status)) {
+		darwin_signal = linux_signal_to_darwin(WTERMSIG(linux_status));
+		return (linux_status & ~0x7f) | (darwin_signal & 0x7f);
+	}
+	if (WIFSTOPPED(linux_status)) {
+		darwin_signal = linux_signal_to_darwin(WSTOPSIG(linux_status));
+		return (linux_status & ~0xff00) | ((darwin_signal & 0xff) << 8);
+	}
+	return linux_status;
+}
+
+static void linux_rusage_to_darwin(const struct rusage* linux_usage,
+                                   struct darwin_rusage* darwin_usage)
+{
+	darwin_usage->ru_utime.tv_sec = linux_usage->ru_utime.tv_sec;
+	darwin_usage->ru_utime.tv_usec = (int32_t)linux_usage->ru_utime.tv_usec;
+	darwin_usage->ru_utime.pad = 0;
+	darwin_usage->ru_stime.tv_sec = linux_usage->ru_stime.tv_sec;
+	darwin_usage->ru_stime.tv_usec = (int32_t)linux_usage->ru_stime.tv_usec;
+	darwin_usage->ru_stime.pad = 0;
+	darwin_usage->ru_maxrss = linux_usage->ru_maxrss;
+	darwin_usage->ru_ixrss = linux_usage->ru_ixrss;
+	darwin_usage->ru_idrss = linux_usage->ru_idrss;
+	darwin_usage->ru_isrss = linux_usage->ru_isrss;
+	darwin_usage->ru_minflt = linux_usage->ru_minflt;
+	darwin_usage->ru_majflt = linux_usage->ru_majflt;
+	darwin_usage->ru_nswap = linux_usage->ru_nswap;
+	darwin_usage->ru_inblock = linux_usage->ru_inblock;
+	darwin_usage->ru_oublock = linux_usage->ru_oublock;
+	darwin_usage->ru_msgsnd = linux_usage->ru_msgsnd;
+	darwin_usage->ru_msgrcv = linux_usage->ru_msgrcv;
+	darwin_usage->ru_nsignals = linux_usage->ru_nsignals;
+	darwin_usage->ru_nvcsw = linux_usage->ru_nvcsw;
+	darwin_usage->ru_nivcsw = linux_usage->ru_nivcsw;
+}
+
+pid_t wait4(pid_t pid, int* status, int options, struct rusage* usage)
+{
+	int linux_options;
+	int linux_status = 0;
+	struct rusage linux_usage;
+	struct rusage* linux_usage_ptr = usage ? &linux_usage : NULL;
+	struct darwin_rusage* darwin_usage = (struct darwin_rusage*)usage;
+	unsigned char status_before[sizeof(uint32_t)] = {0};
+	unsigned char status_after[sizeof(uint32_t)] = {0};
+	int have_status_bytes = 0;
+
+	if (!darwin_wait_options_to_linux(options, &linux_options)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	pid_t result = (pid_t)syscall(SYS_wait4, pid,
+	                              status ? &linux_status : NULL,
+	                              linux_options, linux_usage_ptr);
+	int saved_errno = errno;
+	int darwin_status = linux_status;
+	if (result > 0) {
+		if (status) {
+			memcpy(status_before, status, sizeof(status_before));
+			darwin_status = linux_wait_status_to_darwin(linux_status);
+			*status = darwin_status;
+			memcpy(status_after, status, sizeof(status_after));
+			have_status_bytes = 1;
+			shim_last_wait_valid = 1;
+			shim_last_wait_owner_pid = (pid_t)syscall(SYS_getpid);
+			shim_last_wait_result_pid = result;
+			shim_last_wait_linux_status = linux_status;
+			shim_last_wait_darwin_status = darwin_status;
+			shim_last_wait_status_ptr = (uintptr_t)status;
+		}
+		if (usage)
+			linux_rusage_to_darwin(&linux_usage, darwin_usage);
+		if (pid > 0)
+			result = pid;
+	}
+
+	if (shim_trace_enabled() || shim_wait_trace_enabled()) {
+		if (result > 0 && status) {
+			fprintf(stderr,
+			        "libsystem_shim: wait4(%d status=%p options=%#x usage=%p) -> %d linux_status=%#x darwin_status=%#x exited=%d exit=%d signaled=%d signal=%d core=%d errno=0\n",
+			        pid, status, options, usage, result, linux_status,
+			        darwin_status, WIFEXITED(linux_status),
+			        WIFEXITED(linux_status) ? WEXITSTATUS(linux_status) : -1,
+			        WIFSIGNALED(linux_status),
+			        WIFSIGNALED(linux_status) ? WTERMSIG(linux_status) : -1,
+#ifdef WCOREDUMP
+			        WIFSIGNALED(linux_status) ? WCOREDUMP(linux_status) : 0
+#else
+			        0
+#endif
+			);
+		} else {
+			fprintf(stderr,
+			        "libsystem_shim: wait4(%d status=%p options=%#x usage=%p) -> %d errno=%d\n",
+			        pid, status, options, usage, result,
+			        result < 0 ? saved_errno : 0);
+		}
+	}
+
+	FILE* trace_file = shim_open_trace_file();
+	if (trace_file) {
+		if (result > 0 && status) {
+			fprintf(trace_file,
+			        "libsystem_shim: wait4 self=%d tid=%d ppid=%d fork_child=%d pid=%d result=%d options=%#x status_ptr=%p linux_status=%#x darwin_status=%#x status_bytes_valid=%d before=%02x%02x%02x%02x after=%02x%02x%02x%02x exited=%d exit=%d signaled=%d signal=%d\n",
+			        (int)syscall(SYS_getpid), (int)shim_trace_tid(),
+			        (int)syscall(SYS_getppid), machgate_shim_in_fork_child(),
+			        pid, result, options, status, linux_status, darwin_status,
+			        have_status_bytes, status_before[0], status_before[1],
+			        status_before[2], status_before[3], status_after[0],
+			        status_after[1], status_after[2], status_after[3],
+			        WIFEXITED(linux_status),
+			        WIFEXITED(linux_status) ? WEXITSTATUS(linux_status) : -1,
+			        WIFSIGNALED(linux_status),
+			        WIFSIGNALED(linux_status) ? WTERMSIG(linux_status) : -1);
+		} else {
+			fprintf(trace_file,
+			        "libsystem_shim: wait4 self=%d tid=%d ppid=%d fork_child=%d pid=%d result=%d options=%#x errno=%d\n",
+			        (int)syscall(SYS_getpid), (int)shim_trace_tid(),
+			        (int)syscall(SYS_getppid), machgate_shim_in_fork_child(),
+			        pid, result, options, result < 0 ? saved_errno : 0);
+		}
+		fclose(trace_file);
+	}
+
+	errno = saved_errno;
+	return result;
+}
+
+pid_t waitpid(pid_t pid, int* status, int options)
+{
+	return wait4(pid, status, options, NULL);
+}
+
 static int darwin_sigprocmask_how_to_linux(int darwin_how)
 {
 	switch (darwin_how) {
@@ -7599,8 +8140,11 @@ static void darwin_sigset_to_linux(uint32_t darwin_set, sigset_t* linux_set)
 {
 	linux_sigemptyset(linux_set);
 	for (int bit = 1; bit < 32; bit++) {
-		if (darwin_set & (1u << (bit - 1)))
-			linux_sigaddset(linux_set, darwin_signal_to_linux(bit));
+		if (darwin_set & (1u << (bit - 1))) {
+			int linux_signal = darwin_signal_to_linux(bit);
+			if (linux_signal > 0)
+				linux_sigaddset(linux_set, linux_signal);
+		}
 	}
 }
 
@@ -7676,7 +8220,7 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		        (void*)trace_ucontext_reg(ucontext, 6),
 		        (void*)trace_ucontext_reg(ucontext, 7),
 		        (void*)trace_ucontext_reg(ucontext, 8),
-		        (void*)trace_ucontext_reg(ucontext, 16));
+			        (void*)trace_ucontext_reg(ucontext, 16));
 	}
 
 	if (signum > 0 && signum < _NSIG) {
@@ -7793,6 +8337,18 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 	struct sigaction* linux_oldact_ptr = darwin_oldact ? &linux_oldact : NULL;
 	int linux_signal = darwin_signal_to_linux(signum);
 
+	if (linux_signal <= 0) {
+		if (darwin_oldact) {
+			darwin_oldact->handler = 0;
+			darwin_oldact->mask = 0;
+			darwin_oldact->flags = 0;
+		}
+		if (shim_trace_enabled())
+			fprintf(stderr, "libsystem_shim: sigaction(%d->%d act=%p old=%p) -> 0 errno=0\n",
+			        signum, linux_signal, act, oldact);
+		return 0;
+	}
+
 	if ((signum == 9 || signum == 17) &&
 	    (!darwin_act || darwin_act->handler == 0)) {
 		if (darwin_oldact) {
@@ -7830,12 +8386,15 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 		linux_act.sa_flags = linux_flags;
 		linux_sigemptyset(&linux_act.sa_mask);
 		for (int bit = 1; bit < 32; bit++) {
-			if (darwin_act->mask & (1u << (bit - 1)))
-				linux_sigaddset(&linux_act.sa_mask, darwin_signal_to_linux(bit));
+			if (darwin_act->mask & (1u << (bit - 1))) {
+				int mask_signal = darwin_signal_to_linux(bit);
+				if (mask_signal > 0)
+					linux_sigaddset(&linux_act.sa_mask, mask_signal);
+			}
 		}
-		if (should_trace_guest_signal(linux_signal) &&
-		    darwin_act->handler != (uint64_t)(uintptr_t)SIG_DFL &&
-		    darwin_act->handler != (uint64_t)(uintptr_t)SIG_IGN) {
+			if (should_trace_guest_signal(linux_signal) &&
+			    darwin_act->handler != (uint64_t)(uintptr_t)SIG_DFL &&
+			    darwin_act->handler != (uint64_t)(uintptr_t)SIG_IGN) {
 			trace_signal_uses_siginfo[linux_signal] =
 				(linux_flags & SA_SIGINFO) != 0;
 			if (trace_signal_uses_siginfo[linux_signal]) {
@@ -7849,14 +8408,37 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 			}
 			linux_act.sa_sigaction = trace_signal_dispatcher;
 			linux_act.sa_flags = linux_flags | SA_SIGINFO;
-		} else {
-			linux_act.sa_handler = (void (*)(int))(uintptr_t)darwin_act->handler;
-		}
-		if (machgate_shim_in_fork_child() &&
-		    signum == 13 &&
-		    darwin_act->handler == (uint64_t)(uintptr_t)SIG_DFL) {
-			linux_act.sa_handler = SIG_IGN;
-		}
+			} else {
+				linux_act.sa_handler = (void (*)(int))(uintptr_t)darwin_act->handler;
+			}
+			if (machgate_shim_in_fork_child() && signum == 13) {
+				linux_act.sa_handler = SIG_IGN;
+				linux_act.sa_flags = 0;
+				linux_sigemptyset(&linux_act.sa_mask);
+			}
+			if (signum == 20 && !shim_host_sigchld_handler_enabled()) {
+				linux_act.sa_handler = SIG_DFL;
+				linux_act.sa_flags = 0;
+				linux_sigemptyset(&linux_act.sa_mask);
+			}
+			if ((shim_wait_trace_enabled() || shim_signal_trace_enabled()) &&
+			    signum == 13) {
+				fprintf(stderr,
+				        "libsystem_shim: sigaction SIGPIPE fork_child=%d handler=%p effective=%p flags=%#x\n",
+				        machgate_shim_in_fork_child(),
+				        (void*)(uintptr_t)darwin_act->handler,
+				        (void*)linux_act.sa_handler,
+				        linux_act.sa_flags);
+			}
+			if ((shim_wait_trace_enabled() || shim_signal_trace_enabled()) &&
+			    signum == 20) {
+				fprintf(stderr,
+				        "libsystem_shim: sigaction SIGCHLD host_handler=%d handler=%p effective=%p flags=%#x\n",
+				        shim_host_sigchld_handler_enabled(),
+				        (void*)(uintptr_t)darwin_act->handler,
+				        (void*)linux_act.sa_handler,
+				        linux_act.sa_flags);
+			}
 		linux_act_ptr = &linux_act;
 	}
 
@@ -7876,10 +8458,10 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 				darwin_oldact->handler =
 					(uint64_t)(uintptr_t)trace_signal_actions[linux_signal];
 			else
-				darwin_oldact->handler =
-					(uint64_t)(uintptr_t)trace_signal_handlers[linux_signal];
-		}
-		darwin_oldact->mask = 0;
+					darwin_oldact->handler =
+						(uint64_t)(uintptr_t)trace_signal_handlers[linux_signal];
+			}
+			darwin_oldact->mask = 0;
 		for (int linux_bit = 1; linux_bit < 32; linux_bit++) {
 			if (sigismember(&linux_oldact.sa_mask, linux_bit) == 1) {
 				int darwin_bit = linux_signal_to_darwin(linux_bit);
@@ -9097,6 +9679,9 @@ static int shim_fcntl_fixed(int fd, int cmd, unsigned long arg)
 	if (cmd == F_GETFL && ret >= 0)
 		ret = translate_oflags_to_darwin(ret);
 
+	shim_fd_trace_log("fcntl caller=%p fd=%d cmd=%d linux_cmd=%d arg=%#lx result=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), fd, cmd, linux_cmd, arg,
+	                  ret, ret < 0 ? saved_errno : 0);
 	if (shim_trace_enabled())
 		fprintf(stderr, "libsystem_shim: fcntl(fd=%d cmd=%d->%d arg=%#lx) -> %d errno=%d\n",
 		        fd, cmd, linux_cmd, arg, ret, ret < 0 ? saved_errno : 0);
@@ -9197,18 +9782,89 @@ int shim_shm_open(const char *name, int oflag, mode_t mode)
 	return real_shm_open(name, linux_flags, mode);
 }
 
-/* ---- dup3() / pipe2() ---- */
+/* ---- dup() / dup2() / dup3() / pipe2() ---- */
+
+int shim_dup(int fd) __asm__("dup");
+int shim_dup(int fd)
+{
+	int result = syscall(SYS_dup, fd);
+	if (result >= 0)
+		remember_kqueue_dup(fd, result);
+	shim_fd_trace_log("dup caller=%p fd=%d result=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), fd, result,
+	                  result < 0 ? errno : 0);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: dup(fd=%d) -> %d errno=%d\n",
+		        fd, result, result < 0 ? errno : 0);
+	return result;
+}
+
+int shim_dup2(int oldfd, int newfd) __asm__("dup2");
+int shim_dup2(int oldfd, int newfd)
+{
+	int result;
+
+	if (oldfd == newfd) {
+		result = syscall(SYS_fcntl, oldfd, F_GETFD, 0);
+		if (result >= 0)
+			result = newfd;
+	} else {
+		result = syscall(SYS_dup3, oldfd, newfd, 0);
+		if (result >= 0)
+			forget_kqueue_fd(newfd);
+	}
+	if (result >= 0)
+		remember_kqueue_dup(oldfd, result);
+
+	shim_fd_trace_log("dup2 caller=%p oldfd=%d newfd=%d result=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), oldfd, newfd, result,
+	                  result < 0 ? errno : 0);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: dup2(oldfd=%d newfd=%d) -> %d errno=%d\n",
+		        oldfd, newfd, result, result < 0 ? errno : 0);
+	return result;
+}
 
 int shim_dup3(int oldfd, int newfd, int flags) __asm__("dup3");
 int shim_dup3(int oldfd, int newfd, int flags)
 {
-	return syscall(SYS_dup3, oldfd, newfd, translate_oflags(flags));
+	int result = syscall(SYS_dup3, oldfd, newfd, translate_oflags(flags));
+	if (result >= 0) {
+		forget_kqueue_fd(newfd);
+		remember_kqueue_dup(oldfd, result);
+	}
+	shim_fd_trace_log("dup3 caller=%p oldfd=%d newfd=%d flags=%#x result=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), oldfd, newfd, flags,
+	                  result, result < 0 ? errno : 0);
+	return result;
+}
+
+int shim_close(int fd) __asm__("close");
+int shim_close(int fd)
+{
+	int result = syscall(SYS_close, fd);
+	int saved_errno = errno;
+	if (result == 0)
+		forget_kqueue_fd(fd);
+	shim_fd_trace_log("close caller=%p fd=%d result=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), fd, result,
+	                  result < 0 ? saved_errno : 0);
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: close(fd=%d) -> %d errno=%d\n",
+		        fd, result, result < 0 ? saved_errno : 0);
+	errno = saved_errno;
+	return result;
 }
 
 int shim_pipe(int pipefd[2]) __asm__("pipe");
 int shim_pipe(int pipefd[2])
 {
 	int result = syscall(SYS_pipe2, pipefd, 0);
+	shim_fd_trace_log("pipe caller=%p result=%d read_fd=%d write_fd=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), result,
+	                  result == 0 ? pipefd[0] : -1,
+	                  result == 0 ? pipefd[1] : -1,
+	                  result < 0 ? errno : 0);
 	if (shim_trace_enabled())
 		fprintf(stderr, "libsystem_shim: pipe() -> %d fds=[%d,%d] errno=%d\n",
 		        result, result == 0 ? pipefd[0] : -1,
@@ -9220,6 +9876,11 @@ int shim_pipe2(int pipefd[2], int flags) __asm__("pipe2");
 int shim_pipe2(int pipefd[2], int flags)
 {
 	int result = syscall(SYS_pipe2, pipefd, translate_oflags(flags));
+	shim_fd_trace_log("pipe2 caller=%p flags=%#x result=%d read_fd=%d write_fd=%d errno=%d\n",
+	                  SHIM_CALLER_RETURN_ADDRESS(), flags, result,
+	                  result == 0 ? pipefd[0] : -1,
+	                  result == 0 ? pipefd[1] : -1,
+	                  result < 0 ? errno : 0);
 	if (shim_trace_enabled())
 		fprintf(stderr, "libsystem_shim: pipe2(flags=%#x) -> %d fds=[%d,%d] errno=%d\n",
 		        flags, result, result == 0 ? pipefd[0] : -1,

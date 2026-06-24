@@ -367,9 +367,29 @@ _main:
     mov x21, #2
     mov x16, #2
     svc #0x80
-    b.cc fail
-    cmp x0, #35
+    b.cs fail
+    cbnz x0, fork_parent
+    mov x0, #0
+    mov x16, #1
+    svc #0x80
+    b fail
+fork_parent:
+    mov x22, x0
+    mov x21, #7
+    mov x0, x22
+    adrp x1, wait_status@PAGE
+    add x1, x1, wait_status@PAGEOFF
+    mov x2, #0
+    mov x3, #0
+    mov x16, #7
+    svc #0x80
+    b.cs fail
+    cmp x0, x22
     b.ne fail
+    adrp x9, wait_status@PAGE
+    add x9, x9, wait_status@PAGEOFF
+    ldr w10, [x9]
+    cbnz w10, fail
 
     mov x21, #59
     adrp x0, access_path@PAGE

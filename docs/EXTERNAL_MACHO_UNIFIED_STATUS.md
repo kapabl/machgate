@@ -3,20 +3,22 @@
 This table is the single status board for all visible external ARM64 macOS CLI
 binaries currently tracked by MachGate.
 
+Related failure-class note: `docs/HOST_GLIBC_BYPASS_FAILURES.md` documents the
+host/glibc bypass class used by the targeted Delta fix.
+
 Last refreshed: 2026-06-24
 
 ## Summary
 
 | Category | Count | Meaning |
 | --- | ---: | --- |
-| Working: strict full-corpus pass | 51 | Passed in the latest strict 30s 57-binary corpus run with libc++ mapping enabled. |
-| Working: targeted pass pending full-corpus promotion | 3 | Passed targeted fixes but the 57-binary full corpus has not yet been rerun for promotion. |
-| Working: timeout-only targeted pass | 1 | Fails only under strict 30s QEMU timeout; targeted longer timeout passes. |
+| Working: external functional full-corpus pass | 57 | Passed in the latest 120s 57-binary corpus run with libc++ mapping enabled. |
+| Strict 30s subset | 51 | Also passed in the latest strict 30s 57-binary corpus run with libc++ mapping enabled. |
 | Working: Rust expansion pass | 13 | Passed the Rust expansion manifest after Loop B, including targeted repeat gates for fixed rows. |
-| Not working: functional blockers | 2 | Still fail targeted acceptance gates and need engineering work. |
+| Not working: functional blockers | 0 | No current functional blocker remains. |
 | Total visible binaries | 70 | 57 original external corpus rows plus 13 Rust expansion rows. |
 
-Functional completion: `68 / 70` working (`97.1%`).
+Functional completion: `70 / 70` working (`100.0%`).
 
 ## Unified Table
 
@@ -73,12 +75,12 @@ Functional completion: `68 / 70` working (`97.1%`).
 | `duckdb` | external-57 | WORKING-strict | Passed full corpus with opt-in libc++ mapping. |
 | `protoc` | external-57 | WORKING-strict | Passed after native Mach-O `__eh_frame` is served by `_dl_find_object`. |
 | `nvim` | external-57 | WORKING-strict | Passed after `ioctl(FIONBIO)` stack-argument thunk and native Mach-O `__eh_frame` hook-only registration. |
-| `node` | external-57 | WORKING-timeout-120 | Targeted `MACHGATE_EXTERNAL_TIMEOUT=120` run passes; strict 30s QEMU full-corpus run still times out. Not an active functional blocker. |
-| `tilt` | external-57 | WORKING-targeted | Targeted pass in `loop-h-tilt-pthread-kill-attempt1`; pending full 57-binary rerun for promotion. |
-| `bun` | external-57 | WORKING-targeted | Targeted pass in `bun-loop-h-attempt1-tpidr-rt`; pending full 57-binary rerun for promotion. |
-| `nu` | external-57 | WORKING-targeted | Targeted pass in `loop-i-nu-tlv-x1-attempt1`; pending full 57-binary rerun for promotion. |
-| `delta` | external-57 | NOT-WORKING | Helper-thread teardown crash. Best Loop L candidate reached `1 / 5`, not the `5 / 5` acceptance gate. Current evidence: tiny helper `mmap(NULL,384)` / `munmap(addr,4096)` bypasses shim and syscall gate; `EINTR` correlates with `SIGSEGV`. |
-| `packer` | external-57 | NOT-WORKING | Process/fork-exec handoff still exits status `2`. Raw/shim write paths no longer show child `SIGPIPE`; remaining blocker is later Go process/wait/runtime timing after pipe/fork/wait activity. |
+| `node` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`; strict 30s QEMU full-corpus run still times out. Not an active functional blocker. |
+| `tilt` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`; original targeted fix was `loop-h-tilt-pthread-kill-attempt1`. |
+| `bun` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`; original targeted fix was `bun-loop-h-attempt1-tpidr-rt`. |
+| `nu` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`; original targeted fix was `loop-i-nu-tlv-x1-attempt1`. |
+| `delta` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120` and targeted `5 / 5` in `loop-m-delta-vm-interpose-attempt{1..5}` after adding `libmachgate_vm_interpose.so` and loader re-exec with `LD_PRELOAD`. The fix catches host/glibc `mmap` / `munmap` paths that bypass imported libSystem symbols and routes them through the shared Darwin VM tracker. |
+| `packer` | external-57 | WORKING-functional120 | Passed integrated full corpus `full-loop-2026-06-24-Q-functional120`, targeted `5 / 5` in `loop-q4-packer-sigchld-production-attempt{1..5}`, and reconfirmed `5 / 5` in `loop-q6-packer-post-unitfix-attempt{1..5}`. The accepted fix keeps host Linux `SIGCHLD` at default for guest Darwin `sigaction(SIGCHLD, ...)`, avoiding delivery of Linux signal `17` into Darwin Go code expecting signal `20`; blocking `wait4` still carries child status. |
 | `xh` | rust-expansion | WORKING-rust | Passed clean repeats; classified pass-surface due optional unresolved bindings. |
 | `uv` | rust-expansion | WORKING-rust | Passed clean repeats; classified pass-surface due optional unresolved bindings. |
 | `mise` | rust-expansion | WORKING-rust | Passed targeted `5 / 5` after Darwin `F_DUPFD_CLOEXEC`, kqueue aliasing, `EV_RECEIPT`, and `EVFILT_USER` fixes. |
@@ -95,15 +97,9 @@ Functional completion: `68 / 70` working (`97.1%`).
 
 ## Action Queue
 
-1. Run the full 57-binary corpus with `MACHGATE_EXTERNAL_MAP_LIBCXX=1` to
-   promote `tilt`, `bun`, and `nu` from targeted pass to strict full-corpus
-   pass.
-2. Continue `delta` with focus on the helper-thread tiny mapping
-   `munmap(...,4096)` path that bypasses both the syscall gate and shim.
-3. Continue `packer` past the fixed SIGPIPE class into Go process/wait/runtime
-   timing.
-4. Treat `node` strict 30s startup as timeout tuning unless strict 30s is a
+1. Treat `node` strict 30s startup as timeout tuning unless strict 30s is a
    release gate.
+2. Optional: rerun strict 30s full corpus after startup-cost work.
 
 ## Rust Expansion Fix Details
 

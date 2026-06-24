@@ -11,6 +11,7 @@ option(BUILD_TESTS "Build test fixtures" ON)
 
 set(MACHGATE_SOURCES
     src/machismo.c
+    src/vm_interpose_loader.c
     src/commpage.c
     src/resolver.c
     src/trampoline.c
@@ -46,6 +47,19 @@ target_compile_definitions(machgate PRIVATE
 )
 target_link_libraries(machgate PRIVATE dl rt pthread m)
 target_link_options(machgate PRIVATE -rdynamic)
+
+# --- libmachgate_vm_interpose.so ---
+
+add_library(vm_interpose SHARED
+    src/vm_interpose.c
+)
+set_target_properties(vm_interpose PROPERTIES
+    OUTPUT_NAME "machgate_vm_interpose"
+    PREFIX "lib"
+)
+target_compile_options(vm_interpose PRIVATE -Wall -O2 -g)
+target_compile_definitions(vm_interpose PRIVATE _GNU_SOURCE)
+target_link_libraries(vm_interpose PRIVATE dl)
 
 # --- libsystem_shim.so ---
 
@@ -110,6 +124,7 @@ endif()
 # --- install ---
 
 install(TARGETS machgate RUNTIME DESTINATION bin)
+install(TARGETS vm_interpose LIBRARY DESTINATION lib)
 install(TARGETS system_shim LIBRARY DESTINATION lib)
 if(BUILD_WRAPGEN)
     install(TARGETS wrapgen RUNTIME DESTINATION bin)

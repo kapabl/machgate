@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -143,6 +144,31 @@
 #define DARWIN_SYS_sys_ulock_wait       515
 #define DARWIN_SYS_sys_ulock_wake       516
 #define DARWIN_SYS_fclonefileat         517
+
+struct darwin_timeval_range_400_plus {
+	int64_t tv_sec;
+	int32_t tv_usec;
+	int32_t pad;
+};
+
+struct darwin_rusage_range_400_plus {
+	struct darwin_timeval_range_400_plus ru_utime;
+	struct darwin_timeval_range_400_plus ru_stime;
+	int64_t ru_maxrss;
+	int64_t ru_ixrss;
+	int64_t ru_idrss;
+	int64_t ru_isrss;
+	int64_t ru_minflt;
+	int64_t ru_majflt;
+	int64_t ru_nswap;
+	int64_t ru_inblock;
+	int64_t ru_oublock;
+	int64_t ru_msgsnd;
+	int64_t ru_msgrcv;
+	int64_t ru_nsignals;
+	int64_t ru_nvcsw;
+	int64_t ru_nivcsw;
+};
 #define DARWIN_SYS_fs_snapshot          518
 #define DARWIN_SYS_terminate_with_payload 520
 #define DARWIN_SYS_abort_with_payload   521
@@ -432,12 +458,6 @@
 #define MACHGATE_FILEPORT_BASE 0x4f000000u
 #define MACHGATE_FILEPORT_MAX 64
 #define MACHGATE_KQUEUE_WORKLOOP_MAX 64
-
-struct darwin_timeval_range_400_plus {
-	int64_t tv_sec;
-	int32_t tv_usec;
-	int32_t __pad;
-};
 
 struct darwin_mac_label_ref_range_400_plus {
 	uint64_t buffer_length;
@@ -3506,7 +3526,7 @@ static long raw_select(int nfds, fd_set* readfds, fd_set* writefds,
 	if (result >= 0 && darwin_timeout) {
 		darwin_timeout->tv_sec = (int64_t)timeout.tv_sec;
 		darwin_timeout->tv_usec = (int32_t)timeout.tv_usec;
-		darwin_timeout->__pad = 0;
+		darwin_timeout->pad = 0;
 	}
 	return result;
 #else

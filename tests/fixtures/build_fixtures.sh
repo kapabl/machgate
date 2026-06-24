@@ -51,6 +51,12 @@ echo "  Built darwin_write_stdout"
 rm -f darwin_execve_exit42.o
 echo "  Built darwin_execve_exit42"
 
+# --- darwin_panicwrap_self_reexec: static arm64 Mach-O, panicwrap-shaped fork/reexec ---
+"$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj -o darwin_panicwrap_self_reexec.o darwin_panicwrap_self_reexec.s
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 -o darwin_panicwrap_self_reexec -e _main darwin_panicwrap_self_reexec.o
+rm -f darwin_panicwrap_self_reexec.o
+echo "  Built darwin_panicwrap_self_reexec"
+
 # --- darwin_read_close: static arm64 Mach-O, Darwin read + close ---
 "$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj -o darwin_read_close.o darwin_read_close.s
 "$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 -o darwin_read_close -e _main darwin_read_close.o

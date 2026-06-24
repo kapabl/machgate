@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -66,21 +67,30 @@ struct syscall_gate_pool {
 
 static struct syscall_gate_pool gate_pools[SYSCALL_GATE_MAX_POOLS];
 static size_t gate_pool_count;
-static pid_t syscall_gate_process_pid;
 
-
-
-__attribute__((constructor))
-static void init_syscall_gate_process_pid(void)
+static FILE* syscall_gate_open_trace_file(void)
 {
-	syscall_gate_process_pid = (pid_t)syscall(SYS_getpid);
+	const char* trace_file = getenv("MACHGATE_EXECVE_TRACE_FILE");
+
+	if (!trace_file || !*trace_file)
+		return NULL;
+	return fopen(trace_file, "a");
 }
 
-static int syscall_gate_in_fork_child(void)
+static void trace_syscall_gate_exit(struct syscall_gate_state* state,
+                                    const char* name,
+                                    int status)
 {
-	if (syscall_gate_process_pid == 0)
-		return 0;
-	return (pid_t)syscall(SYS_getpid) != syscall_gate_process_pid;
+	FILE* trace_file = syscall_gate_open_trace_file();
+
+	if (!trace_file)
+		return;
+	fprintf(trace_file,
+	        "syscall_gate: %s self=%d tid=%d ppid=%d status=%d pc=%p lr=%p x16=%llu\n",
+	        name, (int)syscall(SYS_getpid), (int)syscall(SYS_gettid),
+	        (int)syscall(SYS_getppid), status, (void*)state->pc,
+	        (void*)state->x30, (unsigned long long)state->x[16]);
+	fclose(trace_file);
 }
 
 static uint32_t enc_stp_sp(int rt, int rt2, int offset)
@@ -255,11 +265,6 @@ static long write_syscall_with_sigpipe_guard(long syscall_number, int fd,
 	struct sigaction old_action;
 	int changed = 0;
 
-	if (!syscall_gate_in_fork_child()) {
-		errno = 0;
-		return syscall(syscall_number, fd, buffer, size_or_count);
-	}
-
 	memset(&ignore_action, 0, sizeof(ignore_action));
 	ignore_action.sa_handler = SIG_IGN;
 	sigemptyset(&ignore_action.sa_mask);
@@ -270,7 +275,7 @@ static long write_syscall_with_sigpipe_guard(long syscall_number, int fd,
 	long result = syscall(syscall_number, fd, buffer, size_or_count);
 	int saved_errno = errno;
 
-	if (changed)
+	if (changed && old_action.sa_handler != SIG_DFL)
 		sigaction(SIGPIPE, &old_action, NULL);
 
 	errno = saved_errno;
@@ -292,6 +297,7 @@ void syscall_gate_dispatch(struct syscall_gate_state* state)
 {
 	switch (state->x[16]) {
 	case DARWIN_SYS_exit:
+		trace_syscall_gate_exit(state, "exit", (int)state->x[0]);
 		syscall(SYS_exit_group, (int)state->x[0]);
 		_exit((int)state->x[0]);
 	case DARWIN_SYS_read: {

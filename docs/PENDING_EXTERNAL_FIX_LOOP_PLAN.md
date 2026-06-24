@@ -4,13 +4,14 @@ This plan is for finishing the currently non-passing external ARM64 macOS CLI bi
 
 ## Current Baseline
 
-Last refreshed: 2026-06-23.
+Last refreshed: 2026-06-24.
 
 - Corpus: 57 unique external ARM64 macOS CLI binaries
+- Latest integrated functional full run with `MACHGATE_EXTERNAL_TIMEOUT=120`: 57 / 57
 - Latest strict full run with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 51 / 57
-- Latest functional count after classifying `node` timeout plus targeted `tilt`, `bun`, and `nu`: 55 / 57
+- Latest functional count after classifying `node` timeout plus targeted `tilt`, `bun`, `nu`, `delta`, and `packer`: 57 / 57
 - Strict full-run non-passes: 6 / 57
-- Functional blockers after `node` timeout plus targeted `tilt`, `bun`, and `nu` classification: 2 / 57
+- Functional blockers after `node` timeout plus targeted `tilt`, `bun`, `nu`, `delta`, and `packer` classification: 0 / 57
 - Previous passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 49 / 57
 - Previous not passing with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`: 8 / 57
 - Passing without libc++ opt-in: 45 / 57
@@ -19,12 +20,19 @@ Last refreshed: 2026-06-23.
 - Canonical manifest: 19 / 19 passing
 - Latest strict full-run logs: `tests/external/logs/full-loop-2026-06-23-N-loop-g-current/`
 - Latest strict full-run work dir: `tests/external/work/full-loop-2026-06-23-N-loop-g-current/`
+- Latest integrated functional full-run logs: `tests/external/logs/full-loop-2026-06-24-Q-functional120/`
+- Latest integrated functional full-run work dir: `tests/external/work/full-loop-2026-06-24-Q-functional120/`
 - `node` timeout classification logs: `tests/external/logs/loop-g-node-long120/`
 - `node` Loop H strict cleanup logs: `tests/external/logs/loop-h-node-strict30-attempt1/`
 - `node` Loop H 120s confirmation logs: `tests/external/logs/loop-h-node-long120-after-surface/`
 - `bun` Loop H TPIDR fix logs: `tests/external/logs/bun-loop-h-attempt1-tpidr-rt/`
 - `bun` Loop H guard logs: `tests/external/logs/bun-loop-h-tpidr-guards/`
-- `packer` Loop I raw write guard logs: `tests/external/logs/loop-i-packer-raw-write-guard-attempt4/`
+- `packer` Loop Q SIGCHLD fix logs:
+  - `tests/external/logs/loop-q2-sigchld-default-experiment/`
+  - `tests/external/logs/loop-q3-sigchld-darwin-handler/`
+  - `tests/external/logs/loop-q4-packer-sigchld-production-attempt{1..5}/`
+  - `tests/external/logs/loop-q5-sigchld-guards/`
+  - `tests/external/logs/loop-q6-packer-post-unitfix-attempt{1..5}/`
 - `nu` Loop I TLV confirmation after Delta backout: `tests/external/logs/loop-i-nu-tlv-x1-post-delta-backout/`
 - `delta` Loop I failed attempts:
   - `tests/external/logs/loop-i-delta-munmap-noeintr-attempt1-*/`
@@ -38,17 +46,563 @@ Last refreshed: 2026-06-23.
 - Loop J Grok reports:
   - `/tmp/machgate-agent-reports/loop-j/grok-delta-bestof6.txt`
   - `/tmp/machgate-agent-reports/loop-j/grok-packer-post-guestpath-bestof4.txt`
-- Agent status: Loop G/H/I Codex workers complete; Loop J Delta explorers complete; Loop J Grok reports collected.
+- Loop P reports:
+  - `/tmp/machgate-agent-reports/loop-p/p3-errno-import-audit/report.md`
+  - `/tmp/machgate-agent-reports/loop-p/p5-source-runtime-correlator.md`
+- Loop P/Q latest Packer logs:
+  - `tests/external/logs/loop-p-main-wait-status-bytes-attempt1/`
+  - `tests/external/logs/loop-q-packer-checkpoint-disable-attempt1/`
+  - `tests/external/logs/loop-q-packer-signal-dispatch-attempt1/`
+- Loop Q local Go compiler comparison scratch:
+  - `/tmp/machgate-go-compare/main.go`
+  - `/tmp/machgate-go-compare/wait-darwin-arm64`
+  - `/tmp/machgate-go-compare/wait-linux-arm64`
+- Agent status: Loop G/H/I Codex workers complete; Loop J Delta explorers complete; Loop J Grok reports collected; Loop P P1-P5 current findings complete; Loop Q complete.
 
 Current strict full-run non-passes:
 
 `delta`, `nu`, `tilt`, `packer`, `node`, `bun`.
 
-Current functional blockers, excluding the classified `node` timeout artifact and targeted `tilt` / `bun` / `nu` passes:
+Current functional blockers, excluding the classified `node` timeout artifact and targeted `tilt` / `bun` / `nu` / `delta` / `packer` passes:
 
-`delta`, `packer`.
+None.
 
-Loop G promoted `terraform` to the full-corpus passing set. Loop H has targeted `tilt` and `bun` passes pending full-corpus promotion. Loop I has a targeted `nu` pass pending full-corpus promotion. `nomad`, `cmake`, `nvim`, and `protoc` remain passing.
+Loop G promoted `terraform` to the full-corpus passing set. Loop Q's integrated functional run promotes the targeted `tilt`, `bun`, `nu`, `delta`, and `packer` fixes under the 120s full-corpus gate. `nomad`, `cmake`, `nvim`, and `protoc` remain passing.
+
+## Loop 2026-06-24-M Active Status
+
+Started: 2026-06-24.
+
+Owner scope: accept or reject the Grok best-of-9 Delta candidate in the main checkout.
+
+- [x] Grok best-of-9 hit xAI `429 Too Many Requests` rate limits and produced noisy parallel candidate output, but candidate families 1, 7, and 9 converged on the same useful direction: catch host/glibc `mmap` / `munmap` paths that bypass imported libSystem symbols.
+- [x] Accepted the narrow candidate 7 strategy after local review, with one production correction: the loader now searches both the build-tree executable directory and installed `../lib/` layout for `libmachgate_vm_interpose.so`.
+- [x] Added `libmachgate_vm_interpose.so`, a one-time loader re-exec with `LD_PRELOAD`, and `LD_PRELOAD` preservation across Mach-O guest re-exec.
+- [x] Targeted Delta gate `loop-m-delta-vm-interpose-attempt{1..5}`: `5 / 5` passing, stdout `delta 0.19.2`.
+- [x] Targeted Packer check after the Delta VM interposer:
+  `loop-m-packer-current-after-delta` remains `0 / 1`, status `2`.
+  The normal run has clean import resolution (`155 resolved, 0 failed`),
+  reaches `_main`, and writes no version output. The diagnostic qemu trace
+  still ends in repeated `ppoll` activity followed by harness teardown and
+  child `SIGSEGV` status `11`, so the Delta host-VM interposer did not move
+  Packer's process/wait/runtime class.
+- [x] Packer source context downloaded for evidence-only research:
+  `.source-context/packer-1.15.4` at upstream tag `v1.15.4`
+  (`9f42be3`) and `.source-context/panicwrap-1.0.0` at upstream tag
+  `v1.0.0` (`b3f3dc3`). These directories are excluded by local git config
+  and are not vendored.
+- [x] Source finding: Packer's `--version` is not a direct print from the
+  initial process. `.source-context/packer-1.15.4/main.go:41-118` sets up
+  `panicwrap`, a temp log file, an output pipe, and then calls
+  `panicwrap.Wrap()` before normal command dispatch. The `--version` shortcut
+  only happens later in `.source-context/packer-1.15.4/main.go:254-262`, inside
+  the wrapped child path.
+- [x] Source finding: `panicwrap` performs the self-reexec. In
+  `.source-context/panicwrap-1.0.0/panicwrap.go:118-169`, it calls
+  `os.Executable()`, builds `exec.Command(exePath, os.Args[1:]...)`, adds the
+  `PACKER_WRAP_COOKIE`, wires stdin/stdout/stderr, passes extra fd handles on
+  non-Windows hosts, then starts the child. Lines `196-215` wait for the child
+  and convert child exit status/panic output into the parent result.
+- [x] Trace alignment: `loop-m-packer-current-after-delta/packer.qemu-strace`
+  shows this same pattern: parent clone, child host `execve("/work/build-arm64/machgate", ... "packer", "--version")`, repeated `/proc/self/exe` reads, then later pipe/dup/wait activity and `ppoll` storm. This supports focusing the next Packer loop on panicwrap/self-reexec/fd/signal semantics before external plugin discovery.
+- [x] Regression suite after the patch: `28 / 28` passing with `BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh`.
+
+Loop M stop rule status:
+
+- Delta met the 5/5 targeted acceptance gate. Superseded by Loop Q: the integrated 120s full-corpus run promoted Delta.
+- Packer is now the only current functional blocker in the visible 57-binary external corpus.
+
+## Loop 2026-06-24-N Active Status
+
+Started: 2026-06-24.
+
+Owner scope: Packer `--version` status `2` after the Delta VM interposer, using
+the new Packer and panicwrap source context.
+
+Core source evidence:
+
+- Packer source: `.source-context/packer-1.15.4`, tag `v1.15.4`, commit
+  `9f42be3`.
+- panicwrap source: `.source-context/panicwrap-1.0.0`, tag `v1.0.0`, commit
+  `b3f3dc3`.
+- `packer --version` still enters Packer's `panicwrap` self-reexec path before
+  the version shortcut. The shortcut is later in
+  `.source-context/packer-1.15.4/main.go:254-262`.
+- `panicwrap` self-reexec uses `os.Executable()`, `exec.Command(exePath,
+  os.Args[1:]...)`, `PACKER_WRAP_COOKIE`, stdin/stdout/stderr piping, extra fd
+  passing, signal forwarding, and child wait logic.
+- Current live evidence: `tests/external/logs/loop-m-packer-current-after-delta/`
+  remains `0 / 1`, status `2`, clean imports, reaches `_main`, no version
+  output.
+
+Loop N exit criteria:
+
+- Packer targeted acceptance: `packer --version` passes `5 / 5` with stdout
+  containing `Packer v` or the expected version text.
+- Regression acceptance: normal ARM64 project suite remains `28 / 28` passing.
+- Full-corpus promotion is separate and only happens after the targeted Packer
+  gate and regression pass.
+
+Loop N stop rules:
+
+- Each candidate gets at most 5 implementation/test attempts.
+- If a candidate does not improve the trace class after 5 attempts, mark it
+  rejected with logs and move to the next candidate.
+- Do not relabel Packer as fixed from source reasoning only; require the
+  targeted runtime gate.
+
+Loop N agents:
+
+- [~] Agent N1 panicwrap exec path (`019ef881-d14f-7dc2-bc0e-7b69f7fc18f8`):
+  fork-safe `execve` path, `/proc/self/exe` resolution, `PACKER_WRAP_COOKIE`,
+  env preservation, and self-reexec trace.
+- [x] Agent N2 fd/pipe semantics (`019ef884-22f0-78b3-b0ba-fe2287e299d6`):
+  `panicwrap` stdout/stderr pipes, `ExtraFiles`, `dup3`, close-on-exec,
+  nonblocking fd flags, and Go forkExec error-pipe behavior.
+- [~] Agent N3 signal/wait semantics (`019ef884-2412-7ab2-b14a-3661705c0fe5`):
+  `SIGTERM` forwarding, `SIGCHLD`, `wait4`, `ppoll` storm, Go runtime signal
+  state, and Darwin-vs-Linux signal translations around `panicwrap`.
+- [~] Agent N4 focused fixture (`019ef884-26be-74f3-aa8c-a4426dfd42b9`): add
+  or propose a minimal Mach-O fixture that reproduces Packer's
+  self-reexec/panicwrap shape without the full Packer binary.
+- [~] Agent N5 source/runtime correlation (`019ef884-2b0f-7cf0-bd7f-5da38519d8e3`):
+  map Packer/panicwrap source steps to exact qemu trace line ranges and identify
+  the first impossible or missing transition.
+
+Loop N external read-only helpers:
+
+- [~] Grok best-of-9 Packer diagnosis: PID recorded in
+  `/tmp/machgate-agent-reports/loop-n/grok-packer-bestof9.pid`, report target
+  `/tmp/machgate-agent-reports/loop-n/grok-packer-bestof9.txt`.
+- [~] Claude fd/wait diagnosis: PID recorded in
+  `/tmp/machgate-agent-reports/loop-n/claude-packer-fd-wait.pid`, report target
+  `/tmp/machgate-agent-reports/loop-n/claude-packer-fd-wait.txt`.
+- [~] Claude source/trace diagnosis: PID recorded in
+  `/tmp/machgate-agent-reports/loop-n/claude-packer-source-trace.pid`, report
+  target `/tmp/machgate-agent-reports/loop-n/claude-packer-source-trace.txt`.
+
+Loop N main-thread evidence:
+
+- [x] Packer imports relevant to panicwrap are visible in the Mach-O undefined
+  list: `_fork`, `_execve`, `_pipe`, `_dup2`, `_fcntl`, and `_wait4`.
+- [x] The current shim owns `execve`, `pipe`, `pipe2`, `dup3`, `fcntl`, and
+  `wait4`; `_wait4` is therefore a shim-behavior question, not a missing-export
+  question.
+- [x] The current qemu trace window around
+  `tests/external/logs/loop-m-packer-current-after-delta/packer.qemu-strace`
+  lines around `6204-6678` matches Go/panicwrap `forkExec`: parent creates
+  pipes, child resets signals, duplicates fd `6` to stdout and fd `8` to
+  stderr, parent closes the error pipe, then a thread calls `wait4(134, ...)`.
+  The suspicious transition is no clean visible child `execve` completion or
+  version output after that fd shuffle; the next code experiment should validate
+  fd/pipe/wait semantics before plugin or config discovery.
+- [x] Main-thread diagnostic `loop-n-packer-trace-main` with
+  `MACHGATE_TRACE_SHIM=1`, `MACHGATE_TRACE_EXECVE=1`, and
+  `MACHGATE_TRACE_SYSCALL=1` remains `0 / 1`, status `2`. It shows clean
+  panicwrap pipe/fcntl setup, then repeated `libsystem_shim: kevent(...) -> 5`
+  after the child/fd handoff. This makes the active target kqueue readiness or
+  child wait/event cleanup, not import resolution.
+- [x] Agent N5 source/runtime correlation completed: it mapped
+  `.source-context/panicwrap-1.0.0/panicwrap.go:155-167` to the trace window
+  around `pipe2`/`clone`/`dup3` and identified the first missing transition as
+  no child exec/third loader startup after the fork child fd shuffle.
+- [x] Agent N2 classification: fd/pipe/forkExec setup is not the current Packer
+  blocker. Diagnostic `tests/external/logs/loop-n-n2-baseline-logtrace/`
+  captured the wrapped child after fd remap duplicating extra files to fd
+  `3/4/5`, seeing stdout/stderr close-on-exec flags clear (`fd1-flags '0'`,
+  `fd2-flags '0'`), preserving `PACKER_WRAP_COOKIE`, `LD_PRELOAD`,
+  `LD_LIBRARY_PATH`, and `MACHISMO_CONFIG`, and host-execing
+  `/work/build-arm64/machgate`. Candidate
+  `tests/external/logs/loop-n-n2-dup-shim-attempt1/` added/exported narrow
+  Darwin-shaped `dup` and `dup2` wrappers, built cleanly, but the one-row
+  Packer gate remained `0 / 1`, status `2`, stdout empty, with the same
+  `ppoll(...)=5` storm after the child handoff. Treat remaining work as N3/N5
+  event/wait or child-runtime correlation, not fd layout or close-on-exec.
+- [x] Agent N1 forced-cookie probes show the wrapped child path itself is viable:
+  `tests/external/logs/loop-2026-06-24-N-direct-cookie/` and
+  `tests/external/logs/loop-2026-06-24-N-direct-cookie-ldpreload/` both print
+  `Packer v1.15.4`. The no-cookie control
+  `tests/external/logs/loop-2026-06-24-N-direct-no-cookie-log/` prints no
+  version. This narrows the functional blocker to parent `panicwrap`
+  orchestration: child launch, child output copying, child wait, or kqueue/event
+  cleanup around those paths.
+
+## Loop 2026-06-24-O Active Status
+
+Started: 2026-06-24.
+
+Owner scope: finish the remaining Packer `panicwrap` parent orchestration
+failure using the Loop N source/trace evidence.
+
+Current evidence entering Loop O:
+
+- Packer direct child path is viable: forced `PACKER_WRAP_COOKIE` runs in
+  `tests/external/logs/loop-2026-06-24-N-direct-cookie/` and
+  `tests/external/logs/loop-2026-06-24-N-direct-cookie-ldpreload/` print
+  `Packer v1.15.4`.
+- Normal parent path remains failing, but the failure class has moved. Older
+  no-cookie controls such as
+  `tests/external/logs/loop-2026-06-24-N-direct-no-cookie-log/` and
+  `tests/external/logs/loop-n-packer-trace-main/` printed no version. Current
+  main-thread probes after the shim read errno fix now print `Packer v1.15.4`;
+  the wrapped child exits `0`, imported shim `wait4` observes child status `0`,
+  but the panicwrap parent still exits status `2`.
+- Packer source says `--version` happens after `panicwrap.Wrap()`:
+  `.source-context/packer-1.15.4/main.go:41-118` sets up panicwrap and
+  `.source-context/packer-1.15.4/main.go:254-262` prints the version only after
+  the wrapped child path is active.
+- Panicwrap source says the parent path uses `os.Executable()`,
+  `exec.Command(exePath, os.Args[1:]...)`, `PACKER_WRAP_COOKIE`,
+  stdin/stdout/stderr pipes, `ExtraFiles`, `Start`, and `Wait`:
+  `.source-context/panicwrap-1.0.0/panicwrap.go:118-169` and `196-215`.
+
+Loop O exit criteria:
+
+- Targeted Packer gate: `packer --version` passes `5 / 5`, with stdout
+  containing `Packer v1.15.4`.
+- Focused fixture gate: `BUILD_DIR=/work/build-arm64
+  bash tests/repro_panicwrap_self_reexec.sh` passes if the fixture remains in
+  the tree.
+- Regression gate: normal ARM64 suite remains `28 / 28` passing with
+  `BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh`.
+
+Loop O stop rules:
+
+- Each candidate gets at most 5 implementation/test attempts.
+- If a candidate does not improve the trace class after 5 attempts, mark it
+  rejected with logs and move to the next candidate.
+- Do not classify Packer as fixed from source reasoning only; require the
+  targeted runtime gate.
+
+Loop O Codex agents:
+
+- [~] O1 fixture worker (`019ef895-1fa4-7fa0-bfa5-0a60db8ed907`): owns the
+  focused `darwin_panicwrap_self_reexec` fixture and reproduction script only.
+- [~] O2 kqueue worker (`019ef895-20cb-7202-adb7-7a063d5fa87a`): owns
+  `src/shim/libsystem_shim.c` kqueue/kevent behavior and Packer kqueue logs.
+- [~] O3 wait/signal worker (`019ef895-2357-75e1-a634-5e1bdff42409`): owns
+  `src/shim/libsystem_shim.c` wait4/waitpid/signal behavior.
+- [~] O4 exec/reexec worker (`019ef895-271a-7f92-a781-6424adc84d8f`): owns
+  `src/syscall/execve_reexec.c` and exec/reexec tracing.
+- [x] O5 read-only classifier (`019ef895-2aa2-78e2-ac15-400e79614d60`):
+  classifies the current failure from source and logs without edits.
+
+Loop O external helpers:
+
+- [~] Grok best-of-9 Packer loop: PID in
+  `/tmp/machgate-agent-reports/loop-o/grok-packer-bestof9.pid`, report target
+  `/tmp/machgate-agent-reports/loop-o/grok-packer-bestof9.txt`.
+- [~] Claude wait/kqueue loop: PID in
+  `/tmp/machgate-agent-reports/loop-o/claude-wait-kqueue.pid`, report target
+  `/tmp/machgate-agent-reports/loop-o/claude-wait-kqueue.txt`.
+- [~] Claude fixture loop: PID in
+  `/tmp/machgate-agent-reports/loop-o/claude-fixture.pid`, report target
+  `/tmp/machgate-agent-reports/loop-o/claude-fixture.txt`.
+
+Loop O live notes:
+
+- [x] Stale Loop N Codex handles were closed before spawning Loop O; useful
+  Loop N artifacts remain under `tests/external/logs/loop-n*`.
+- [x] Loop O agents and external helpers launched with the forced-cookie
+  evidence and source paths above.
+- [x] Main-thread build blocker fixed: removed a duplicate
+  `darwin_timeval_range_400_plus` definition in
+  `src/syscall/syscall_range_400_plus.c`. Fresh ARM64 Docker build now links
+  `machgate` successfully. Failed-build log:
+  `tests/external/logs/loop-o-main-fixture-attempt1/build.log`; fixed-build
+  log: `tests/external/logs/loop-o-main-fixture-attempt2/build.log`.
+- [ ] Focused fixture is not yet trustworthy:
+  `tests/external/logs/loop-o-main-fixture-attempt2/` builds successfully but
+  `tests/repro_panicwrap_self_reexec.sh` still exits `139` before producing
+  child output.
+- [x] O5 classification: normal Packer parent path reaches outer `_main` and
+  fork/fd setup, but there is no clean inner `execve`, second loader startup, or
+  second `_main` in the failing trace. Forced-cookie runs prove the child-side
+  Packer CLI path itself works. O5 recommends raw `SYS_write` tracepoints inside
+  `machgate_execve_macho_guest_forksafe()` to determine whether the fork child
+  reaches the reexec helper and exactly where it stops.
+- [x] O4 exec/reexec classification: attempt
+  `tests/external/logs/loop-o4-exec-attempt1/` was an invalid x86_64 host run
+  outside the ARM64 Docker/QEMU environment and failed before MachGate with
+  missing `/lib/ld-linux-aarch64.so.1`. Attempt
+  `tests/external/logs/loop-o4-exec-attempt2/` reproduced current Packer
+  status `2`, stdout empty, under Docker with `MACHGATE_TRACE_EXECVE=1` and
+  qemu-strace. Attempt `tests/external/logs/loop-o4-exec-attempt3/` added
+  `PACKER_LOG=1` and proved the exec/reexec handoff is clean: the panicwrap
+  child enters `machgate_execve_macho_guest_forksafe()`, resolves the guest path
+  to `/work/tests/external/work/loop-o4-exec-attempt3/packer`, builds argv as
+  `["/work/build-arm64/machgate", "/work/tests/external/work/loop-o4-exec-attempt3/packer", "--version"]`,
+  sees fd 1 and fd 2 close-on-exec flags clear, preserves
+  `PACKER_WRAP_COOKIE`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and
+  `MACHISMO_CONFIG`, then host-execs `/work/build-arm64/machgate`.
+- [x] O4 stop rule: stopped after attempt 3 with no code change in
+  `src/syscall/execve_reexec.c`. Qemu-strace for attempt 3 shows the post-exec
+  pid loading `libmachgate_vm_interpose.so` and host libc, reading
+  `/proc/self/exe`, opening the guest Packer Mach-O, reading
+  `machismo.conf`, and writing
+  `machismo: loaded config from /work/tests/external/work/loop-o4-exec-attempt3/config/machismo.conf`.
+  Exec/reexec is therefore proven not to be the current Packer blocker; next
+  work should move into the third loader / wrapped child runtime path after
+  config load.
+- [x] O1 attempt 1 `loop-o1-fixture-attempt1`: Docker ARM64 fixture build
+  passed, but the focused repro failed with status `139`. The fixture crashed
+  at startup before parent orchestration because it assumed LC_MAIN register
+  arguments while this linked fixture enters through the LC_UNIXTHREAD stack
+  path. Logs: `tests/external/logs/loop-o1-fixture-attempt1/`.
+- [x] O1 attempt 2 `loop-o1-fixture-attempt2`: Docker ARM64 fixture build
+  passed, but the focused repro still failed with status `139`. Signal trace in
+  `tests/external/logs/loop-o1-fixture-diagnostic-stack/` showed the crash came
+  from the parent-only cookie scan walking past env entries into non-pointer
+  stack data before any fork/exec behavior was tested. Logs:
+  `tests/external/logs/loop-o1-fixture-attempt2/`.
+- [x] O1 attempt 3 `loop-o1-fixture-attempt3`: Docker ARM64 fixture build
+  passed, and the focused repro advanced past startup but timed out with status
+  `124`. Review found the fixture duplicated extra fds `3/4/5` before preserving
+  pipe write ends, so pipe fds allocated in that range could be closed or
+  repurposed before child reexec. Logs:
+  `tests/external/logs/loop-o1-fixture-attempt3/`.
+- [x] O1 attempt 4 `loop-o1-fixture-attempt4`: Docker ARM64 fixture build
+  passed, but the focused repro still timed out with status `124`. QEMU
+  diagnostic `tests/external/logs/loop-o1-fixture-diagnostic-qemu-strace/`
+  showed the child reached post-fork fd work while the parent waited; the next
+  fixture change drains child pipe output before `wait4`, matching panicwrap's
+  output-reader shape more closely. Logs:
+  `tests/external/logs/loop-o1-fixture-attempt4/`.
+- [x] O1 attempt 5 `loop-o1-fixture-attempt5`: Docker ARM64 fixture build
+  passed, but the focused repro still timed out with status `124`. Final QEMU
+  diagnostic `tests/external/logs/loop-o1-fixture-diagnostic-final-qemu-strace/`
+  shows the parent draining child stderr fd `5` after fork, but it never sees
+  the expected `child stderr ok\n` before timeout. Remaining blocker: the
+  reexeced child stays alive after post-fork fd setup and does not reach the
+  fixture's cookie-validated `child_main` output path within the timeout. Stop
+  rule reached after five failed O1 attempts.
+- [x] O2 attempt 1 `loop-o2-kqueue-attempt1`: ARM64 Docker build passed.
+  Changed `kevent` EV_CLEAR handling to keep registrations pollable while
+  suppressing duplicate readiness at event emission, and filled read/write
+  `kevent.data`. Targeted Packer stayed `0 / 1`, status `2`, stdout empty.
+  Trace class moved from the earlier repeated `kevent(...) -> 5` storm to
+  post-handoff `kevent(...) -> 0` starvation.
+- [x] O2 attempt 2 `loop-o2-kqueue-attempt2`: ARM64 Docker build passed.
+  Narrowed duplicate EV_CLEAR suppression to `EVFILT_WRITE` so pipe read/EOF
+  readiness remains visible. Targeted Packer stayed `0 / 1`, status `2`,
+  stdout empty. Trace class remained post-handoff `kevent(...) -> 0`
+  starvation; the only nonzero event was the initial Go runtime EVFILT_USER
+  wakeup before panicwrap pipe handoff.
+- [ ] O2 stopped before five kqueue code attempts because the current dirty
+  checkout no longer satisfies Loop N's forced-cookie prerequisite. Direct
+  `PACKER_WRAP_COOKIE=1` controls in
+  `tests/external/logs/loop-o2-forced-cookie-control/` and
+  `tests/external/logs/loop-o2-forced-cookie-control-trace/` crash with
+  SIGSEGV before `kqueue()` is reached. The visible concurrent non-kqueue
+  change is Darwin signal 7 mapping as `sigaction(7->0)`. Further kqueue-only
+  attempts cannot prove Packer until that child-path pre-kqueue regression is
+  resolved.
+- [x] O3 wait/signal attempt 1 `loop-o3-wait-attempt1`: full
+  `machgate system_shim` build was initially blocked by an unrelated duplicate
+  `darwin_timeval_range_400_plus` definition in
+  `src/syscall/syscall_range_400_plus.c`, so O3 rebuilt `system_shim` only
+  against the existing loader. Added a narrow signal cleanup so Darwin
+  `SIGEMT` 7 no longer aliases Linux `SIGBUS`, and Darwin-only signal mask bits
+  are skipped instead of adding Linux signal 0. Targeted Packer stayed `0/1`,
+  status `2`, stdout empty. Focused repro still failed `139` before useful
+  wait evidence because it lacked the dylib-map/TLV setup.
+- [x] O3 wait/signal attempt 2 `loop-o3-wait-attempt2`: tested delivering
+  Darwin `SIGURG` 16 through `pthread_kill` instead of suppressing it. Rejected:
+  Packer regressed to status `139`; qemu trace shows `tgkill(..., SIGURG)`
+  immediately followed by guest `SIGSEGV si_addr=NULL`.
+- [x] O3 wait/signal attempt 3 `loop-o3-wait-attempt3`: tested a dispatcher
+  that translated remapped Linux handler signums back to Darwin signums, then
+  delivered `SIGURG`. Rejected: Packer still regressed to status `139` after
+  `SIGURG`, so signum translation alone does not make Go async-preemption signal
+  delivery safe under the current signal context.
+- [x] O3 wait/signal attempt 4 `loop-o3-wait-attempt4`: kept the generalized
+  signal dispatcher but restored `SIGURG` suppression. Rejected: Packer still
+  failed with status `139`, so the dispatcher changed the runtime class even
+  without delivering `SIGURG`.
+- [x] O3 wait/signal attempt 5 `loop-o3-wait-attempt5`: backed out the
+  generalized dispatcher and retained only the low-risk `SIGEMT`/signal-mask
+  cleanup. Targeted Packer returned to the known `0/1`, status `2`, stdout
+  empty class. Final ARM64 Docker rerun after the retained patch built
+  `machgate system_shim` successfully, left the focused repro at timeout status
+  `124`, and left the regression suite at `27/28` with
+  `test_darwin_range_000_099` failing. Logs:
+  `tests/external/logs/loop-o3-wait-attempt{1..5}/`.
+- [x] O3 stop rule reached after five attempts. First incompatible
+  wait/signal behavior found: MachGate cannot safely deliver Go's Darwin
+  `SIGURG` preemption signal yet; direct delivery crashes the guest with
+  `SIGSEGV`, and even handler signum translation is insufficient. Current
+  retained code only prevents Darwin `SIGEMT` from aliasing Linux `SIGBUS` and
+  skips unbacked signal-mask bits. O3 did not edit kqueue code. The imported
+  shim `wait4` path did not produce useful trace lines in direct Packer runs;
+  qemu still shows wait activity, so remaining wait/status work may involve the
+  raw syscall-gateway `wait4`/`wait4_nocancel` path outside O3's file scope.
+- [x] Main-thread Packer progress after Loop O agent evidence: broadened
+  `SIGPIPE` protection for guest/shim writes, ignored host-process `SIGPIPE` at
+  loader startup, added raw `read` / `readv` shim exports, and translated Linux
+  `EAGAIN` to Darwin errno `35` for shim read/write failures. This fixed the
+  parent stdout pipe reader: `tests/external/logs/loop-o-main-shim-read-darwin-errno-attempt1/`
+  and `tests/external/logs/loop-o-main-fully-clean-after-read-errno-attempt1/`
+  now print `Packer v1.15.4`.
+- [x] Current Packer blocker after the read errno fix:
+  `tests/external/logs/loop-o-main-wait-only-after-read-errno-attempt1/` and
+  `tests/external/logs/loop-o-main-exit-caller-attempt1/` show the wrapped
+  child reaches `_exit status=0`; shim `wait4` reports `linux_status=0` and
+  `darwin_status=0`; the outer panicwrap parent still calls `_exit status=2`
+  from Go's exit trampoline (`caller=0x10007f388`). `GOTRACEBACK=all` in
+  `tests/external/logs/loop-o-main-gotraceback-attempt1/` produced no panic
+  text, so the remaining issue is an intentional parent-side Go/Packer result,
+  not a visible child crash.
+
+## Loop 2026-06-24-P Active Status
+
+Started: 2026-06-24.
+
+Owner scope: finish Packer by adding stronger loop checks around the remaining
+parent status `2` after child status `0`.
+
+Current entry evidence:
+
+- Normal `packer --version` now prints `Packer v1.15.4`.
+- The wrapped child reaches `_main`, exits `0`, and imported shim `wait4`
+  observes child status `0`.
+- The outer panicwrap parent still exits status `2`.
+- Current evidence logs:
+  - `tests/external/logs/loop-o-main-shim-read-darwin-errno-attempt1/`
+  - `tests/external/logs/loop-o-main-fully-clean-after-read-errno-attempt1/`
+  - `tests/external/logs/loop-o-main-wait-only-after-read-errno-attempt1/`
+  - `tests/external/logs/loop-o-main-exit-caller-attempt1/`
+
+Loop P required checks:
+
+- [x] Exit-status provenance: trace every guest-visible `exit`, `_exit`,
+  `exit_group`, raw Darwin exit syscall, shim `wait4` / `waitpid`, and raw
+  syscall-gateway `wait4` / `wait4_nocancel` result with pid, tid, status,
+  guest PC or caller PC, and whether the status came from parent or child.
+- [x] FD lifecycle graph: trace `pipe`, `dup`, `dup2`, `dup3`, `fcntl`,
+  `close`, `read`, `readv`, `write`, `writev`, and `kevent` registration /
+  delivery by pid, tid, and fd so the Packer panicwrap stdout/stderr pipes can
+  be reconstructed from creation to EOF/close.
+- [x] Errno translation audit: every shim function returning `-1` to Mach-O
+  code must leave Darwin errno, not Linux errno. Packer's stdout-copy progress
+  came from mapping Linux `EAGAIN=11` to Darwin `EAGAIN=35` in shim read paths.
+- [x] Imported-symbol ownership check: generate a per-binary table of imported
+  symbols and resolved targets (`libsystem_shim.so`, host libc/libpthread,
+  explicit stub, unresolved). Flag POSIX symbols that still resolve to host
+  libc where Darwin ABI, flags, structures, or errno differ.
+- [ ] Kqueue semantic fixtures: add or run small fixtures for pipe read
+  readiness, pipe EOF, `EV_CLEAR`, `EV_ONESHOT`, `EVFILT_PROC`, and `SIGCHLD`
+  where relevant before making broad kqueue changes from Packer alone.
+- [ ] Signal-state snapshots: trace `sigaction`, `sigprocmask`, ignored/default
+  handlers, pending signals, and altstack state per pid/tid. Go binaries remain
+  sensitive to `SIGPIPE`, `SIGURG`, `SIGCHLD`, and alternate stacks.
+- [ ] Non-perturbing trace sink: avoid writing bulk diagnostics through guest
+  stdout/stderr or panicwrap pipes. Prefer a host-side ring buffer or dedicated
+  `MACHGATE_EXECVE_TRACE_FILE`-style file sink dumped on exit/failure.
+- [x] Differential mini-fixtures: for each Packer hypothesis, add or repair a
+  small Mach-O fixture covering fork/exec/wait, exec with piped stdout,
+  nonblocking pipe copy, and panicwrap-like parent/child behavior. Fix the
+  fixture before retesting the full Packer binary.
+- [ ] Native reference traces: when macOS access is available, compare tiny
+  fixtures with `dtruss`, `ktrace`, `fs_usage`, or source-level logging to
+  verify Darwin errno/status/fd behavior.
+- [ ] Repeat gates: any Packer fix must pass `packer --version` `5 / 5` before
+  promotion, then the ARM64 unit suite, then the external corpus.
+
+Loop P exit criteria:
+
+- [ ] `packer --version` targeted gate passes `5 / 5` with stdout containing
+  `Packer v1.15.4` and process status `0`.
+- [ ] ARM64 unit suite passes after the accepted fix.
+- [ ] Status docs are updated with the exact fix and log paths.
+
+Loop P stop rules:
+
+- Each implementation candidate gets at most 5 targeted attempts.
+- A candidate that does not improve the trace class after 5 attempts is marked
+  rejected with logs and the next candidate starts.
+- Do not classify Packer as fixed from stdout alone; status must be `0`.
+
+Loop P agents/helpers:
+
+- [x] Codex P1 exit provenance worker
+  (`019efaef-4ea2-7f31-b9c0-2a76b7058202`): owns status/caller tracing
+  proposals. Complete: `tests/external/logs/loop-p-exit-provenance-attempt1/`
+  shows the wrapped child `_exit status=0`, shim `wait4` returning
+  `darwin_status=0`, and the outer parent `_exit status=2`; no wait-status
+  issue is proven by this trace alone.
+- [x] Codex P2 fd lifecycle worker
+  (`019efaef-ca31-7bb0-99f5-eadcfbe1621c`): owns fd graph tracing and Packer
+  pipe reconstruction. Complete:
+  `tests/external/logs/loop-p2-fdtrace-attempt1/packer.fdtrace` reconstructs
+  child stdout on fd `1`, parent reads from fd `6`, parent writes the copied
+  `Packer v1.15.4` bytes to fd `1`, and stderr pipe reads reach EOF; no fd or
+  pipe lifecycle inconsistency is proven.
+- [x] Codex P3 errno/import audit worker
+  (`019efaef-f268-79d3-bbcf-f5a0dae198ee`): owns Darwin errno audit and
+  imported symbol ownership checks. Complete: audit script
+  `scripts/audit_macho_import_ownership.py` produced report
+  `/tmp/machgate-agent-reports/loop-p/p3-errno-import-audit/report.md` and TSV
+  `/tmp/machgate-agent-reports/loop-p/p3-errno-import-audit/script-run/import-ownership.tsv`.
+  Packer has `155` imports, `77` explicit shim exports, `78` non-explicit
+  exports, and `72` high-risk dependency/fallback POSIX imports. Explicit
+  errno-leak candidates include `open/openat`, `fcntl`, `wait4/waitpid`,
+  `close/dup/dup2/dup3`, `pipe/pipe2`, stat-family calls, `mmap`, `munmap`,
+  `readlink/readlinkat`, `mprotect`, and `proc_pidpath`.
+- [x] Codex P4 fixture worker
+  (`019efaf0-19d6-7402-8e5a-17c5f589d193`): owns focused
+  panicwrap/fork/exec/wait fixtures. Complete: after attempts
+  `tests/external/logs/loop-p4-fixture-attempt{1..4}/`, the focused
+  `darwin_panicwrap_self_reexec` fixture passes in
+  `tests/external/logs/loop-p4-fixture-attempt4/` (`repro_status=0`) and the
+  qemu confirmation passes in
+  `tests/external/logs/loop-p4-fixture-qemu-attempt5/` (`status=0`).
+- [x] Codex P5 source/runtime correlator
+  (`019efaf0-495c-7782-9ccd-c18fa31dfd6d`): owns Packer/panicwrap/Go source to
+  runtime evidence mapping. Complete:
+  `/tmp/machgate-agent-reports/loop-p/p5-source-runtime-correlator.md` maps
+  Packer `realMain`, panicwrap `Wrap`, Go `os/exec`, and current Loop O traces.
+  It concludes the child version path is complete and the next experiment
+  should trace the raw wait-status bytes written to guest memory around
+  `wait4`, because parent status `2` conflicts with the logged child
+  `darwin_status=0`.
+- [~] Grok best-of-9 Packer parent-status helper:
+  PID file `/tmp/machgate-agent-reports/loop-p/grok-packer-parent-status.pid`,
+  report `/tmp/machgate-agent-reports/loop-p/grok-packer-parent-status.out`.
+- [~] Claude Packer exit/fd helper:
+  PID file `/tmp/machgate-agent-reports/loop-p/claude-packer-exit-fd.pid`,
+  report `/tmp/machgate-agent-reports/loop-p/claude-packer-exit-fd.out`.
+- [~] Claude Packer fixture helper:
+  PID file `/tmp/machgate-agent-reports/loop-p/claude-packer-fixture.pid`,
+  report `/tmp/machgate-agent-reports/loop-p/claude-packer-fixture.out`.
+
+Loop P current findings:
+
+- [x] P1 exit provenance is complete. The best trace is
+  `tests/external/logs/loop-p-exit-provenance-attempt1/exit-provenance.trace`.
+  It proves child `_exit status=0`, parent shim `wait4` result
+  `darwin_status=0`, and outer parent `_exit status=2`. It does not prove a
+  wait-status corruption yet; byte-level status memory tracing is still needed.
+- [x] P2 fd lifecycle is complete. The best trace is
+  `tests/external/logs/loop-p2-fdtrace-attempt1/packer.fdtrace`. It shows
+  child stdout bytes copied through the parent to stdout and pipe EOF observed;
+  no fd/pipe inconsistency is the current blocker.
+- [x] P3 errno/import audit is complete. Script:
+  `scripts/audit_macho_import_ownership.py`. Report:
+  `/tmp/machgate-agent-reports/loop-p/p3-errno-import-audit/report.md`.
+  Ownership table:
+  `/tmp/machgate-agent-reports/loop-p/p3-errno-import-audit/script-run/import-ownership.tsv`.
+  Treat the explicit errno-leak candidates above as the next errno cleanup
+  queue, not as the proven Packer status-2 cause.
+- [x] P4 panicwrap fixture is complete/pass. Fixture attempts are under
+  `tests/external/logs/loop-p4-fixture-attempt{1..4}/`; the passing repro is
+  `tests/external/logs/loop-p4-fixture-attempt4/`, and qemu confirmation is
+  `tests/external/logs/loop-p4-fixture-qemu-attempt5/`.
+- [x] P5 source/runtime report is complete. Report:
+  `/tmp/machgate-agent-reports/loop-p/p5-source-runtime-correlator.md`.
+  Next experiment: add a non-stdout/stderr byte trace around shim `wait4` that
+  records the raw 32-bit status before and after writing guest memory, the
+  exact guest status pointer bytes after write, caller context, and parent
+  `_exit` status/cookie state.
 
 ## Loop 2026-06-24-J Active Status
 
@@ -116,7 +670,7 @@ Loop H bun attempts:
 - [x] `bun-loop-h-attempt1-tpidr-rt`: reviewed Loop G bun logs plus `full-loop-2026-06-23-N-loop-g-current/bun.*`. `__init_offsets` contains one entry, `0x007dfa84`, so the constructor entry is `0x1007dfa84`. The fault at fileoff `0x7d0a5c` is inside that constructor path, not at entry. Disassembly around `0x1007d0a5c` shows an inlined lock/runtime path reading `TPIDRRO_EL0` into `x9`, aligning it, then executing `ldr x20, [x9]`. Existing loader rewriting only matched `MRS TPIDRRO_EL0, x0` (`0xd53bd060`), while bun uses other destination registers such as `x8`, `x9`, and `x10`. Patched the loader to rewrite the whole `MRS TPIDRRO_EL0, Xt` encoding family to `MRS TPIDR_EL0, Xt` while preserving `Rt`. Targeted `bun --version` with `MACHGATE_EXTERNAL_MAP_LIBCXX=1`, `MACHGATE_TRACE_SIGNALS=1`, and `MACHGATE_TRACE_LCMAIN=1` passed `1/1`, output `1.3.14`; resolver stayed clean at `1039 resolved, 0 stubbed, 0 failed`, the loader logged `rewrote 234 Darwin TPIDRRO reads to Linux TPIDR reads`, static initializers completed, and `_main` was reached. Logs: `tests/external/logs/bun-loop-h-attempt1-tpidr-rt/`.
 - [x] `bun-loop-h-tpidr-guards`: requested guard bucket after the shared loader fix kept `cmake`, `node`, `protoc`, and `nvim` passing at `4/4` with `MACHGATE_EXTERNAL_MAP_LIBCXX=1` and `MACHGATE_EXTERNAL_TIMEOUT=120`. Outputs included `node` `v26.3.1`, `protoc` `libprotoc 35.1`, and `nvim` `NVIM v0.12.3`. Logs: `tests/external/logs/bun-loop-h-tpidr-guards/`.
 
-Current bun blocker: none in targeted testing. Full corpus has not yet been rerun, so the last strict full-run record still contains the old `SIGSEGV` in the single static initializer.
+Current bun blocker: none in targeted testing. Superseded by Loop Q: the integrated 120s full-corpus run promoted Bun.
 
 ## Loop 2026-06-23-G Active Status
 
@@ -169,7 +723,7 @@ Loop G tilt/nu TLS attempts:
 
 Loop H tilt signal/thread attempt:
 
-- [x] `loop-h-tilt-pthread-kill-attempt1`: classified the remaining `tilt` stack-fault as flat `_pthread_kill` binding to glibc, which delivered Darwin signal `16` as Linux `SIGSTKFLT` to the main thread after Go helper-thread startup. Added `pthread_kill` to the resolver's mapped-libSystem flat-runtime preference so the existing shim translates/ignores Darwin signal 16. Targeted `tilt version` result: `1/1` PASS, stdout `v0.37.4, built 2026-06-16`, resolver `231 resolved, 0 stubbed, 0 failed`. Guard run `loop-h-tilt-pthread-kill-guards-rerun` kept `yq`, `fzf`, `gum`, `shfmt`, `lazygit`, and `nomad` passing at `6/6`. A first guard command `loop-h-tilt-pthread-kill-guards` did not reach probes because the shared dirty build tree failed during a concurrent `machismo` relink; the rerun used the already rebuilt binary from the passing tilt attempt. Full corpus has not yet been rerun.
+- [x] `loop-h-tilt-pthread-kill-attempt1`: classified the remaining `tilt` stack-fault as flat `_pthread_kill` binding to glibc, which delivered Darwin signal `16` as Linux `SIGSTKFLT` to the main thread after Go helper-thread startup. Added `pthread_kill` to the resolver's mapped-libSystem flat-runtime preference so the existing shim translates/ignores Darwin signal 16. Targeted `tilt version` result: `1/1` PASS, stdout `v0.37.4, built 2026-06-16`, resolver `231 resolved, 0 stubbed, 0 failed`. Guard run `loop-h-tilt-pthread-kill-guards-rerun` kept `yq`, `fzf`, `gum`, `shfmt`, `lazygit`, and `nomad` passing at `6/6`. A first guard command `loop-h-tilt-pthread-kill-guards` did not reach probes because the shared dirty build tree failed during a concurrent `machismo` relink; the rerun used the already rebuilt binary from the passing tilt attempt. Superseded by Loop Q: the integrated 120s full-corpus run promoted Tilt.
 
 Loop I nu TLV attempt:
 
@@ -177,7 +731,7 @@ Loop I nu TLV attempt:
 - [x] `loop-i-nu-tlv-x1-guards`: targeted guard bucket kept `tilt`, `bun`, and `protoc` passing at `3/3`.
 - [x] `loop-i-nu-tlv-x1-just-guard`: canonical-manifest `just` guard passed `1/1`.
 - [x] `loop-i-nu-tlv-x1-post-delta-backout`: targeted `nu --version` still passed after backing out failed Delta-specific code.
-- [ ] Full corpus has not yet been rerun, so `nu` is a targeted pass pending promotion.
+- [x] Superseded by Loop Q: the integrated 120s full-corpus run promoted `nu`.
 
 Loop G live attempt log:
 
@@ -774,3 +1328,126 @@ Loop I report-only helper findings:
 - [x] Grok Delta tournament `/tmp/machgate-agent-reports/loop-l/grok-delta-task.txt` completed after correcting stale `machismo` binary usage. Best retained candidate is shared `guest_vm_track`/dispatch wiring for mmap/munmap, but Delta remains below the acceptance gate: `loop-l-machgate-final` was `1/5`, not `5/5`.
 - [ ] Delta remains open. Current evidence says the failing helper `mmap(NULL,384)` / `munmap(addr,4096)` path bypasses both the Darwin syscall gate and shim wrapper and reaches direct host glibc/QEMU `munmap`; pass correlates with `EINVAL`, failure correlates with `EINTR` followed by `SIGSEGV`. Next loop should hook or explain that lower path before trying more shim-only fixes.
 - [ ] Packer remains open. Latest accepted progress is still Loop I: raw/shim write SIGPIPE protection removed the child `SIGPIPE` class, but targeted Packer stays status `2` after pipe/fork/wait activity. Next loop should inspect Go process/wait/futex timing instead of repeating SIGPIPE or basic re-exec fixes.
+
+### Loop 2026-06-24-O Packer Source-Guided Reexec/Kqueue
+
+Exit criteria:
+
+- [ ] `packer --version` passes `5 / 5`, stdout contains `Packer v1.15.4`.
+- [ ] Focused panicwrap/self-reexec fixture passes, or its five-attempt failure is documented with a concrete blocker.
+- [ ] After Packer passes, run the ARM64 unit suite and the external corpus regression.
+
+Live status:
+
+- [x] Source context is local: Packer `v1.15.4` under `.source-context/packer-1.15.4`, panicwrap `v1.0.0` under `.source-context/panicwrap-1.0.0`.
+- [x] O4 proved the MachGate reexec boundary is no longer the primary blocker. `tests/external/logs/loop-o4-exec-attempt3/packer.err` shows fork-safe reexec entering, resolving the guest path, preserving `PACKER_WRAP_COOKIE`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and `MACHISMO_CONFIG`, then host `execve("/work/build-arm64/machgate", ...)` succeeds and the second loader starts.
+- [x] Disk pressure was cleared by deleting generated `tests/external/work/*`; logs and cache were preserved.
+- [x] Signal regression isolated: forced-cookie Packer crashed while `darwin_signal_to_linux(7)` returned `0`. Restoring Darwin signal 7 to Linux signal 7 made forced-cookie Packer pass with stdout `Packer v1.15.4` in `tests/external/logs/loop-o-main-signal7-forced/`.
+- [x] O2 kqueue worker removed the earlier `kevent(...) -> 5` storm, but Packer still timed out/status `2`; current traces point at parent kqueue/event loop starvation after child pipe setup.
+- [x] Kqueue detail trace added under `MACHGATE_TRACE_SHIM=1`. `tests/external/logs/loop-o-main-kqueue-detail/packer.err` shows Go registering `EVFILT_USER` and pipe fds 5/6/7/8 with flags `0x21` (`EV_ADD | EV_CLEAR`). After fork setup it emits two EOF-like events with zeroed `ident/filter` and then returns `0` repeatedly on ~100ms waits. Next patch must preserve registration identity when a watched fd is closed/replaced, or remove stale registrations instead of emitting zeroed events.
+- [x] Kqueue registration snapshot patch applied. `collect_kqueue_pollfds` now snapshots each watched registration before dropping the kqueue mutex for host `poll`, and `emit_kqueue_events` uses the snapshot identity while only updating the live registration if it still matches. This removes the zeroed `ident=0/filter=0` event artifact caused by close/reuse races.
+- [x] Forced-cookie control after restoring Darwin signal 7 and rebuilding the shim passes: `tests/external/logs/loop-o-main-final-forced-sig7/`, status `0`, stdout `Packer v1.15.4`. This confirms the wrapped child path can print the version when entered directly.
+- [x] Normal parent `panicwrap` path still fails: `tests/external/logs/loop-o-main-final-packer-attempt1/`, harness `0/1`, Packer status `2`, stdout empty. The trace now reaches `wait4(118, ...)`, then receives `SIGCHLD si_status=11`, so the remaining blocker is a child `SIGSEGV` after the parent/child fd and kqueue setup, not the old child `SIGPIPE`, missing reexec, or zeroed kqueue event artifact.
+- [ ] Next Loop O step: add targeted wait/status and child-start diagnostics, then rerun one Packer attempt. The immediate question is whether the reexeced wrapped child crashes before or after reaching the version shortcut, and which guest PC/signal context corresponds to the `si_status=11` child death.
+
+### Loop 2026-06-24-Q Packer Go Runtime Signal Comparison
+
+Exit criteria:
+
+- [x] `packer --version` passes `5 / 5`, stdout contains `Packer v1.15.4`.
+- [x] ARM64 unit suite passes after the accepted fix.
+- [x] If not fixed within 5 implementation attempts, record the exact failed
+  hypothesis and leave the next narrower experiment.
+
+Current evidence:
+
+- [x] Wait-status memory corruption is rejected by
+  `tests/external/logs/loop-p-main-wait-status-bytes-attempt1/execve.trace`.
+  The shim logs child `_exit status=0`, `wait4` `linux_status=0`,
+  `darwin_status=0`, and raw status bytes `before=00000000 after=00000000`.
+- [x] HashiCorp checkpoint telemetry is rejected as the direct cause.
+  `CHECKPOINT_DISABLE=1` in
+  `tests/external/logs/loop-q-packer-checkpoint-disable-attempt1/` still prints
+  `Packer v1.15.4` and the outer parent still exits `2`.
+- [x] Local Go comparison scratch under `/tmp/machgate-go-compare` compiled the
+  same `exec.Command(os.Args[0], "child").Run()` wait program for
+  `GOOS=darwin GOARCH=arm64` and `GOOS=linux GOARCH=arm64`. `go tool objdump`
+  shows both builds take the same app-level path through `main.waitPath`,
+  `os/exec.(*Cmd).Run`, `os.(*Process).wait`, `syscall.Wait4`, and
+  `syscall.WaitStatus.ExitStatus`.
+- [x] The normal-exit status decode is not the difference. Darwin
+  `/usr/lib/golang/src/syscall/syscall_bsd.go` returns `int(w >> 8)` when the
+  low 7 bits are zero; Linux `/usr/lib/golang/src/syscall/syscall_linux.go`
+  returns `int(w >> 8) & 0xff`. For status word `0`, both return success.
+- [x] The material codegen/runtime differences are lower-level:
+  Darwin arm64 `wait4` calls `libc_wait4_trampoline`, Darwin runtime `exit`
+  calls `libc_exit`, and Darwin runtime `sigaction` calls a libSystem
+  trampoline. Linux arm64 uses raw Linux syscall paths such as `exit_group`.
+- [x] Signal numbering mismatch is now the highest-value hypothesis. Darwin
+  `SIGCHLD` is `20`; Linux arm64 `SIGCHLD` is `17`. Darwin Go's
+  `runtime/signal_darwin.go` indexes signal `17` as `SIGSTOP`, while Linux Go
+  indexes signal `17` as `SIGCHLD`.
+- [x] A broad C signal-dispatch experiment is rejected as an implementation
+  strategy. `tests/external/logs/loop-q-packer-signal-dispatch-attempt1/`
+  logged `libsystem_shim: guest signal signum=17 darwin=20` before crashing
+  with `SIGSEGV`; this supports the mismatch hypothesis, but a normal C wrapper
+  does not preserve Go's signal trampoline/frame ABI.
+- [x] Attempt 2 discriminator succeeded. Env-gated
+  `MACHGATE_SIGCHLD_DEFAULT_EXPERIMENT=1` in
+  `tests/external/logs/loop-q2-sigchld-default-experiment/` makes
+  `packer --version` pass once, stdout `Packer v1.15.4`. Trace evidence:
+  wrapped child `_exit status=0`, shim `wait4` writes `darwin_status=0`, and
+  outer parent `_exit status=0`. This proves Linux `SIGCHLD` delivery into the
+  Darwin Go handler is on the failure path. The experiment is not accepted as
+  production yet because it drops guest SIGCHLD notification semantics.
+- [x] Attempt 3 dispatcher rejected. The env-gated C dispatcher in
+  `tests/external/logs/loop-q3-sigchld-darwin-handler/` rewrote Linux
+  `SIGCHLD=17` to Darwin `SIGCHLD=20`, logged the delivery, then crashed with
+  status `139`. A normal C wrapper does not preserve Darwin Go's signal
+  trampoline ABI and must not be used as the production fix.
+- [x] Attempt 4 accepted production policy. The shim now treats Darwin
+  `sigaction(SIGCHLD, ...)` as successful for the guest but leaves the host
+  Linux `SIGCHLD` disposition at `SIG_DFL` unless
+  `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER=1` is explicitly set. Blocking
+  `wait4` still reports child status. Targeted Packer gate
+  `loop-q4-packer-sigchld-production-attempt{1..5}` passed `5 / 5`.
+- [x] Attempt 5 guard run passed. `loop-q5-sigchld-guards` ran `yq`, `delta`,
+  `nu`, `fzf`, `gum`, `shfmt`, `tilt`, `terraform`, `node`, and `bun`; result
+  `10 / 10` passing.
+- [x] Regression correction: the first full ARM64 unit run after the SIGCHLD
+  patch was `27 / 28`; `test_darwin_range_000_099` failed because syscall
+  `66` (`vfork`) had been grouped with host `fork()` and returned success
+  against the existing single-guest-thread fixture contract. `vfork` now
+  returns Darwin `EAGAIN` (`35`), matching the fixture and current no-child
+  process constraint for raw Darwin `vfork`.
+- [x] Final verification after the `vfork` correction:
+  `tests/test_darwin_range_000_099.sh` passes in the ARM64 container,
+  `BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh` passes `28 / 28`, and
+  Packer reconfirmation `loop-q6-packer-post-unitfix-attempt{1..5}` passes
+  `5 / 5`.
+- [x] Integrated functional full-corpus verification:
+  `tests/external/logs/full-loop-2026-06-24-Q-functional120/` passes
+  `57 / 57` with `MACHGATE_EXTERNAL_MAP_LIBCXX=1` and
+  `MACHGATE_EXTERNAL_TIMEOUT=120`. This promotes `tilt`, `bun`, `nu`, `delta`,
+  and `packer` from targeted pass evidence into a single full-corpus run. The
+  only remaining distinction is strict 30s startup timing for `node`.
+
+Loop Q execution:
+
+- [ ] Attempt 1: trace all guest-visible signal install/mask/delivery paths for
+  Packer parent and wrapped child: `sigaction`, `sigprocmask`,
+  `pthread_sigmask`, `sigaltstack`, `raise`, `pthread_kill`, `kill`,
+  `wait4` signaled status, and qemu host `SIGCHLD` delivery.
+- [x] Attempt 2: implement a narrow, env-gated experiment that prevents raw
+  Linux `SIGCHLD=17` from entering the Darwin Go handler while preserving
+  blocking `wait4`. It changes Packer behavior from status `2` to pass.
+- [x] Attempt 3: replace the discriminator with a production-safe signal
+  translation boundary. Candidate: env-gated SIGCHLD dispatcher that passes
+  Darwin signal `20` and `si_signo=20` to the saved guest handler, then compare
+  against the default-disposition discriminator. Do not keep a C handler wrapper
+  if it repeats the prior Go `sigtramp` crash.
+- [x] Attempt 4: accept the host-default SIGCHLD policy after the dispatcher
+  rejection, then run targeted Packer and a representative guard set.
+- [x] Attempt 5: run targeted Packer `5 / 5`, the focused failing range fixture,
+  and the ARM64 unit suite. Final status: Packer targeted `5 / 5`; units
+  `28 / 28`; integrated functional full corpus `57 / 57`.

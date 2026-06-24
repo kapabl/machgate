@@ -54,8 +54,15 @@ GLIBC_2.17 {
         kSecPolicyAppleSSL;
         kSecPolicyOid;
         kSecReturnRef;
+        close;
+        dup;
+        dup2;
+        read;
+        readv;
         write;
         writev;
+        wait4;
+        waitpid;
         copyfile;
         execve;
         posix_spawn;
@@ -144,6 +151,8 @@ GLIBC_2.17 {
         clonefile;
         clonefileat;
         fcopyfile;
+        exit;
+        _exit;
         getpeereid;
         getsectdata;
         getsectiondata;

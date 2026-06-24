@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <signal.h>
 #include "macho_defs.h"
 #include <dlfcn.h>
 #include <endian.h>
@@ -41,6 +42,7 @@
 #include "dylib_loader.h"
 #include "isa_emul.h"
 #include "syscall/syscall_gate.h"
+#include "vm_interpose.h"
 #include <sys/resource.h>
 #include <pthread.h>
 
@@ -84,6 +86,7 @@ void* __machismo_main_stack_top = NULL;
 size_t __machismo_main_stack_size = 0;
 int __machismo_guest_argc = 0;
 char** __machismo_guest_argv = NULL;
+char** __machismo_guest_envp = NULL;
 const char* __machismo_guest_executable_path = NULL;
 
 static size_t align_page_size(size_t size)
@@ -185,6 +188,10 @@ int main(int argc, char** argv, char** envp)
 {
 	char *filename;
 
+	signal(SIGPIPE, SIG_IGN);
+
+	machgate_ensure_vm_interpose(argv, envp);
+
 	machismo_load_results.kernfd = -1;
 	machismo_load_results.argc = argc;
 	machismo_load_results.argv = argv;
@@ -226,6 +233,7 @@ int main(int argc, char** argv, char** envp)
 	machismo_load_results.argv = argv + arg_idx;
 	__machismo_guest_argc = (int)machismo_load_results.argc;
 	__machismo_guest_argv = machismo_load_results.argv;
+	__machismo_guest_envp = machismo_load_results.envp;
 	__machismo_guest_executable_path = filename;
 
 	/* Load config file — look next to the binary, or use MACHISMO_CONFIG */
@@ -1084,13 +1092,31 @@ static void lc_main_return(int status)
 	_exit(status);
 }
 
+static FILE* open_trace_file(void)
+{
+	const char* trace_file = getenv("MACHGATE_EXECVE_TRACE_FILE");
+
+	if (!trace_file || !*trace_file)
+		return NULL;
+	return fopen(trace_file, "a");
+}
+
 static void trace_lc_main_abi(struct load_results* lr)
 {
 	if (!getenv("MACHGATE_TRACE_LCMAIN"))
 		return;
 
+	FILE* trace_file = open_trace_file();
+	const char* guest_cookie = NULL;
+	const char* host_cookie = getenv("PACKER_WRAP_COOKIE");
 	char** env_from_argv = lr->argv + lr->argc + 1;
 	char** apple_from_argv = env_from_argv;
+	for (size_t env_index = 0; lr->envp && lr->envp[env_index]; env_index++) {
+		if (strncmp(lr->envp[env_index], "PACKER_WRAP_COOKIE=", 19) == 0) {
+			guest_cookie = lr->envp[env_index] + 19;
+			break;
+		}
+	}
 	while (*apple_from_argv)
 		apple_from_argv++;
 	apple_from_argv++;
@@ -1107,6 +1133,17 @@ static void trace_lc_main_abi(struct load_results* lr)
 	fprintf(stderr, "machismo: lcmain abi env0=%p '%s' apple0=%p '%s'\n",
 	        lr->envp[0], lr->envp[0] ? lr->envp[0] : "",
 	        lr->applep[0], lr->applep[0] ? lr->applep[0] : "");
+	fprintf(stderr, "machismo: lcmain abi PACKER_WRAP_COOKIE guest=%d host=%d\n",
+	        guest_cookie ? 1 : 0, host_cookie ? 1 : 0);
+	if (trace_file) {
+		fprintf(trace_file,
+		        "machismo: lcmain pid=%d argc=%zu argv0='%s' argv1='%s' guest-cookie=%d host-cookie=%d\n",
+		        (int)getpid(), lr->argc,
+		        lr->argv[0] ? lr->argv[0] : "",
+		        lr->argc > 1 && lr->argv[1] ? lr->argv[1] : "",
+		        guest_cookie ? 1 : 0, host_cookie ? 1 : 0);
+		fclose(trace_file);
+	}
 }
 
 static void start_thread(struct load_results* lr) {

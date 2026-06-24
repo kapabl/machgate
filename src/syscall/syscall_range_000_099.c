@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -173,6 +174,25 @@ struct darwin_timeval_range_000_099 {
 _Static_assert(sizeof(struct darwin_timeval_range_000_099) == 16,
 	"darwin_timeval_range_000_099 must be 16 bytes");
 
+struct darwin_rusage_range_000_099 {
+	struct darwin_timeval_range_000_099 ru_utime;
+	struct darwin_timeval_range_000_099 ru_stime;
+	int64_t ru_maxrss;
+	int64_t ru_ixrss;
+	int64_t ru_idrss;
+	int64_t ru_isrss;
+	int64_t ru_minflt;
+	int64_t ru_majflt;
+	int64_t ru_nswap;
+	int64_t ru_inblock;
+	int64_t ru_oublock;
+	int64_t ru_msgsnd;
+	int64_t ru_msgrcv;
+	int64_t ru_nsignals;
+	int64_t ru_nvcsw;
+	int64_t ru_nivcsw;
+};
+
 struct darwin_msghdr {
 	void* msg_name;
 	uint32_t msg_namelen;
@@ -214,6 +234,33 @@ _Static_assert(sizeof(struct darwin_statfs) == 2168,
 	"darwin_statfs must be 2168 bytes");
 
 static char login_name[MACHGATE_LOGIN_NAME_MAX] = "machgate";
+static pid_t range_000_process_pid;
+
+__attribute__((constructor))
+static void init_range_000_process_pid(void)
+{
+	range_000_process_pid = (pid_t)syscall(SYS_getpid);
+}
+
+static int range_000_in_fork_child(void)
+{
+	return range_000_process_pid &&
+	       (pid_t)syscall(SYS_getpid) != range_000_process_pid;
+}
+
+static pid_t range_000_trace_tid(void)
+{
+	return (pid_t)syscall(SYS_gettid);
+}
+
+static FILE* range_000_open_trace_file(void)
+{
+	const char* trace_file = getenv("MACHGATE_EXECVE_TRACE_FILE");
+
+	if (!trace_file || !*trace_file)
+		return NULL;
+	return fopen(trace_file, "a");
+}
 
 static const struct flag_pair open_flag_pairs[] = {
 	{ DARWIN_O_NONBLOCK, O_NONBLOCK },
@@ -274,6 +321,29 @@ static void finish_syscall_result(struct syscall_gate_state* state, long result)
 		set_failure(state, darwin_errno_from_linux(errno));
 	else
 		set_success(state, (uint64_t)result);
+}
+
+static int trace_wait_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_WAIT");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static void trace_raw_exit(struct syscall_gate_state* state,
+                           const char* name,
+                           int status)
+{
+	FILE* trace_file = range_000_open_trace_file();
+
+	if (!trace_file)
+		return;
+	fprintf(trace_file,
+	        "syscall_gate: %s self=%d tid=%d ppid=%d fork_child=%d status=%d pc=%p lr=%p x16=%llu\n",
+	        name, (int)syscall(SYS_getpid), (int)range_000_trace_tid(),
+	        (int)syscall(SYS_getppid), range_000_in_fork_child(), status,
+	        (void*)state->pc, (void*)state->x30,
+	        (unsigned long long)state->x[16]);
+	fclose(trace_file);
 }
 
 static int should_hide_proc_exe_symlink(const char* path)
@@ -814,6 +884,69 @@ static int linux_signal_to_darwin(int linux_signal)
 	}
 }
 
+static int darwin_wait_options_to_linux(int darwin_options, int* linux_options)
+{
+	int result = 0;
+	int supported = WNOHANG | WUNTRACED;
+
+#ifdef WCONTINUED
+	supported |= 0x10;
+#endif
+
+	if (darwin_options & ~supported)
+		return 0;
+
+	if (darwin_options & WNOHANG)
+		result |= WNOHANG;
+	if (darwin_options & WUNTRACED)
+		result |= WUNTRACED;
+#ifdef WCONTINUED
+	if (darwin_options & 0x10)
+		result |= WCONTINUED;
+#endif
+
+	*linux_options = result;
+	return 1;
+}
+
+static int linux_wait_status_to_darwin(int linux_status)
+{
+	if (WIFSIGNALED(linux_status)) {
+		int darwin_signal = linux_signal_to_darwin(WTERMSIG(linux_status));
+		return (linux_status & ~0x7f) | (darwin_signal & 0x7f);
+	}
+	if (WIFSTOPPED(linux_status)) {
+		int darwin_signal = linux_signal_to_darwin(WSTOPSIG(linux_status));
+		return (linux_status & ~0xff00) | ((darwin_signal & 0xff) << 8);
+	}
+	return linux_status;
+}
+
+static void linux_rusage_to_darwin(const struct rusage* linux_usage,
+                                   struct darwin_rusage_range_000_099* darwin_usage)
+{
+	darwin_usage->ru_utime.tv_sec = linux_usage->ru_utime.tv_sec;
+	darwin_usage->ru_utime.tv_usec = (int32_t)linux_usage->ru_utime.tv_usec;
+	darwin_usage->ru_utime.pad = 0;
+	darwin_usage->ru_stime.tv_sec = linux_usage->ru_stime.tv_sec;
+	darwin_usage->ru_stime.tv_usec = (int32_t)linux_usage->ru_stime.tv_usec;
+	darwin_usage->ru_stime.pad = 0;
+	darwin_usage->ru_maxrss = linux_usage->ru_maxrss;
+	darwin_usage->ru_ixrss = linux_usage->ru_ixrss;
+	darwin_usage->ru_idrss = linux_usage->ru_idrss;
+	darwin_usage->ru_isrss = linux_usage->ru_isrss;
+	darwin_usage->ru_minflt = linux_usage->ru_minflt;
+	darwin_usage->ru_majflt = linux_usage->ru_majflt;
+	darwin_usage->ru_nswap = linux_usage->ru_nswap;
+	darwin_usage->ru_inblock = linux_usage->ru_inblock;
+	darwin_usage->ru_oublock = linux_usage->ru_oublock;
+	darwin_usage->ru_msgsnd = linux_usage->ru_msgsnd;
+	darwin_usage->ru_msgrcv = linux_usage->ru_msgrcv;
+	darwin_usage->ru_nsignals = linux_usage->ru_nsignals;
+	darwin_usage->ru_nvcsw = linux_usage->ru_nvcsw;
+	darwin_usage->ru_nivcsw = linux_usage->ru_nivcsw;
+}
+
 static int darwin_sigset_to_linux(uint32_t darwin_set, sigset_t* linux_set)
 {
 	if (sigemptyset(linux_set) < 0)
@@ -1013,6 +1146,19 @@ static void handle_sigaction(struct syscall_gate_state* state)
 		                               &linux_new_action)) {
 			set_failure(state, DARWIN_ENOSYS);
 			return;
+		}
+		if (range_000_in_fork_child() && linux_signal == SIGPIPE) {
+			linux_new_action.sa_handler = SIG_IGN;
+			linux_new_action.sa_flags = 0;
+			sigemptyset(&linux_new_action.sa_mask);
+		}
+		if (trace_wait_enabled() && linux_signal == SIGPIPE) {
+			fprintf(stderr,
+			        "syscall_gate: sigaction SIGPIPE fork_child=%d darwin_handler=%llu effective=%p flags=%#x\n",
+			        range_000_in_fork_child(),
+			        (unsigned long long)darwin_new_action->handler,
+			        (void*)linux_new_action.sa_handler,
+			        linux_new_action.sa_flags);
 		}
 	}
 
@@ -1224,6 +1370,15 @@ static long raw_dup2(int from_fd, int to_fd)
 	}
 
 	return syscall(SYS_dup3, from_fd, to_fd, 0);
+}
+
+static long raw_fork(void)
+{
+#ifdef SYS_fork
+	return syscall(SYS_fork);
+#else
+	return syscall(SYS_clone, SIGCHLD, 0, NULL, NULL, 0);
+#endif
 }
 
 static int translate_ioctl_request(uint64_t darwin_request,
@@ -1502,7 +1657,64 @@ static int handle_enosys(struct syscall_gate_state* state)
 
 static void handle_wait4_single_process(struct syscall_gate_state* state)
 {
-	set_failure(state, DARWIN_ECHILD);
+	int linux_options;
+	int linux_status = 0;
+	struct rusage linux_usage;
+	struct rusage* linux_usage_ptr = state->x[3] ? &linux_usage : NULL;
+	long result;
+
+	if (!darwin_wait_options_to_linux((int)state->x[2], &linux_options)) {
+		set_failure(state, DARWIN_EINVAL);
+		return;
+	}
+
+	errno = 0;
+	result = syscall(SYS_wait4, (pid_t)state->x[0],
+	                 state->x[1] ? &linux_status : NULL,
+	                 linux_options, linux_usage_ptr);
+	if (result > 0) {
+		int darwin_status = linux_status;
+		if (state->x[1]) {
+			darwin_status = linux_wait_status_to_darwin(linux_status);
+			*(int*)state->x[1] = darwin_status;
+		}
+		if (state->x[3])
+			linux_rusage_to_darwin(&linux_usage,
+			                       (struct darwin_rusage_range_000_099*)state->x[3]);
+		if ((pid_t)state->x[0] > 0)
+			result = (pid_t)state->x[0];
+		if (trace_wait_enabled() && state->x[1]) {
+			fprintf(stderr,
+			        "syscall_gate: wait4(pid=%d options=%#x) -> %ld linux_status=%#x darwin_status=%#x exited=%d exit=%d signaled=%d signal=%d core=%d\n",
+			        (int)(pid_t)state->x[0], (int)state->x[2], result,
+			        linux_status, darwin_status, WIFEXITED(linux_status),
+			        WIFEXITED(linux_status) ? WEXITSTATUS(linux_status) : -1,
+			        WIFSIGNALED(linux_status),
+			        WIFSIGNALED(linux_status) ? WTERMSIG(linux_status) : -1,
+#ifdef WCOREDUMP
+			        WIFSIGNALED(linux_status) ? WCOREDUMP(linux_status) : 0
+#else
+			        0
+#endif
+			);
+		}
+		FILE* trace_file = range_000_open_trace_file();
+		if (trace_file) {
+			fprintf(trace_file,
+			        "syscall_gate: wait4 self=%d tid=%d ppid=%d fork_child=%d pid=%d result=%ld options=%#llx pc=%p lr=%p linux_status=%#x darwin_status=%#x exited=%d exit=%d signaled=%d signal=%d\n",
+			        (int)syscall(SYS_getpid), (int)range_000_trace_tid(),
+			        (int)syscall(SYS_getppid), range_000_in_fork_child(),
+			        (int)(pid_t)state->x[0], result,
+			        (unsigned long long)state->x[2], (void*)state->pc,
+			        (void*)state->x30, linux_status, darwin_status,
+			        WIFEXITED(linux_status),
+			        WIFEXITED(linux_status) ? WEXITSTATUS(linux_status) : -1,
+			        WIFSIGNALED(linux_status),
+			        WIFSIGNALED(linux_status) ? WTERMSIG(linux_status) : -1);
+			fclose(trace_file);
+		}
+	}
+	finish_syscall_result(state, result);
 }
 
 static void handle_getlogin(struct syscall_gate_state* state)
@@ -1587,12 +1799,16 @@ int syscall_range_000_099_dispatch(struct syscall_gate_state* state)
 	case 99:
 		return handle_enosys(state);
 		case 1:
+			trace_raw_exit(state, "exit_range_000", (int)state->x[0]);
 			syscall(SYS_exit_group, (int)state->x[0]);
 			_exit((int)state->x[0]);
 		case DARWIN_SYS_getfsstat:
 			handle_getfsstat(state);
 			return 1;
 	case DARWIN_SYS_fork:
+		errno = 0;
+		finish_syscall_result(state, raw_fork());
+		return 1;
 	case DARWIN_SYS_vfork:
 		set_failure(state, DARWIN_EAGAIN);
 		return 1;
