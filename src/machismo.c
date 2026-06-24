@@ -53,6 +53,8 @@
 #define MAIN_LSE_POOL_MIN_SIZE (2 * 1024 * 1024)
 #define MAIN_LSE_POOL_SLACK_SIZE (64 * 1024)
 #define ARM64_DIRECT_BRANCH_RANGE (128 * 1024 * 1024)
+#define ARM64_MRS_TPIDRRO_EL0 0xd53bd060u
+#define ARM64_MRS_TPIDR_EL0   0xd53bd040u
 
 static void load64(int fd, bool expect_dylinker, struct load_results* lr);
 static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
@@ -88,6 +90,15 @@ static size_t align_page_size(size_t size)
 {
 	size_t page_mask = (size_t)PAGE_SIZE - 1;
 	return (size + page_mask) & ~page_mask;
+}
+
+static int rewrite_tpidrro_read(uint32_t *instruction)
+{
+	if ((*instruction & 0xffffffe0u) != ARM64_MRS_TPIDRRO_EL0)
+		return 0;
+
+	*instruction = ARM64_MRS_TPIDR_EL0 | (*instruction & 0x1fu);
+	return 1;
 }
 
 static size_t estimate_main_lse_pool_size(struct load_results* lr)
@@ -353,8 +364,7 @@ int main(int argc, char** argv, char** envp)
 								scode[j] = (scode[j] & 0xC00003FF) | 0x08DFFC00;
 								rcpc_fixed++;
 							}
-							if (scode[j] == 0xd53bd060u) {
-								scode[j] = 0xd53bd040u;
+							if (rewrite_tpidrro_read(&scode[j])) {
 								tpidr_fixed++;
 							}
 						}
@@ -472,8 +482,7 @@ int main(int argc, char** argv, char** envp)
 								code[dj] = (code[dj] & 0xC00003FF) | 0x08DFFC00;
 								dfix++;
 							}
-							if (code[dj] == 0xd53bd060u) {
-								code[dj] = 0xd53bd040u;
+							if (rewrite_tpidrro_read(&code[dj])) {
 								dtpidr++;
 							}
 						}

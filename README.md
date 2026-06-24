@@ -68,7 +68,7 @@ make -j$(nproc)
 ```
 
 This produces:
-- `machismo` — the Mach-O loader executable
+- `machgate` — the Mach-O loader executable
 - `libsystem_shim.so` — Apple libSystem.B.dylib compatibility shim
 - `libgame_patches.so` — game-specific function replacements (NecroDancer)
 - `wrapgen` — ELF wrapper code generator (utility)
@@ -95,7 +95,7 @@ cd build-libcxx && ninja cxx cxxabi && cd ..
 ## Usage
 
 ```bash
-./machismo /path/to/macho-binary [args...]
+./machgate /path/to/macho-binary [args...]
 ```
 
 Machismo looks for a config file in this order:

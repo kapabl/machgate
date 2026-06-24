@@ -6,5 +6,5 @@ MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
 BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
 [ -f tests/fixtures/exit42 ] || bash tests/fixtures/build_fixtures.sh
 status=0
-"$BUILD_DIR/machismo" tests/fixtures/exit42 2>/dev/null || status=$?
+"$BUILD_DIR/machgate" tests/fixtures/exit42 2>/dev/null || status=$?
 [ $status -eq 42 ]

@@ -21,8 +21,8 @@ rm -f "$FIXTURE" "$FIXTURE_DIR/darwin_range_400_plus.o"
     -o "$FIXTURE" -e _main "$FIXTURE_DIR/darwin_range_400_plus.o"
 rm -f "$FIXTURE_DIR/darwin_range_400_plus.o"
 
-if ! nm "$BUILD_DIR/machismo" 2>/dev/null | grep -q 'syscall_range_400_plus_dispatch'; then
-    echo "SKIP: syscall_range_400_plus_dispatch is not linked into machismo yet"
+if ! nm "$BUILD_DIR/machgate" 2>/dev/null | grep -q 'syscall_range_400_plus_dispatch'; then
+    echo "SKIP: syscall_range_400_plus_dispatch is not linked into machgate yet"
     exit 0
 fi
 
@@ -36,7 +36,7 @@ rm -f "$FIXTURE_DIR/range_400.sock" \
       "$FIXTURE_DIR/range_400_guarded_dprotected.tmp"
 printf "src" > "$FIXTURE_DIR/range_400_rename_src.tmp"
 printf "excl" > "$FIXTURE_DIR/range_400_rename_excl_src.tmp"
-output="$("$BUILD_DIR/machismo" tests/fixtures/darwin_range_400_plus 2>/dev/null)"
+output="$("$BUILD_DIR/machgate" tests/fixtures/darwin_range_400_plus 2>/dev/null)"
 [ "$output" = "range400 0123" ]
 [ ! -e "$FIXTURE_DIR/range_400_rename_src.tmp" ]
 [ -e "$FIXTURE_DIR/range_400_rename_dst.tmp" ]

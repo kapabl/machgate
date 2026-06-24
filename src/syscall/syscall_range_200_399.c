@@ -1,4 +1,5 @@
 #include "syscall_range_200_399.h"
+#include "execve_reexec.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +27,8 @@
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
+
+extern const char* __machismo_guest_executable_path;
 
 #define DARWIN_SYS_truncate 200
 #define DARWIN_SYS_ftruncate 201
@@ -1701,12 +1704,19 @@ static void handle_proc_pidinfo(struct syscall_gate_state* state, pid_t pid,
 	case DARWIN_PROC_PIDPATHINFO: {
 		char path[DARWIN_MAXPATHLEN];
 		memset(path, 0, sizeof(path));
-		ssize_t result = (ssize_t)syscall(SYS_readlinkat, AT_FDCWD,
-		                                  "/proc/self/exe", path,
-		                                  sizeof(path) - 1);
-		if (result < 0) {
-			set_failure(state, errno_to_darwin(errno ? errno : EIO));
-			return;
+		if (pid == (pid_t)syscall(SYS_getpid) &&
+		    __machismo_guest_executable_path &&
+		    *__machismo_guest_executable_path) {
+			strncpy(path, __machismo_guest_executable_path,
+			        sizeof(path) - 1);
+		} else {
+			ssize_t result = (ssize_t)syscall(SYS_readlinkat, AT_FDCWD,
+			                                  "/proc/self/exe", path,
+			                                  sizeof(path) - 1);
+			if (result < 0) {
+				set_failure(state, errno_to_darwin(errno ? errno : EIO));
+				return;
+			}
 		}
 		finish_proc_copy(state, buffer, buffer_size, path, sizeof(path));
 		return;
@@ -3264,9 +3274,9 @@ static void handle_copyfile(struct syscall_gate_state* state)
 		char* cursor = buffer;
 		long remaining = read_result;
 		while (remaining > 0) {
-			errno = 0;
-			long write_result = syscall(SYS_write, out_fd, cursor,
-			                            (size_t)remaining);
+			long write_result = machgate_syscall_write_no_sigpipe(out_fd,
+			                                                      cursor,
+			                                                      (size_t)remaining);
 			if (write_result < 0) {
 				int saved_errno = errno ? errno : EIO;
 				syscall(SYS_close, in_fd);
@@ -4456,6 +4466,11 @@ static void handle_posix_spawn(struct syscall_gate_state* state)
 	const char* path = (const char*)state->x[1];
 	struct stat linux_stat;
 
+	if (getenv("MACHGATE_TRACE_SYSCALL") || getenv("MACHGATE_TRACE_SHIM")) {
+		fprintf(stderr, "machgate: posix_spawn unsupported path='%s'\n",
+		        path ? path : "(null)");
+	}
+
 	if (!path) {
 		set_failure(state, DARWIN_EFAULT);
 		return;
@@ -4521,12 +4536,21 @@ static void handle_identitysvc(struct syscall_gate_state* state)
 
 static void handle_mac_execve(struct syscall_gate_state* state)
 {
+	if (getenv("MACHGATE_TRACE_SYSCALL") || getenv("MACHGATE_TRACE_SHIM")) {
+		fprintf(stderr, "machgate: __mac_execve path='%s' mac_label=%p\n",
+		        state->x[0] ? (const char*)state->x[0] : "(null)",
+		        (void*)state->x[3]);
+	}
+
 	if (!state->x[0]) {
 		set_failure(state, DARWIN_EFAULT);
 		return;
 	}
 
-	set_failure(state, DARWIN_ENOTSUP);
+	int result = machgate_execve_macho_guest((const char*)state->x[0],
+	                                        (char* const*)state->x[1],
+	                                        (char* const*)state->x[2]);
+	set_failure(state, result);
 }
 
 static int is_eventfd_backed_queue(int fd)
@@ -5427,10 +5451,9 @@ int syscall_range_200_399_dispatch(struct syscall_gate_state* state)
 		return 1;
 	}
 	case DARWIN_SYS_write_nocancel: {
-		errno = 0;
-		long result = syscall(SYS_write, (int)state->x[0],
-		                      (const void*)state->x[1],
-		                      (size_t)state->x[2]);
+		long result = machgate_syscall_write_no_sigpipe((int)state->x[0],
+		                                                (const void*)state->x[1],
+		                                                (size_t)state->x[2]);
 		finish_syscall_result(state, result);
 		return 1;
 	}

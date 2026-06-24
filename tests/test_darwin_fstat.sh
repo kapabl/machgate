@@ -9,4 +9,4 @@ MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
 BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
 [ -f tests/fixtures/darwin_fstat ] || bash tests/fixtures/build_fixtures.sh
 cd tests/fixtures
-"$BUILD_DIR/machismo" darwin_fstat 2>/dev/null
+"$BUILD_DIR/machgate" darwin_fstat 2>/dev/null

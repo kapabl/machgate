@@ -1,0 +1,14 @@
+# Temporary pass-only Rust expansion stability manifest.
+#
+# Derived from tests/external/rust_expansion_manifest.txt for repeat validation
+# of the ten rows that passed the initial 2026-06-24-A run.
+xh|https://github.com/ducaale/xh/releases/download/v0.26.1/xh-v0.26.1-aarch64-apple-darwin.tar.gz|c66e2f66cf0d486066f8bc6bb5e0b567fa62519b3cb9f68b4a2cfef8bce92892|xh-v0.26.1-aarch64-apple-darwin/xh|--version
+uv|https://github.com/astral-sh/uv/releases/download/0.11.24/uv-aarch64-apple-darwin.tar.gz|7578c6087c5cd76981732b1f5d126248101faebdf81016ba780a65ce03653cdf|uv-aarch64-apple-darwin/uv|--version
+tealdeer|https://github.com/tealdeer-rs/tealdeer/releases/download/v1.8.1/tealdeer-macos-aarch64|4b3ecca53bdc41bc897c35f6457a6d2bb25aedc00816fdb3c28e947ef2900a34|.|--version
+gping|https://github.com/orf/gping/releases/download/gping-v1.20.2/gping-macOS-arm64.tar.gz|4f63da3376abdc9e8bf4e8a562f57de911330fc416488eeaade39f8100018d2e|gping|--version
+bandwhich|https://github.com/imsnif/bandwhich/releases/download/v0.23.1/bandwhich-v0.23.1-aarch64-apple-darwin.tar.gz|3b440e6a48c94c2ca7507d45f769d8e97fe9069bafa6f718b045a185addfad36|bandwhich|--version
+difftastic|https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-aarch64-apple-darwin.tar.gz|c958b87885a5825a356c5899ac7ecdd752a7942084199f2be4bc0bf8c9de8e33|difft|--version
+cargo-deny|https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.9/cargo-deny-0.19.9-aarch64-apple-darwin.tar.gz|be6fd555e910ac360e25cbef4f16ead47d87d2545fa07aa27223ef0f9af1a02c|cargo-deny-0.19.9-aarch64-apple-darwin/cargo-deny|--version
+zellij|https://github.com/zellij-org/zellij/releases/download/v0.44.3/zellij-aarch64-apple-darwin.tar.gz|b6acf83a7739cf5f0f4e9bd47709642d4d98acbbf8c34d4a12c6e706f531da61|zellij|--version
+lsd|https://github.com/lsd-rs/lsd/releases/download/v1.2.0/lsd-v1.2.0-aarch64-apple-darwin.tar.gz|9e34a5d392ff913302098aad0543dafa1883c531eaf229b82f086c3fca675e3e|lsd-v1.2.0-aarch64-apple-darwin/lsd|--version
+cargo-nextest|https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.138/cargo-nextest-0.9.138-universal-apple-darwin.tar.gz|124baa34d160355fa8a8bed053856270cfcf132659e76a0bc8bbcdfc093266b7|cargo-nextest|--version

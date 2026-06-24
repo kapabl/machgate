@@ -40,7 +40,7 @@ rm -rf "$FIXTURE_DIR/range_200_399.tmp" \
        "$FIXTURE_DIR/range_200_399.exchange_b" \
        /dev/shm/machgate_range_200_399
 printf "xxxxx" > "$FIXTURE_DIR/range_200_399.done"
-output="$(cd "$FIXTURE_DIR" && "$BUILD_DIR/machismo" darwin_range_200_399 2>/dev/null)"
+output="$(cd "$FIXTURE_DIR" && "$BUILD_DIR/machgate" darwin_range_200_399 2>/dev/null)"
 [ "$output" = "range-200-ok" ]
 [ "$(wc -c < "$FIXTURE_DIR/range_200_399.tmp")" -eq 5 ]
 [ "$(wc -c < "$FIXTURE_DIR/range_200_399.done")" -eq 5 ]

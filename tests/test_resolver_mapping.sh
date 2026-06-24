@@ -23,7 +23,7 @@ EOF
 output=$(MACHISMO_CONFIG="$TMPDIR/machismo.conf" \
     SDL_VIDEODRIVER=dummy \
     LD_LIBRARY_PATH="$BUILD_DIR" \
-    "$BUILD_DIR/machismo" "$NECRO_BIN" 2>&1 || true)
+    "$BUILD_DIR/machgate" "$NECRO_BIN" 2>&1 || true)
 
 # Should load the mapping config
 echo "$output" | grep -q "loaded.*dylib mappings"

@@ -45,6 +45,12 @@ echo "  Built darwin_exit42"
 rm -f darwin_write_stdout.o
 echo "  Built darwin_write_stdout"
 
+# --- darwin_execve_exit42: static arm64 Mach-O, Darwin execve to darwin_exit42 ---
+"$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj -o darwin_execve_exit42.o darwin_execve_exit42.s
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 -o darwin_execve_exit42 -e _main darwin_execve_exit42.o
+rm -f darwin_execve_exit42.o
+echo "  Built darwin_execve_exit42"
+
 # --- darwin_read_close: static arm64 Mach-O, Darwin read + close ---
 "$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj -o darwin_read_close.o darwin_read_close.s
 "$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 -o darwin_read_close -e _main darwin_read_close.o

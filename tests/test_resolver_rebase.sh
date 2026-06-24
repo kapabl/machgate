@@ -12,7 +12,7 @@ if [ ! -f "$NECRO_BIN" ]; then
     exit 0
 fi
 
-output=$(MACHISMO_DYLIB_MAP=dylib_map.conf LD_LIBRARY_PATH="$BUILD_DIR" "$BUILD_DIR/machismo" "$NECRO_BIN" 2>&1 || true)
+output=$(MACHISMO_DYLIB_MAP=dylib_map.conf LD_LIBRARY_PATH="$BUILD_DIR" "$BUILD_DIR/machgate" "$NECRO_BIN" 2>&1 || true)
 
 # Should have applied a significant number of rebases
 # NecroDancer has ~23000 rebase fixups

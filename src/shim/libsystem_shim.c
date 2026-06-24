@@ -12,6 +12,7 @@
  */
 
 #define _GNU_SOURCE
+#include "../syscall/execve_reexec.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,7 @@
 #include <ctype.h>
 #include <pthread.h>
 #include <signal.h>
+#include <ucontext.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <sys/syscall.h>
@@ -33,8 +35,12 @@
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>
+#include <sys/uio.h>
 #include <linux/futex.h>
 #include <poll.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <dirent.h>
@@ -46,6 +52,32 @@
 extern char **environ;
 
 static int shim_hw_ncpu(void);
+static int shim_trace_enabled(void);
+static int shim_delta_vm_trace_enabled(void);
+static pid_t shim_trace_tid(void);
+static unsigned long shim_trace_pthread_self(void);
+static const char* shim_trace_path(const char* path);
+static int translate_oflags(int darwin_flags);
+static pid_t machgate_shim_process_pid;
+
+#if defined(__GNUC__) || defined(__clang__)
+#define SHIM_CALLER_RETURN_ADDRESS() \
+	__builtin_extract_return_addr(__builtin_return_address(0))
+#else
+#define SHIM_CALLER_RETURN_ADDRESS() NULL
+#endif
+
+__attribute__((constructor))
+static void init_machgate_process_pid(void)
+{
+	machgate_shim_process_pid = (pid_t)syscall(SYS_getpid);
+}
+
+static int machgate_shim_in_fork_child(void)
+{
+	return machgate_shim_process_pid &&
+	       (pid_t)syscall(SYS_getpid) != machgate_shim_process_pid;
+}
 
 struct darwin_sigaltstack {
 	uint64_t sp;
@@ -325,6 +357,55 @@ int vm_deallocate(uint32_t target_task, uint64_t address, uint64_t size)
 	return 5;
 }
 
+static int mach_vm_prot_to_linux(int protection)
+{
+	int result = PROT_NONE;
+
+	if (protection & 0x1)
+		result |= PROT_READ;
+	if (protection & 0x2)
+		result |= PROT_WRITE;
+	if (protection & 0x4)
+		result |= PROT_EXEC;
+	return result;
+}
+
+int vm_allocate(uint32_t target_task, uint64_t* address, uint64_t size,
+                int flags)
+{
+	(void)target_task;
+
+	if (!address || !size)
+		return 4;
+
+	void* requested = *address ? (void*)(uintptr_t)*address : NULL;
+	int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+	if (requested && !(flags & 0x1))
+		mmap_flags |= MAP_FIXED_NOREPLACE;
+
+	void* result = mmap(requested, (size_t)size, PROT_READ | PROT_WRITE,
+	                    mmap_flags, -1, 0);
+	if (result == MAP_FAILED)
+		return 3;
+
+	*address = (uint64_t)(uintptr_t)result;
+	return 0;
+}
+
+int vm_protect(uint32_t target_task, uint64_t address, uint64_t size,
+               uint8_t set_maximum, int new_protection)
+{
+	(void)target_task;
+	(void)set_maximum;
+
+	if (!address || !size)
+		return 4;
+	if (mprotect((void*)(uintptr_t)address, (size_t)size,
+	             mach_vm_prot_to_linux(new_protection)) == 0)
+		return 0;
+	return 2;
+}
+
 int host_statistics(uint32_t host_priv, int flavor, void* host_info_out,
                     uint32_t* host_info_count)
 {
@@ -396,16 +477,40 @@ int host_processor_info(uint32_t host, int flavor, uint32_t* out_processor_count
                         void** out_processor_info,
                         uint32_t* out_processor_info_count)
 {
+#define DARWIN_PROCESSOR_CPU_LOAD_INFO 2
+#define DARWIN_CPU_STATE_MAX 4
+#define DARWIN_CPU_STATE_SYSTEM 1
+#define DARWIN_CPU_STATE_IDLE 2
 	(void)host;
-	(void)flavor;
 
-	if (out_processor_count)
-		*out_processor_count = (uint32_t)shim_hw_ncpu();
-	if (out_processor_info)
-		*out_processor_info = NULL;
-	if (out_processor_info_count)
-		*out_processor_info_count = 0;
+	if (!out_processor_count || !out_processor_info ||
+	    !out_processor_info_count)
+		return 4;
+	if (flavor != DARWIN_PROCESSOR_CPU_LOAD_INFO)
+		return 5;
+
+	uint32_t processor_count = (uint32_t)shim_hw_ncpu();
+	uint32_t info_count = processor_count * DARWIN_CPU_STATE_MAX;
+	size_t info_size = (size_t)info_count * sizeof(uint32_t);
+	uint32_t* processor_info = mmap(NULL, info_size, PROT_READ | PROT_WRITE,
+	                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (processor_info == MAP_FAILED)
+		return 3;
+
+	for (uint32_t index = 0; index < processor_count; index++) {
+		uint32_t* cpu = processor_info + index * DARWIN_CPU_STATE_MAX;
+		cpu[DARWIN_CPU_STATE_SYSTEM] = 1;
+		cpu[DARWIN_CPU_STATE_IDLE] = 1;
+	}
+
+	*out_processor_count = processor_count;
+	*out_processor_info = processor_info;
+	*out_processor_info_count = info_count;
 	return 0;
+#undef DARWIN_CPU_STATE_IDLE
+#undef DARWIN_CPU_STATE_SYSTEM
+#undef DARWIN_CPU_STATE_MAX
+#undef DARWIN_PROCESSOR_CPU_LOAD_INFO
 }
 
 int host_statistics64(uint32_t host, int flavor, void* info,
@@ -1123,7 +1228,14 @@ static const char cf_url_volume_is_removable_key[] = "NSURLVolumeIsRemovableKey"
 static const char cf_url_volume_name_key[] = "NSURLVolumeNameKey";
 static const char cf_url_volume_total_capacity_key[] = "NSURLVolumeTotalCapacityKey";
 static const char cf_url_volume_uuid_string_key[] = "NSURLVolumeUUIDStringKey";
+static const char security_class_key[] = "kSecClass";
+static const char security_class_certificate_object[] = "kSecClassCertificate";
+static const char security_match_limit_key[] = "kSecMatchLimit";
+static const char security_match_limit_all_object[] = "kSecMatchLimitAll";
+static const char security_policy_apple_ssl_object[] = "kSecPolicyAppleSSL";
+static const char security_policy_oid_key[] = "kSecPolicyOid";
 static const char security_policy_ssl_object[] = "MachGate/SecPolicySSL";
+static const char security_return_ref_key[] = "kSecReturnRef";
 static const char security_trust_object[] = "MachGate/SecTrust";
 
 const double kCFAbsoluteTimeIntervalSince1970 = 978307200.0;
@@ -1141,6 +1253,13 @@ const void* kCFURLVolumeIsRemovableKey = cf_url_volume_is_removable_key;
 const void* kCFURLVolumeNameKey = cf_url_volume_name_key;
 const void* kCFURLVolumeTotalCapacityKey = cf_url_volume_total_capacity_key;
 const void* kCFURLVolumeUUIDStringKey = cf_url_volume_uuid_string_key;
+const void* kSecClass = security_class_key;
+const void* kSecClassCertificate = security_class_certificate_object;
+const void* kSecMatchLimit = security_match_limit_key;
+const void* kSecMatchLimitAll = security_match_limit_all_object;
+const void* kSecPolicyAppleSSL = security_policy_apple_ssl_object;
+const void* kSecPolicyOid = security_policy_oid_key;
+const void* kSecReturnRef = security_return_ref_key;
 const char __CFConstantStringClassReference[] = "__CFConstantStringClassReference";
 const struct cf_array_callbacks kCFTypeArrayCallBacks = {
 	0,
@@ -1918,6 +2037,33 @@ CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust)
 	return CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
 }
 
+OSStatus SecItemCopyMatching(CFDictionaryRef query, const void** result)
+{
+	(void)query;
+
+	if (result)
+		*result = NULL;
+	return -25300;
+}
+
+CFDictionaryRef SecPolicyCopyProperties(SecPolicyRef policy)
+{
+	(void)policy;
+	return CFDictionaryCreate(NULL, NULL, NULL, 0, NULL, NULL);
+}
+
+OSStatus SecTrustSettingsCopyTrustSettings(SecCertificateRef certificate,
+                                           int domain,
+                                           CFArrayRef* trust_settings)
+{
+	(void)certificate;
+	(void)domain;
+
+	if (trust_settings)
+		*trust_settings = NULL;
+	return -25300;
+}
+
 int res_9_ninit(void* state)
 {
 	(void)state;
@@ -2274,6 +2420,14 @@ typedef int32_t UErrorCode;
 #define U_ILLEGAL_ARGUMENT_ERROR 1
 #define U_BUFFER_OVERFLOW_ERROR 15
 #define UBRK_DONE (-1)
+#define UCOL_DEFAULT (-1)
+#define UCOL_LESS (-1)
+#define UCOL_EQUAL 0
+#define UCOL_GREATER 1
+#define UCOL_TERTIARY 2
+#define UCOL_OFF 16
+#define UCOL_STRENGTH 5
+#define UCOL_ATTRIBUTE_COUNT 8
 
 struct machgate_ubrk {
 	int32_t position;
@@ -2282,6 +2436,52 @@ struct machgate_ubrk {
 
 struct machgate_ucal {
 	double millis;
+};
+
+struct machgate_ucfpos {
+	int32_t category;
+	int32_t field;
+	int32_t start;
+	int32_t limit;
+};
+
+struct machgate_ucol {
+	int32_t attributes[UCOL_ATTRIBUTE_COUNT];
+};
+
+struct machgate_uenum {
+	int32_t index;
+	int32_t count;
+	const char* const* values;
+};
+
+struct machgate_udat {
+	struct machgate_ucal calendar;
+};
+
+struct machgate_formatted_value {
+	int32_t length;
+	uint16_t text[256];
+};
+
+struct machgate_unumsys {
+	char name[16];
+};
+
+struct machgate_utext {
+	uint32_t magic;
+	int32_t flags;
+	int32_t provider_properties;
+	int32_t size_of_struct;
+};
+
+struct machgate_uidna_info {
+	int16_t size;
+	uint8_t is_transitional_different;
+	uint8_t reserved_b3;
+	uint32_t errors;
+	int32_t reserved_i2;
+	int32_t reserved_i3;
 };
 
 static int icu_is_ascii_alpha(UChar32 value)
@@ -2795,13 +2995,1506 @@ void ucfpos_close(void* field_position)
 	free(field_position);
 }
 
+void* ucfpos_open(UErrorCode* status)
+{
+	struct machgate_ucfpos* field_position = calloc(1, sizeof(*field_position));
+	if (!field_position) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return field_position;
+}
+
+void ucfpos_reset(void* field_position, UErrorCode* status)
+{
+	struct machgate_ucfpos* position = field_position;
+	if (position)
+		memset(position, 0, sizeof(*position));
+	if (status)
+		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+}
+
 void ucfpos_constrainCategory(void* field_position, int32_t category,
                               UErrorCode* status)
 {
-	(void)field_position;
-	(void)category;
+	struct machgate_ucfpos* position = field_position;
+	if (position) {
+		position->category = category;
+		position->field = 0;
+	}
+	if (status)
+		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+}
+
+void ucfpos_constrainField(void* field_position, int32_t category,
+                           int32_t field, UErrorCode* status)
+{
+	struct machgate_ucfpos* position = field_position;
+	if (position) {
+		position->category = category;
+		position->field = field;
+	}
+	if (status)
+		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+}
+
+int32_t ucfpos_getCategory(const void* field_position, UErrorCode* status)
+{
+	const struct machgate_ucfpos* position = field_position;
+	if (status)
+		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+	return position ? position->category : 0;
+}
+
+int32_t ucfpos_getField(const void* field_position, UErrorCode* status)
+{
+	const struct machgate_ucfpos* position = field_position;
+	if (status)
+		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+	return position ? position->field : 0;
+}
+
+void ucfpos_getIndexes(const void* field_position, int32_t* start,
+                       int32_t* limit, UErrorCode* status)
+{
+	const struct machgate_ucfpos* position = field_position;
+	if (start)
+		*start = position ? position->start : 0;
+	if (limit)
+		*limit = position ? position->limit : 0;
+	if (status)
+		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+}
+
+static void* ucol_alloc(UErrorCode* status)
+{
+	struct machgate_ucol* collator = calloc(1, sizeof(*collator));
+	if (!collator) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+
+	for (int index = 0; index < UCOL_ATTRIBUTE_COUNT; index++)
+		collator->attributes[index] = UCOL_DEFAULT;
+	collator->attributes[UCOL_STRENGTH] = UCOL_TERTIARY;
 	if (status)
 		*status = U_ZERO_ERROR;
+	return collator;
+}
+
+void* ucol_open(const char* locale, UErrorCode* status)
+{
+	(void)locale;
+	return ucol_alloc(status);
+}
+
+void ucol_close(void* collator)
+{
+	free(collator);
+}
+
+int32_t ucol_countAvailable(void)
+{
+	return 1;
+}
+
+const char* ucol_getAvailable(int32_t index)
+{
+	return index == 0 ? "en_US" : NULL;
+}
+
+void* ucol_getKeywordValues(const char* keyword, UErrorCode* status)
+{
+	if (keyword && strcmp(keyword, "collation") != 0) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return NULL;
+}
+
+void* ucol_getKeywordValuesForLocale(const char* key, const char* locale,
+                                     uint8_t commonly_used,
+                                     UErrorCode* status)
+{
+	(void)key;
+	(void)locale;
+	(void)commonly_used;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return NULL;
+}
+
+const uint16_t* ucol_getRules(const void* collator, int32_t* length)
+{
+	static const uint16_t empty_rules[1] = { 0 };
+	(void)collator;
+	if (length)
+		*length = 0;
+	return empty_rules;
+}
+
+int32_t ucol_getAttribute(const void* collator, int32_t attribute,
+                          UErrorCode* status)
+{
+	const struct machgate_ucol* col = collator;
+	if (status)
+		*status = col ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+	if (!col)
+		return UCOL_DEFAULT;
+	if (attribute < 0 || attribute >= UCOL_ATTRIBUTE_COUNT)
+		return UCOL_DEFAULT;
+	return col->attributes[attribute];
+}
+
+void ucol_setAttribute(void* collator, int32_t attribute, int32_t value,
+                       UErrorCode* status)
+{
+	struct machgate_ucol* col = collator;
+	if (!col || attribute < 0 || attribute >= UCOL_ATTRIBUTE_COUNT) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return;
+	}
+	col->attributes[attribute] = value;
+	if (status)
+		*status = U_ZERO_ERROR;
+}
+
+static int32_t ucol_utf16_length(const uint16_t* text, int32_t length)
+{
+	if (!text)
+		return 0;
+	if (length >= 0)
+		return length;
+
+	length = 0;
+	while (text[length])
+		length++;
+	return length;
+}
+
+static int ucol_compare_int32(int32_t left, int32_t right)
+{
+	if (left < right)
+		return UCOL_LESS;
+	if (left > right)
+		return UCOL_GREATER;
+	return UCOL_EQUAL;
+}
+
+int32_t ucol_strcoll(const void* collator, const uint16_t* source,
+                     int32_t source_length, const uint16_t* target,
+                     int32_t target_length)
+{
+	(void)collator;
+	source_length = ucol_utf16_length(source, source_length);
+	target_length = ucol_utf16_length(target, target_length);
+
+	int32_t common_length = source_length < target_length ? source_length : target_length;
+	for (int32_t index = 0; index < common_length; index++) {
+		int result = ucol_compare_int32(source[index], target[index]);
+		if (result != UCOL_EQUAL)
+			return result;
+	}
+	return ucol_compare_int32(source_length, target_length);
+}
+
+int32_t ucol_strcollUTF8(const void* collator, const char* source,
+                         int32_t source_length, const char* target,
+                         int32_t target_length, UErrorCode* status)
+{
+	(void)collator;
+	if (!source)
+		source = "";
+	if (!target)
+		target = "";
+	if (source_length < 0)
+		source_length = (int32_t)strlen(source);
+	if (target_length < 0)
+		target_length = (int32_t)strlen(target);
+
+	int32_t common_length = source_length < target_length ? source_length : target_length;
+	int result = memcmp(source, target, (size_t)common_length);
+	if (status)
+		*status = U_ZERO_ERROR;
+	if (result < 0)
+		return UCOL_LESS;
+	if (result > 0)
+		return UCOL_GREATER;
+	return ucol_compare_int32(source_length, target_length);
+}
+
+const uint16_t* ucurr_getName(const uint16_t* currency, const char* locale,
+                              int32_t name_style, uint8_t* is_choice_format,
+                              int32_t* length, UErrorCode* status)
+{
+	static const uint16_t empty_name[1] = { 0 };
+	(void)locale;
+	(void)name_style;
+	if (is_choice_format)
+		*is_choice_format = 0;
+	if (length) {
+		int32_t name_length = 0;
+		if (currency) {
+			while (currency[name_length])
+				name_length++;
+		}
+		*length = name_length;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return currency ? currency : empty_name;
+}
+
+void* ucurr_openISOCurrencies(uint32_t currency_type, UErrorCode* status)
+{
+	(void)currency_type;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return NULL;
+}
+
+void uenum_close(void* enumeration)
+{
+	free(enumeration);
+}
+
+int32_t uenum_count(void* enumeration, UErrorCode* status)
+{
+	const struct machgate_uenum* en = enumeration;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return en ? en->count : 0;
+}
+
+const char* uenum_next(void* enumeration, int32_t* result_length,
+                       UErrorCode* status)
+{
+	struct machgate_uenum* en = enumeration;
+	const char* result = NULL;
+	if (en && en->index < en->count && en->values)
+		result = en->values[en->index++];
+	if (result_length)
+		*result_length = result ? (int32_t)strlen(result) : 0;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return result;
+}
+
+const uint16_t* uenum_unext(void* enumeration, int32_t* result_length,
+                            UErrorCode* status)
+{
+	(void)enumeration;
+	if (result_length)
+		*result_length = 0;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return NULL;
+}
+
+void uenum_reset(void* enumeration, UErrorCode* status)
+{
+	struct machgate_uenum* en = enumeration;
+	if (en)
+		en->index = 0;
+	if (status)
+		*status = U_ZERO_ERROR;
+}
+
+void* udat_open(int32_t time_style, int32_t date_style, const char* locale,
+                const uint16_t* tz_id, int32_t tz_id_length,
+                const uint16_t* pattern, int32_t pattern_length,
+                UErrorCode* status)
+{
+	struct machgate_udat* date_format = calloc(1, sizeof(*date_format));
+	(void)time_style;
+	(void)date_style;
+	(void)locale;
+	(void)tz_id;
+	(void)tz_id_length;
+	(void)pattern;
+	(void)pattern_length;
+
+	if (!date_format) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	date_format->calendar.millis = icu_now_millis();
+	if (status)
+		*status = U_ZERO_ERROR;
+	return date_format;
+}
+
+void udat_close(void* date_format)
+{
+	free(date_format);
+}
+
+int32_t udat_format(const void* date_format, double date_to_format,
+                    uint16_t* result, int32_t result_length,
+                    void* position, UErrorCode* status)
+{
+	(void)date_format;
+	(void)date_to_format;
+	(void)position;
+	return utf16_copy_ascii(result, result_length, "1970-01-01", status);
+}
+
+int32_t udat_formatForFields(const void* date_format, double date_to_format,
+                             uint16_t* result, int32_t result_length,
+                             void* field_position_iterator,
+                             UErrorCode* status)
+{
+	(void)field_position_iterator;
+	return udat_format(date_format, date_to_format, result, result_length,
+	                   NULL, status);
+}
+
+const void* udat_getCalendar(const void* date_format)
+{
+	const struct machgate_udat* format = date_format;
+	return format ? &format->calendar : NULL;
+}
+
+int32_t udat_toPattern(const void* date_format, uint8_t localized,
+                       uint16_t* result, int32_t result_length,
+                       UErrorCode* status)
+{
+	(void)date_format;
+	(void)localized;
+	return utf16_copy_ascii(result, result_length, "yyyy-MM-dd", status);
+}
+
+void* udatpg_open(const char* locale, UErrorCode* status)
+{
+	int* generator = calloc(1, sizeof(*generator));
+	(void)locale;
+	if (!generator) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return generator;
+}
+
+void udatpg_close(void* generator)
+{
+	free(generator);
+}
+
+static int32_t utf16_copy(uint16_t* result, int32_t capacity,
+                          const uint16_t* text, int32_t length,
+                          UErrorCode* status)
+{
+	if (!text)
+		return utf16_copy_ascii(result, capacity, "", status);
+	if (length < 0) {
+		length = 0;
+		while (text[length])
+			length++;
+	}
+
+	if (result && capacity > 0) {
+		int32_t copy_length = length < capacity ? length : capacity - 1;
+		for (int32_t index = 0; index < copy_length; index++)
+			result[index] = text[index];
+		result[copy_length] = 0;
+	}
+
+	if (status)
+		*status = length >= capacity ? U_BUFFER_OVERFLOW_ERROR : U_ZERO_ERROR;
+	return length;
+}
+
+int32_t udatpg_getBestPatternWithOptions(void* generator,
+                                         const uint16_t* skeleton,
+                                         int32_t length, int32_t options,
+                                         uint16_t* best_pattern,
+                                         int32_t capacity,
+                                         UErrorCode* status)
+{
+	(void)generator;
+	(void)options;
+	return utf16_copy(best_pattern, capacity, skeleton, length, status);
+}
+
+int32_t udatpg_getFieldDisplayName(const void* generator, int32_t field,
+                                   int32_t width, uint16_t* field_name,
+                                   int32_t capacity, UErrorCode* status)
+{
+	(void)generator;
+	(void)field;
+	(void)width;
+	return utf16_copy_ascii(field_name, capacity, "field", status);
+}
+
+int32_t udatpg_getSkeleton(void* generator, const uint16_t* pattern,
+                           int32_t length, uint16_t* skeleton,
+                           int32_t capacity, UErrorCode* status)
+{
+	(void)generator;
+	return utf16_copy(skeleton, capacity, pattern, length, status);
+}
+
+void* udtitvfmt_open(const char* locale, const uint16_t* skeleton,
+                     int32_t skeleton_length, const uint16_t* tz_id,
+                     int32_t tz_id_length, UErrorCode* status)
+{
+	int* formatter = calloc(1, sizeof(*formatter));
+	(void)locale;
+	(void)skeleton;
+	(void)skeleton_length;
+	(void)tz_id;
+	(void)tz_id_length;
+	if (!formatter) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return formatter;
+}
+
+void udtitvfmt_close(void* formatter)
+{
+	free(formatter);
+}
+
+void* udtitvfmt_openResult(UErrorCode* status)
+{
+	struct machgate_formatted_value* result = calloc(1, sizeof(*result));
+	if (!result) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return result;
+}
+
+void udtitvfmt_closeResult(void* result)
+{
+	free(result);
+}
+
+void udtitvfmt_formatCalendarToResult(const void* formatter,
+                                      void* from_calendar,
+                                      void* to_calendar, void* result,
+                                      UErrorCode* status)
+{
+	(void)formatter;
+	(void)from_calendar;
+	(void)to_calendar;
+	(void)result;
+	if (status)
+		*status = U_ZERO_ERROR;
+}
+
+void udtitvfmt_formatToResult(const void* formatter, double from_date,
+                              double to_date, void* result,
+                              UErrorCode* status)
+{
+	(void)formatter;
+	(void)from_date;
+	(void)to_date;
+	(void)result;
+	if (status)
+		*status = U_ZERO_ERROR;
+}
+
+const void* udtitvfmt_resultAsValue(const void* result, UErrorCode* status)
+{
+	if (status)
+		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+	return result;
+}
+
+void* ufieldpositer_open(UErrorCode* status)
+{
+	int* iterator = calloc(1, sizeof(*iterator));
+	if (!iterator) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return iterator;
+}
+
+void ufieldpositer_close(void* iterator)
+{
+	free(iterator);
+}
+
+int32_t ufieldpositer_next(void* iterator, int32_t* begin_index,
+                           int32_t* end_index)
+{
+	(void)iterator;
+	if (begin_index)
+		*begin_index = 0;
+	if (end_index)
+		*end_index = 0;
+	return -1;
+}
+
+const uint16_t* ufmtval_getString(const void* formatted_value,
+                                  int32_t* length, UErrorCode* status)
+{
+	static const uint16_t empty[1] = { 0 };
+	const struct machgate_formatted_value* value = formatted_value;
+	if (length)
+		*length = value ? value->length : 0;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return value ? value->text : empty;
+}
+
+uint8_t ufmtval_nextPosition(const void* formatted_value,
+                             void* field_position, UErrorCode* status)
+{
+	(void)formatted_value;
+	(void)field_position;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return 0;
+}
+
+void* uidna_openUTS46(uint32_t options, UErrorCode* status)
+{
+	int* idna = calloc(1, sizeof(*idna));
+	(void)options;
+	if (!idna) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return idna;
+}
+
+void uidna_close(void* idna)
+{
+	free(idna);
+}
+
+static int32_t uidna_copy_name(const uint16_t* name, int32_t length,
+                               uint16_t* dest, int32_t capacity,
+                               struct machgate_uidna_info* info,
+                               UErrorCode* status)
+{
+	if (info) {
+		info->is_transitional_different = 0;
+		info->errors = 0;
+	}
+	return utf16_copy(dest, capacity, name, length, status);
+}
+
+int32_t uidna_nameToASCII(const void* idna, const uint16_t* name,
+                          int32_t length, uint16_t* dest, int32_t capacity,
+                          struct machgate_uidna_info* info,
+                          UErrorCode* status)
+{
+	(void)idna;
+	return uidna_copy_name(name, length, dest, capacity, info, status);
+}
+
+int32_t uidna_nameToUnicode(const void* idna, const uint16_t* name,
+                            int32_t length, uint16_t* dest, int32_t capacity,
+                            struct machgate_uidna_info* info,
+                            UErrorCode* status)
+{
+	(void)idna;
+	return uidna_copy_name(name, length, dest, capacity, info, status);
+}
+
+void* uldn_openForContext(const char* locale, const int32_t* contexts,
+                          int32_t length, UErrorCode* status)
+{
+	int* display_names = calloc(1, sizeof(*display_names));
+	(void)locale;
+	(void)contexts;
+	(void)length;
+	if (!display_names) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return display_names;
+}
+
+void uldn_close(void* display_names)
+{
+	free(display_names);
+}
+
+static int32_t uldn_copy_display_name(const char* text, uint16_t* result,
+                                      int32_t capacity, UErrorCode* status)
+{
+	return utf16_copy_ascii(result, capacity, text ? text : "", status);
+}
+
+int32_t uldn_keyValueDisplayName(const void* display_names, const char* key,
+                                 const char* value, uint16_t* result,
+                                 int32_t capacity, UErrorCode* status)
+{
+	(void)display_names;
+	(void)key;
+	return uldn_copy_display_name(value, result, capacity, status);
+}
+
+int32_t uldn_localeDisplayName(const void* display_names, const char* locale,
+                               uint16_t* result, int32_t capacity,
+                               UErrorCode* status)
+{
+	(void)display_names;
+	return uldn_copy_display_name(locale, result, capacity, status);
+}
+
+int32_t uldn_regionDisplayName(const void* display_names, const char* region,
+                               uint16_t* result, int32_t capacity,
+                               UErrorCode* status)
+{
+	(void)display_names;
+	return uldn_copy_display_name(region, result, capacity, status);
+}
+
+int32_t uldn_scriptDisplayName(const void* display_names, const char* script,
+                               uint16_t* result, int32_t capacity,
+                               UErrorCode* status)
+{
+	(void)display_names;
+	return uldn_copy_display_name(script, result, capacity, status);
+}
+
+void* ulistfmt_openForType(const char* locale, int32_t type, int32_t width,
+                           UErrorCode* status)
+{
+	int* formatter = calloc(1, sizeof(*formatter));
+	(void)locale;
+	(void)type;
+	(void)width;
+	if (!formatter) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return formatter;
+}
+
+void ulistfmt_close(void* formatter)
+{
+	free(formatter);
+}
+
+void* ulistfmt_openResult(UErrorCode* status)
+{
+	struct machgate_formatted_value* result = calloc(1, sizeof(*result));
+	if (!result) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return result;
+}
+
+void ulistfmt_closeResult(void* result)
+{
+	free(result);
+}
+
+static int32_t ulistfmt_copy_first(const uint16_t* const strings[],
+                                   const int32_t* string_lengths,
+                                   int32_t string_count, uint16_t* result,
+                                   int32_t capacity, UErrorCode* status)
+{
+	if (!strings || string_count <= 0 || !strings[0])
+		return utf16_copy_ascii(result, capacity, "", status);
+	int32_t length = string_lengths ? string_lengths[0] : -1;
+	return utf16_copy(result, capacity, strings[0], length, status);
+}
+
+int32_t ulistfmt_format(const void* formatter, const uint16_t* const strings[],
+                        const int32_t* string_lengths, int32_t string_count,
+                        uint16_t* result, int32_t capacity,
+                        UErrorCode* status)
+{
+	(void)formatter;
+	return ulistfmt_copy_first(strings, string_lengths, string_count, result,
+	                           capacity, status);
+}
+
+void ulistfmt_formatStringsToResult(const void* formatter,
+                                    const uint16_t* const strings[],
+                                    const int32_t* string_lengths,
+                                    int32_t string_count, void* result,
+                                    UErrorCode* status)
+{
+	struct machgate_formatted_value* value = result;
+	(void)formatter;
+	if (value) {
+		value->length = ulistfmt_copy_first(strings, string_lengths, string_count,
+		                                    value->text, 256, status);
+		return;
+	}
+	if (status)
+		*status = U_ILLEGAL_ARGUMENT_ERROR;
+}
+
+const void* ulistfmt_resultAsValue(const void* result, UErrorCode* status)
+{
+	if (status)
+		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+	return result;
+}
+
+static int32_t char_copy(char* result, int32_t capacity, const char* text,
+                         UErrorCode* status)
+{
+	int32_t length = (int32_t)strlen(text);
+
+	if (result && capacity > 0) {
+		int32_t copy_length = length < capacity ? length : capacity - 1;
+		memcpy(result, text, (size_t)copy_length);
+		result[copy_length] = 0;
+	}
+
+	if (status)
+		*status = length >= capacity ? U_BUFFER_OVERFLOW_ERROR : U_ZERO_ERROR;
+	return length;
+}
+
+static const char* uloc_or_default(const char* locale)
+{
+	return locale && locale[0] ? locale : "en_US";
+}
+
+int32_t uloc_addLikelySubtags(const char* locale, char* result,
+                              int32_t capacity, UErrorCode* status)
+{
+	return char_copy(result, capacity, uloc_or_default(locale), status);
+}
+
+int32_t uloc_canonicalize(const char* locale, char* result,
+                          int32_t capacity, UErrorCode* status)
+{
+	return char_copy(result, capacity, uloc_or_default(locale), status);
+}
+
+int32_t uloc_countAvailable(void)
+{
+	return 1;
+}
+
+int32_t uloc_forLanguageTag(const char* language_tag, char* locale,
+                            int32_t capacity, int32_t* parsed_length,
+                            UErrorCode* status)
+{
+	const char* source = uloc_or_default(language_tag);
+	if (parsed_length)
+		*parsed_length = (int32_t)strlen(source);
+	return char_copy(locale, capacity, source, status);
+}
+
+const char* uloc_getAvailable(int32_t index)
+{
+	return index == 0 ? "en_US" : NULL;
+}
+
+static int32_t uloc_copy_part(const char* locale, char* result,
+                              int32_t capacity, UErrorCode* status,
+                              int part)
+{
+	const char* source = uloc_or_default(locale);
+	char buffer[16] = "";
+	const char* separator = strchr(source, '_');
+
+	if (part == 0) {
+		size_t length = separator ? (size_t)(separator - source) : strlen(source);
+		if (length >= sizeof(buffer))
+			length = sizeof(buffer) - 1;
+		memcpy(buffer, source, length);
+		buffer[length] = 0;
+	} else if (separator) {
+		const char* country = separator + 1;
+		size_t length = strcspn(country, "_@.-");
+		if (length >= sizeof(buffer))
+			length = sizeof(buffer) - 1;
+		memcpy(buffer, country, length);
+		buffer[length] = 0;
+	}
+
+	return char_copy(result, capacity, buffer, status);
+}
+
+int32_t uloc_getBaseName(const char* locale, char* name, int32_t capacity,
+                         UErrorCode* status)
+{
+	const char* source = uloc_or_default(locale);
+	char buffer[128];
+	size_t length = strcspn(source, "@");
+	if (length >= sizeof(buffer))
+		length = sizeof(buffer) - 1;
+	memcpy(buffer, source, length);
+	buffer[length] = 0;
+	return char_copy(name, capacity, buffer, status);
+}
+
+int32_t uloc_getCharacterOrientation(const char* locale, UErrorCode* status)
+{
+	(void)locale;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return 0;
+}
+
+int32_t uloc_getCountry(const char* locale, char* country, int32_t capacity,
+                        UErrorCode* status)
+{
+	return uloc_copy_part(locale, country, capacity, status, 1);
+}
+
+const char* uloc_getDefault(void)
+{
+	return "en_US";
+}
+
+int32_t uloc_getKeywordValue(const char* locale, const char* keyword,
+                             char* buffer, int32_t capacity,
+                             UErrorCode* status)
+{
+	(void)locale;
+	(void)keyword;
+	return char_copy(buffer, capacity, "", status);
+}
+
+int32_t uloc_getLanguage(const char* locale, char* language,
+                         int32_t capacity, UErrorCode* status)
+{
+	return uloc_copy_part(locale, language, capacity, status, 0);
+}
+
+int32_t uloc_getScript(const char* locale, char* script, int32_t capacity,
+                       UErrorCode* status)
+{
+	(void)locale;
+	return char_copy(script, capacity, "", status);
+}
+
+int32_t uloc_minimizeSubtags(const char* locale, char* result,
+                             int32_t capacity, UErrorCode* status)
+{
+	return char_copy(result, capacity, uloc_or_default(locale), status);
+}
+
+void* uloc_openKeywords(const char* locale, UErrorCode* status)
+{
+	(void)locale;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return NULL;
+}
+
+int32_t uloc_setKeywordValue(const char* keyword, const char* value,
+                             char* buffer, int32_t capacity,
+                             UErrorCode* status)
+{
+	(void)keyword;
+	(void)value;
+	return char_copy(buffer, capacity, uloc_or_default(buffer), status);
+}
+
+int32_t uloc_toLanguageTag(const char* locale, char* language_tag,
+                           int32_t capacity, uint8_t strict,
+                           UErrorCode* status)
+{
+	(void)strict;
+	return char_copy(language_tag, capacity, uloc_or_default(locale), status);
+}
+
+const char* uloc_toUnicodeLocaleType(const char* keyword, const char* value)
+{
+	(void)keyword;
+	return value;
+}
+
+static int machgate_unorm2_nfc;
+static int machgate_unorm2_nfd;
+static int machgate_unorm2_nfkc;
+static int machgate_unorm2_nfkd;
+
+const void* unorm2_getNFCInstance(UErrorCode* status)
+{
+	if (status)
+		*status = U_ZERO_ERROR;
+	return &machgate_unorm2_nfc;
+}
+
+const void* unorm2_getNFDInstance(UErrorCode* status)
+{
+	if (status)
+		*status = U_ZERO_ERROR;
+	return &machgate_unorm2_nfd;
+}
+
+const void* unorm2_getNFKCInstance(UErrorCode* status)
+{
+	if (status)
+		*status = U_ZERO_ERROR;
+	return &machgate_unorm2_nfkc;
+}
+
+const void* unorm2_getNFKDInstance(UErrorCode* status)
+{
+	if (status)
+		*status = U_ZERO_ERROR;
+	return &machgate_unorm2_nfkd;
+}
+
+int32_t unorm2_normalize(const void* normalizer, const uint16_t* source,
+                         int32_t length, uint16_t* result,
+                         int32_t capacity, UErrorCode* status)
+{
+	(void)normalizer;
+	return utf16_copy(result, capacity, source, length, status);
+}
+
+int32_t unorm2_normalizeSecondAndAppend(const void* normalizer,
+                                        uint16_t* first, int32_t first_length,
+                                        int32_t first_capacity,
+                                        const uint16_t* second,
+                                        int32_t second_length,
+                                        UErrorCode* status)
+{
+	(void)normalizer;
+	if (!first || first_capacity <= 0) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return 0;
+	}
+	if (first_length < 0) {
+		first_length = 0;
+		while (first[first_length])
+			first_length++;
+	}
+	int32_t appended = utf16_copy(first + first_length,
+	                              first_capacity - first_length,
+	                              second, second_length, status);
+	return first_length + appended;
+}
+
+int32_t unorm2_getDecomposition(const void* normalizer, UChar32 value,
+                                uint16_t* decomposition, int32_t capacity,
+                                UErrorCode* status)
+{
+	(void)normalizer;
+	if (decomposition && capacity > 0)
+		decomposition[0] = 0;
+	if (status)
+		*status = U_ZERO_ERROR;
+	(void)value;
+	return 0;
+}
+
+uint8_t unorm2_isNormalized(const void* normalizer, const uint16_t* source,
+                            int32_t length, UErrorCode* status)
+{
+	(void)normalizer;
+	(void)source;
+	(void)length;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return 1;
+}
+
+void* unum_open(int32_t style, const uint16_t* pattern, int32_t pattern_length,
+                const char* locale, void* parse_error, UErrorCode* status)
+{
+	int* formatter = calloc(1, sizeof(*formatter));
+	(void)style;
+	(void)pattern;
+	(void)pattern_length;
+	(void)locale;
+	(void)parse_error;
+	if (!formatter) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return formatter;
+}
+
+void unum_close(void* formatter)
+{
+	free(formatter);
+}
+
+void unum_setAttribute(void* formatter, int32_t attribute, int32_t value)
+{
+	(void)formatter;
+	(void)attribute;
+	(void)value;
+}
+
+static void formatted_value_set_ascii(struct machgate_formatted_value* value,
+                                      const char* text)
+{
+	if (!value)
+		return;
+	value->length = utf16_copy_ascii(value->text, 256, text, NULL);
+}
+
+static void formatted_value_set_double(struct machgate_formatted_value* value,
+                                       double number)
+{
+	char buffer[64];
+	snprintf(buffer, sizeof(buffer), "%.15g", number);
+	formatted_value_set_ascii(value, buffer);
+}
+
+void* unumf_openForSkeletonAndLocale(const uint16_t* skeleton,
+                                     int32_t skeleton_length,
+                                     const char* locale,
+                                     UErrorCode* status)
+{
+	int* formatter = calloc(1, sizeof(*formatter));
+	(void)skeleton;
+	(void)skeleton_length;
+	(void)locale;
+	if (!formatter) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return formatter;
+}
+
+void unumf_close(void* formatter)
+{
+	free(formatter);
+}
+
+void* unumf_openResult(UErrorCode* status)
+{
+	struct machgate_formatted_value* result = calloc(1, sizeof(*result));
+	if (!result) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return result;
+}
+
+void unumf_closeResult(void* result)
+{
+	free(result);
+}
+
+void unumf_formatDecimal(const void* formatter, const char* value,
+                         int32_t value_length, void* result,
+                         UErrorCode* status)
+{
+	struct machgate_formatted_value* formatted = result;
+	char buffer[128];
+	(void)formatter;
+	if (!value)
+		value = "";
+	if (value_length < 0)
+		value_length = (int32_t)strlen(value);
+	if (value_length >= (int32_t)sizeof(buffer))
+		value_length = (int32_t)sizeof(buffer) - 1;
+	memcpy(buffer, value, (size_t)value_length);
+	buffer[value_length] = 0;
+	formatted_value_set_ascii(formatted, buffer);
+	if (status)
+		*status = formatted ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+}
+
+void unumf_formatDouble(const void* formatter, double value, void* result,
+                        UErrorCode* status)
+{
+	(void)formatter;
+	formatted_value_set_double(result, value);
+	if (status)
+		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+}
+
+void unumf_resultGetAllFieldPositions(const void* result, void* iterator,
+                                      UErrorCode* status)
+{
+	(void)result;
+	(void)iterator;
+	if (status)
+		*status = U_ZERO_ERROR;
+}
+
+int32_t unumf_resultToString(const void* result, uint16_t* buffer,
+                             int32_t capacity, UErrorCode* status)
+{
+	const struct machgate_formatted_value* formatted = result;
+	return utf16_copy(buffer, capacity,
+	                  formatted ? formatted->text : NULL,
+	                  formatted ? formatted->length : 0, status);
+}
+
+const void* unumf_resultAsValue(const void* result, UErrorCode* status)
+{
+	if (status)
+		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+	return result;
+}
+
+void* unumrf_openForSkeletonWithCollapseAndIdentityFallback(
+	const uint16_t* skeleton, int32_t skeleton_length, int32_t collapse,
+	int32_t identity_fallback, const char* locale, UErrorCode* status)
+{
+	int* formatter = calloc(1, sizeof(*formatter));
+	(void)skeleton;
+	(void)skeleton_length;
+	(void)collapse;
+	(void)identity_fallback;
+	(void)locale;
+	if (!formatter) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return formatter;
+}
+
+void unumrf_close(void* formatter)
+{
+	free(formatter);
+}
+
+void* unumrf_openResult(UErrorCode* status)
+{
+	return unumf_openResult(status);
+}
+
+void unumrf_closeResult(void* result)
+{
+	free(result);
+}
+
+void unumrf_formatDecimalRange(const void* formatter, const char* first,
+                               int32_t first_length, const char* second,
+                               int32_t second_length, void* result,
+                               UErrorCode* status)
+{
+	(void)formatter;
+	(void)second;
+	(void)second_length;
+	unumf_formatDecimal(NULL, first, first_length, result, status);
+}
+
+void unumrf_formatDoubleRange(const void* formatter, double first,
+                              double second, void* result,
+                              UErrorCode* status)
+{
+	(void)formatter;
+	(void)second;
+	unumf_formatDouble(NULL, first, result, status);
+}
+
+const void* unumrf_resultAsValue(const void* result, UErrorCode* status)
+{
+	return unumf_resultAsValue(result, status);
+}
+
+void unumsys_close(void* numbering_system)
+{
+	free(numbering_system);
+}
+
+static void* unumsys_alloc(const char* name, UErrorCode* status)
+{
+	struct machgate_unumsys* numbering_system = calloc(1, sizeof(*numbering_system));
+	if (!numbering_system) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	snprintf(numbering_system->name, sizeof(numbering_system->name), "%s",
+	         name && name[0] ? name : "latn");
+	if (status)
+		*status = U_ZERO_ERROR;
+	return numbering_system;
+}
+
+void* unumsys_open(const char* locale, UErrorCode* status)
+{
+	(void)locale;
+	return unumsys_alloc("latn", status);
+}
+
+void* unumsys_openByName(const char* name, UErrorCode* status)
+{
+	return unumsys_alloc(name, status);
+}
+
+void* unumsys_openAvailableNames(UErrorCode* status)
+{
+	static const char* const values[] = { "latn" };
+	struct machgate_uenum* enumeration = calloc(1, sizeof(*enumeration));
+	if (!enumeration) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	enumeration->count = 1;
+	enumeration->values = values;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return enumeration;
+}
+
+const char* unumsys_getName(const void* numbering_system)
+{
+	const struct machgate_unumsys* system = numbering_system;
+	return system ? system->name : "latn";
+}
+
+uint8_t unumsys_isAlgorithmic(const void* numbering_system)
+{
+	(void)numbering_system;
+	return 0;
+}
+
+void* uplrules_openForType(const char* locale, int32_t type, UErrorCode* status)
+{
+	int* rules = calloc(1, sizeof(*rules));
+	(void)locale;
+	(void)type;
+	if (!rules) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return rules;
+}
+
+void uplrules_close(void* rules)
+{
+	free(rules);
+}
+
+void* uplrules_getKeywords(const void* rules, UErrorCode* status)
+{
+	static const char* const values[] = { "other" };
+	struct machgate_uenum* enumeration = calloc(1, sizeof(*enumeration));
+	(void)rules;
+	if (!enumeration) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	enumeration->count = 1;
+	enumeration->values = values;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return enumeration;
+}
+
+int32_t uplrules_selectFormatted(const void* rules, const void* number,
+                                 uint16_t* keyword, int32_t capacity,
+                                 UErrorCode* status)
+{
+	(void)rules;
+	(void)number;
+	return utf16_copy_ascii(keyword, capacity, "other", status);
+}
+
+int32_t uplrules_selectForRange(const void* rules, const void* range,
+                                uint16_t* keyword, int32_t capacity,
+                                UErrorCode* status)
+{
+	(void)rules;
+	(void)range;
+	return utf16_copy_ascii(keyword, capacity, "other", status);
+}
+
+void* ureldatefmt_open(const char* locale, void* number_format, int32_t width,
+                       int32_t capitalization_context, UErrorCode* status)
+{
+	int* formatter = calloc(1, sizeof(*formatter));
+	(void)locale;
+	free(number_format);
+	(void)width;
+	(void)capitalization_context;
+	if (!formatter) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return formatter;
+}
+
+void ureldatefmt_close(void* formatter)
+{
+	free(formatter);
+}
+
+void* ureldatefmt_openResult(UErrorCode* status)
+{
+	return unumf_openResult(status);
+}
+
+void ureldatefmt_closeResult(void* result)
+{
+	free(result);
+}
+
+const void* ureldatefmt_resultAsValue(const void* result, UErrorCode* status)
+{
+	return unumf_resultAsValue(result, status);
+}
+
+static int32_t ureldatefmt_format_value(double offset, uint16_t* result,
+                                        int32_t capacity, UErrorCode* status)
+{
+	char buffer[64];
+	snprintf(buffer, sizeof(buffer), "%.15g", offset);
+	return utf16_copy_ascii(result, capacity, buffer, status);
+}
+
+int32_t ureldatefmt_format(const void* formatter, double offset, int32_t unit,
+                           uint16_t* result, int32_t capacity,
+                           UErrorCode* status)
+{
+	(void)formatter;
+	(void)unit;
+	return ureldatefmt_format_value(offset, result, capacity, status);
+}
+
+int32_t ureldatefmt_formatNumeric(const void* formatter, double offset,
+                                  int32_t unit, uint16_t* result,
+                                  int32_t capacity, UErrorCode* status)
+{
+	return ureldatefmt_format(formatter, offset, unit, result, capacity, status);
+}
+
+void ureldatefmt_formatToResult(const void* formatter, double offset,
+                                int32_t unit, void* result,
+                                UErrorCode* status)
+{
+	(void)formatter;
+	(void)unit;
+	formatted_value_set_double(result, offset);
+	if (status)
+		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
+}
+
+void ureldatefmt_formatNumericToResult(const void* formatter, double offset,
+                                       int32_t unit, void* result,
+                                       UErrorCode* status)
+{
+	ureldatefmt_formatToResult(formatter, offset, unit, result, status);
+}
+
+void* ures_open(const char* package_name, const char* locale, UErrorCode* status)
+{
+	int* resource = calloc(1, sizeof(*resource));
+	(void)package_name;
+	(void)locale;
+	if (!resource) {
+		if (status)
+			*status = U_ILLEGAL_ARGUMENT_ERROR;
+		return NULL;
+	}
+	if (status)
+		*status = U_ZERO_ERROR;
+	return resource;
+}
+
+void ures_close(void* resource)
+{
+	free(resource);
+}
+
+void* ures_getByKey(const void* resource, const char* key, void* fill_in,
+                    UErrorCode* status)
+{
+	(void)resource;
+	(void)key;
+	(void)fill_in;
+	return ures_open(NULL, NULL, status);
+}
+
+const uint16_t* ures_getStringByKey(const void* resource, const char* key,
+                                    int32_t* length, UErrorCode* status)
+{
+	static const uint16_t empty[1] = { 0 };
+	(void)resource;
+	(void)key;
+	if (length)
+		*length = 0;
+	if (status)
+		*status = U_ZERO_ERROR;
+	return empty;
+}
+
+void* utext_setup(void* text, int32_t extra_space, UErrorCode* status)
+{
+	struct machgate_utext* result = text;
+	(void)extra_space;
+	if (!result) {
+		result = calloc(1, sizeof(*result));
+		if (!result) {
+			if (status)
+				*status = U_ILLEGAL_ARGUMENT_ERROR;
+			return NULL;
+		}
+		result->flags = 1;
+	} else {
+		memset(result, 0, sizeof(*result));
+	}
+	result->magic = 0x345ad82c;
+	result->size_of_struct = (int32_t)sizeof(*result);
+	if (status)
+		*status = U_ZERO_ERROR;
+	return result;
+}
+
+void* utext_close(void* text)
+{
+	struct machgate_utext* utext = text;
+	if (!utext)
+		return NULL;
+	if (utext->flags & 1)
+		free(utext);
+	return NULL;
 }
 
 void* CFRunLoopGetCurrent(void)
@@ -2916,6 +4609,331 @@ void CFRelease(const void* object)
 	(void)object;
 }
 
+#define DARWIN_AF_INET 2
+#define DARWIN_AF_INET6 30
+#define DARWIN_EAI_ADDRFAMILY 1
+#define DARWIN_EAI_AGAIN 2
+#define DARWIN_EAI_FAIL 4
+#define DARWIN_EAI_MEMORY 6
+#define DARWIN_EAI_NODATA 7
+#define DARWIN_EAI_NONAME 8
+#define DARWIN_EAI_SERVICE 9
+#define DARWIN_EAI_SYSTEM 11
+#define DARWIN_EAI_OVERFLOW 14
+#define DARWIN_AI_PASSIVE 0x1
+#define DARWIN_AI_CANONNAME 0x2
+#define DARWIN_AI_NUMERICHOST 0x4
+#define DARWIN_AI_NUMERICSERV 0x1000
+
+struct darwin_addrinfo {
+	int32_t flags;
+	int32_t family;
+	int32_t socktype;
+	int32_t protocol;
+	uint32_t addrlen;
+	char* canonname;
+	void* addr;
+	struct darwin_addrinfo* next;
+};
+
+static void free_darwin_addrinfo(struct darwin_addrinfo* info)
+{
+	while (info) {
+		struct darwin_addrinfo* next = info->next;
+		free(info->canonname);
+		free(info->addr);
+		free(info);
+		info = next;
+	}
+}
+
+static int darwin_family_to_linux_addrinfo(int family)
+{
+	switch (family) {
+	case 0:
+		return AF_UNSPEC;
+	case DARWIN_AF_INET:
+		return AF_INET;
+	case DARWIN_AF_INET6:
+		return AF_INET6;
+	default:
+		return family;
+	}
+}
+
+static int linux_family_to_darwin_addrinfo(int family)
+{
+	switch (family) {
+	case AF_INET:
+		return DARWIN_AF_INET;
+	case AF_INET6:
+		return DARWIN_AF_INET6;
+	default:
+		return family;
+	}
+}
+
+static int darwin_gai_error_from_linux(int result)
+{
+	if (result == 0)
+		return 0;
+	if (result == EAI_AGAIN)
+		return DARWIN_EAI_AGAIN;
+	if (result == EAI_FAIL)
+		return DARWIN_EAI_FAIL;
+	if (result == EAI_MEMORY)
+		return DARWIN_EAI_MEMORY;
+	if (result == EAI_NONAME)
+		return DARWIN_EAI_NONAME;
+	if (result == EAI_SERVICE)
+		return DARWIN_EAI_SERVICE;
+	if (result == EAI_SYSTEM)
+		return DARWIN_EAI_SYSTEM;
+#ifdef EAI_ADDRFAMILY
+	if (result == EAI_ADDRFAMILY)
+		return DARWIN_EAI_ADDRFAMILY;
+#endif
+#ifdef EAI_NODATA
+	if (result == EAI_NODATA)
+		return DARWIN_EAI_NODATA;
+#endif
+#ifdef EAI_OVERFLOW
+	if (result == EAI_OVERFLOW)
+		return DARWIN_EAI_OVERFLOW;
+#endif
+	return DARWIN_EAI_FAIL;
+}
+
+static int linux_gai_error_from_darwin(int result)
+{
+	if (result == 0)
+		return 0;
+	if (result == DARWIN_EAI_AGAIN)
+		return EAI_AGAIN;
+	if (result == DARWIN_EAI_FAIL)
+		return EAI_FAIL;
+	if (result == DARWIN_EAI_MEMORY)
+		return EAI_MEMORY;
+	if (result == DARWIN_EAI_NONAME)
+		return EAI_NONAME;
+	if (result == DARWIN_EAI_SERVICE)
+		return EAI_SERVICE;
+	if (result == DARWIN_EAI_SYSTEM)
+		return EAI_SYSTEM;
+#ifdef EAI_ADDRFAMILY
+	if (result == DARWIN_EAI_ADDRFAMILY)
+		return EAI_ADDRFAMILY;
+#endif
+#ifdef EAI_NODATA
+	if (result == DARWIN_EAI_NODATA)
+		return EAI_NODATA;
+#endif
+#ifdef EAI_OVERFLOW
+	if (result == DARWIN_EAI_OVERFLOW)
+		return EAI_OVERFLOW;
+#endif
+	return EAI_FAIL;
+}
+
+static int darwin_ai_flags_to_linux(int flags)
+{
+	int result = 0;
+
+	if (flags & DARWIN_AI_PASSIVE)
+		result |= AI_PASSIVE;
+	if (flags & DARWIN_AI_CANONNAME)
+		result |= AI_CANONNAME;
+	if (flags & DARWIN_AI_NUMERICHOST)
+		result |= AI_NUMERICHOST;
+#ifdef AI_NUMERICSERV
+	if (flags & DARWIN_AI_NUMERICSERV)
+		result |= AI_NUMERICSERV;
+#endif
+	return result;
+}
+
+static int copy_linux_sockaddr_to_darwin_addrinfo(const struct sockaddr* linux_addr,
+                                                  void** out_addr,
+                                                  uint32_t* out_addrlen)
+{
+	unsigned char* darwin_addr;
+
+	if (!linux_addr || !out_addr || !out_addrlen)
+		return 0;
+
+	switch (linux_addr->sa_family) {
+	case AF_INET: {
+		const struct sockaddr_in* inet_addr =
+			(const struct sockaddr_in*)linux_addr;
+		darwin_addr = calloc(1, 16);
+		if (!darwin_addr)
+			return 0;
+		darwin_addr[0] = 16;
+		darwin_addr[1] = DARWIN_AF_INET;
+		memcpy(darwin_addr + 2, &inet_addr->sin_port, 2);
+		memcpy(darwin_addr + 4, &inet_addr->sin_addr, 4);
+		*out_addr = darwin_addr;
+		*out_addrlen = 16;
+		return 1;
+	}
+	case AF_INET6: {
+		const struct sockaddr_in6* inet6_addr =
+			(const struct sockaddr_in6*)linux_addr;
+		darwin_addr = calloc(1, 28);
+		if (!darwin_addr)
+			return 0;
+		darwin_addr[0] = 28;
+		darwin_addr[1] = DARWIN_AF_INET6;
+		memcpy(darwin_addr + 2, &inet6_addr->sin6_port, 2);
+		memcpy(darwin_addr + 4, &inet6_addr->sin6_flowinfo, 4);
+		memcpy(darwin_addr + 8, &inet6_addr->sin6_addr, 16);
+		memcpy(darwin_addr + 24, &inet6_addr->sin6_scope_id, 4);
+		*out_addr = darwin_addr;
+		*out_addrlen = 28;
+		return 1;
+	}
+	default:
+		return 0;
+	}
+}
+
+static struct darwin_addrinfo* copy_linux_addrinfo_to_darwin(
+	const struct addrinfo* linux_info)
+{
+	struct darwin_addrinfo* head = NULL;
+	struct darwin_addrinfo** tail = &head;
+
+	for (const struct addrinfo* current = linux_info; current;
+	     current = current->ai_next) {
+		struct darwin_addrinfo* entry;
+
+		if (current->ai_family != AF_INET && current->ai_family != AF_INET6)
+			continue;
+
+		entry = calloc(1, sizeof(*entry));
+		if (!entry) {
+			free_darwin_addrinfo(head);
+			errno = ENOMEM;
+			return NULL;
+		}
+
+		entry->flags = current->ai_flags;
+		entry->family = linux_family_to_darwin_addrinfo(current->ai_family);
+		entry->socktype = current->ai_socktype;
+		entry->protocol = current->ai_protocol;
+		if (!copy_linux_sockaddr_to_darwin_addrinfo(current->ai_addr,
+		                                            &entry->addr,
+		                                            &entry->addrlen)) {
+			free(entry);
+			continue;
+		}
+		if (current->ai_canonname) {
+			entry->canonname = strdup(current->ai_canonname);
+			if (!entry->canonname) {
+				free(entry->addr);
+				free(entry);
+				free_darwin_addrinfo(head);
+				errno = ENOMEM;
+				return NULL;
+			}
+		}
+
+		*tail = entry;
+		tail = &entry->next;
+	}
+
+	return head;
+}
+
+int getaddrinfo(const char* node, const char* service,
+                const struct addrinfo* hints, struct addrinfo** result)
+{
+	int (*real_getaddrinfo)(const char*, const char*, const struct addrinfo*,
+	                        struct addrinfo**) = dlsym(RTLD_NEXT,
+	                                                   "getaddrinfo");
+	void (*real_freeaddrinfo)(struct addrinfo*) = dlsym(RTLD_NEXT,
+	                                                   "freeaddrinfo");
+	const struct darwin_addrinfo* darwin_hints =
+		(const struct darwin_addrinfo*)hints;
+	struct addrinfo linux_hints;
+	struct addrinfo* linux_result = NULL;
+	struct darwin_addrinfo* darwin_result;
+	int linux_error;
+
+	if (!result)
+		return DARWIN_EAI_FAIL;
+	if (!real_getaddrinfo || !real_freeaddrinfo)
+		return DARWIN_EAI_SYSTEM;
+
+	*result = NULL;
+	memset(&linux_hints, 0, sizeof(linux_hints));
+	if (darwin_hints) {
+		linux_hints.ai_flags = darwin_ai_flags_to_linux(darwin_hints->flags);
+		linux_hints.ai_family =
+			darwin_family_to_linux_addrinfo(darwin_hints->family);
+		linux_hints.ai_socktype = darwin_hints->socktype;
+		linux_hints.ai_protocol = darwin_hints->protocol;
+	}
+
+	errno = 0;
+	linux_error = real_getaddrinfo(node, service,
+	                               darwin_hints ? &linux_hints : NULL,
+	                               &linux_result);
+	if (linux_error != 0)
+		return darwin_gai_error_from_linux(linux_error);
+
+	darwin_result = copy_linux_addrinfo_to_darwin(linux_result);
+	real_freeaddrinfo(linux_result);
+	if (!darwin_result) {
+		if (errno == ENOMEM)
+			return DARWIN_EAI_MEMORY;
+		return DARWIN_EAI_NONAME;
+	}
+
+	*result = (struct addrinfo*)darwin_result;
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: getaddrinfo(%s,%s) -> 0 result=%p\n",
+		        node ? node : "(nil)", service ? service : "(nil)",
+		        (void*)darwin_result);
+	return 0;
+}
+
+void freeaddrinfo(struct addrinfo* info)
+{
+	free_darwin_addrinfo((struct darwin_addrinfo*)info);
+}
+
+const char* gai_strerror(int error)
+{
+	const char* (*real_gai_strerror)(int) = dlsym(RTLD_NEXT, "gai_strerror");
+
+	if (!real_gai_strerror)
+		return "getaddrinfo error";
+	return real_gai_strerror(linux_gai_error_from_darwin(error));
+}
+
+int machgate_xsi_strerror_r(int errnum, char* buf, size_t buflen)
+{
+	const char* message = strerror(errnum);
+	size_t length;
+
+	if (!message)
+		return EINVAL;
+	if (buflen == 0)
+		return ERANGE;
+
+	length = strlen(message);
+	if (length >= buflen) {
+		buf[0] = '\0';
+		return ERANGE;
+	}
+
+	memcpy(buf, message, length + 1);
+	return 0;
+}
+
+__asm__(".globl strerror_r\n\t.set strerror_r, machgate_xsi_strerror_r");
+
 /* ===== Darwin process and filesystem surface ===== */
 
 int mach_vm_region(uint32_t target_task, uint64_t* address, uint64_t* size,
@@ -2949,13 +4967,7 @@ int mach_vm_map(uint32_t target_task, uint64_t* address, uint64_t size,
 	if (!address || !size)
 		return 4;
 
-	int protection = PROT_NONE;
-	if (cur_protection & 0x1)
-		protection |= PROT_READ;
-	if (cur_protection & 0x2)
-		protection |= PROT_WRITE;
-	if (cur_protection & 0x4)
-		protection |= PROT_EXEC;
+	int protection = mach_vm_prot_to_linux(cur_protection);
 	if (protection == PROT_NONE)
 		protection = PROT_READ | PROT_WRITE;
 
@@ -2970,6 +4982,54 @@ int mach_vm_map(uint32_t target_task, uint64_t* address, uint64_t size,
 
 	*address = (uint64_t)(uintptr_t)result;
 	return 0;
+}
+
+int mach_make_memory_entry_64(uint32_t target_task, uint64_t* size,
+                              uint64_t offset, int permission,
+                              uint32_t* object_handle, uint32_t parent_entry)
+{
+	(void)target_task;
+	(void)size;
+	(void)offset;
+	(void)permission;
+	(void)parent_entry;
+
+	if (object_handle)
+		*object_handle = 0;
+	return 5;
+}
+
+int mach_vm_remap(uint32_t target_task, uint64_t* target_address,
+                  uint64_t size, uint64_t mask, int flags,
+                  uint32_t src_task, uint64_t src_address, uint8_t copy,
+                  int* cur_protection, int* max_protection,
+                  int inheritance)
+{
+	(void)target_task;
+	(void)target_address;
+	(void)size;
+	(void)mask;
+	(void)flags;
+	(void)src_task;
+	(void)src_address;
+	(void)copy;
+	(void)inheritance;
+
+	if (cur_protection)
+		*cur_protection = 0;
+	if (max_protection)
+		*max_protection = 0;
+	return 5;
+}
+
+int vm_remap(uint32_t target_task, uint64_t* target_address,
+             uint64_t size, uint64_t mask, int flags,
+             uint32_t src_task, uint64_t src_address, uint8_t copy,
+             int* cur_protection, int* max_protection, int inheritance)
+{
+	return mach_vm_remap(target_task, target_address, size, mask, flags,
+	                     src_task, src_address, copy, cur_protection,
+	                     max_protection, inheritance);
 }
 
 int proc_regionfilename(int pid, uint64_t address, void* buffer,
@@ -3048,6 +5108,374 @@ int posix_spawn_file_actions_addinherit_np(void* file_actions, int filedes)
 	(void)file_actions;
 	(void)filedes;
 	return 0;
+}
+
+struct shim_spawn_file_action {
+	int type;
+	int fd;
+	int newfd;
+	char* path;
+	int flags;
+	mode_t mode;
+};
+
+struct shim_spawn_file_actions {
+	size_t count;
+	size_t capacity;
+	struct shim_spawn_file_action actions[];
+};
+
+struct shim_spawn_attr {
+	short flags;
+	pid_t pgroup;
+};
+
+#define SHIM_SPAWN_ACTION_CLOSE 1
+#define SHIM_SPAWN_ACTION_DUP2 2
+#define SHIM_SPAWN_ACTION_OPEN 3
+
+static int grow_spawn_file_actions(struct shim_spawn_file_actions** actions_ptr)
+{
+	struct shim_spawn_file_actions* actions = *actions_ptr;
+	size_t capacity = actions->capacity ? actions->capacity * 2 : 4;
+	size_t size = sizeof(*actions) + capacity * sizeof(actions->actions[0]);
+	actions = realloc(actions, size);
+	if (!actions)
+		return ENOMEM;
+	memset(&actions->actions[actions->capacity], 0,
+	       (capacity - actions->capacity) * sizeof(actions->actions[0]));
+	actions->capacity = capacity;
+	*actions_ptr = actions;
+	return 0;
+}
+
+static int add_spawn_file_action(void** file_actions,
+                                 struct shim_spawn_file_action action)
+{
+	struct shim_spawn_file_actions** actions_ptr;
+	struct shim_spawn_file_actions* actions;
+	int result;
+
+	if (!file_actions || !*file_actions)
+		return EINVAL;
+
+	actions_ptr = (struct shim_spawn_file_actions**)file_actions;
+	actions = *actions_ptr;
+	if (actions->count == actions->capacity) {
+		result = grow_spawn_file_actions(actions_ptr);
+		if (result)
+			return result;
+		actions = *actions_ptr;
+	}
+
+	actions->actions[actions->count++] = action;
+	return 0;
+}
+
+int posix_spawn_file_actions_init(void** file_actions)
+{
+	struct shim_spawn_file_actions* actions;
+	size_t capacity = 4;
+	size_t size = sizeof(*actions) + capacity * sizeof(actions->actions[0]);
+
+	if (!file_actions)
+		return EINVAL;
+
+	actions = calloc(1, size);
+	if (!actions)
+		return ENOMEM;
+	actions->capacity = capacity;
+	*file_actions = actions;
+	return 0;
+}
+
+int posix_spawn_file_actions_destroy(void** file_actions)
+{
+	struct shim_spawn_file_actions* actions;
+
+	if (!file_actions || !*file_actions)
+		return EINVAL;
+
+	actions = *file_actions;
+	for (size_t index = 0; index < actions->count; index++)
+		free(actions->actions[index].path);
+	free(actions);
+	*file_actions = NULL;
+	return 0;
+}
+
+int posix_spawn_file_actions_adddup2(void** file_actions, int fd, int newfd)
+{
+	struct shim_spawn_file_action action;
+
+	if (fd < 0 || newfd < 0)
+		return EBADF;
+
+	memset(&action, 0, sizeof(action));
+	action.type = SHIM_SPAWN_ACTION_DUP2;
+	action.fd = fd;
+	action.newfd = newfd;
+	return add_spawn_file_action(file_actions, action);
+}
+
+int posix_spawn_file_actions_addclose(void** file_actions, int fd)
+{
+	struct shim_spawn_file_action action;
+
+	if (fd < 0)
+		return EBADF;
+
+	memset(&action, 0, sizeof(action));
+	action.type = SHIM_SPAWN_ACTION_CLOSE;
+	action.fd = fd;
+	return add_spawn_file_action(file_actions, action);
+}
+
+int posix_spawn_file_actions_addopen(void** file_actions, int fd,
+                                     const char* path, int flags, mode_t mode)
+{
+	struct shim_spawn_file_action action;
+
+	if (fd < 0)
+		return EBADF;
+	if (!path)
+		return EINVAL;
+
+	memset(&action, 0, sizeof(action));
+	action.type = SHIM_SPAWN_ACTION_OPEN;
+	action.fd = fd;
+	action.path = strdup(path);
+	if (!action.path)
+		return ENOMEM;
+	action.flags = flags;
+	action.mode = mode;
+	int result = add_spawn_file_action(file_actions, action);
+	if (result)
+		free(action.path);
+	return result;
+}
+
+int posix_spawnattr_init(void** attr)
+{
+	if (!attr)
+		return EINVAL;
+	*attr = calloc(1, sizeof(struct shim_spawn_attr));
+	return *attr ? 0 : ENOMEM;
+}
+
+int posix_spawnattr_destroy(void** attr)
+{
+	if (!attr || !*attr)
+		return EINVAL;
+	free(*attr);
+	*attr = NULL;
+	return 0;
+}
+
+int posix_spawnattr_setflags(void** attr, short flags)
+{
+	struct shim_spawn_attr* spawn_attr;
+
+	if (!attr || !*attr)
+		return EINVAL;
+	spawn_attr = *attr;
+	spawn_attr->flags = flags;
+	return 0;
+}
+
+int posix_spawnattr_setpgroup(void** attr, pid_t pgroup)
+{
+	struct shim_spawn_attr* spawn_attr;
+
+	if (!attr || !*attr)
+		return EINVAL;
+	spawn_attr = *attr;
+	spawn_attr->pgroup = pgroup;
+	return 0;
+}
+
+int posix_spawnattr_setsigdefault(void** attr, const void* sigdefault)
+{
+	if (!attr || !*attr || !sigdefault)
+		return EINVAL;
+	return 0;
+}
+
+static void apply_spawn_file_actions(struct shim_spawn_file_actions* actions)
+{
+	if (!actions)
+		return;
+
+	for (size_t index = 0; index < actions->count; index++) {
+		struct shim_spawn_file_action* action = &actions->actions[index];
+		switch (action->type) {
+		case SHIM_SPAWN_ACTION_CLOSE:
+			close(action->fd);
+			break;
+		case SHIM_SPAWN_ACTION_DUP2:
+			dup2(action->fd, action->newfd);
+			break;
+		case SHIM_SPAWN_ACTION_OPEN: {
+			int fd = open(action->path, translate_oflags(action->flags),
+			              action->mode);
+			if (fd >= 0) {
+				if (fd != action->fd) {
+					dup2(fd, action->fd);
+					close(fd);
+				}
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+}
+
+static void spawn_exec_path(const char* path, char* const argv[], char* const envp[])
+{
+	int result = machgate_execve_macho_guest_forksafe(path, argv, envp);
+	if (result != 45)
+		errno = result;
+
+	syscall(SYS_execve, path, argv, envp ? envp : environ);
+}
+
+static void spawn_exec_search_path(const char* file, char* const argv[],
+                                   char* const envp[])
+{
+	const char* path_env;
+	int saved_errno = ENOENT;
+
+	if (strchr(file, '/')) {
+		spawn_exec_path(file, argv, envp);
+		return;
+	}
+
+	path_env = getenv("PATH");
+	if (!path_env || !*path_env)
+		path_env = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+	while (*path_env) {
+		char candidate[4096];
+		const char* end = strchr(path_env, ':');
+		size_t directory_len = end ? (size_t)(end - path_env) : strlen(path_env);
+		if (!directory_len) {
+			if (snprintf(candidate, sizeof(candidate), "./%s", file) >=
+			    (int)sizeof(candidate)) {
+				errno = ENAMETOOLONG;
+				return;
+			}
+		} else {
+			if (directory_len + 1 + strlen(file) + 1 > sizeof(candidate)) {
+				errno = ENAMETOOLONG;
+				return;
+			}
+			memcpy(candidate, path_env, directory_len);
+			candidate[directory_len] = '/';
+			strcpy(candidate + directory_len + 1, file);
+		}
+
+		spawn_exec_path(candidate, argv, envp);
+		if (errno != ENOENT && errno != ENOTDIR)
+			saved_errno = errno;
+		if (!end)
+			break;
+		path_env = end + 1;
+	}
+
+	errno = saved_errno;
+}
+
+static int shim_posix_spawn_common(pid_t* pid, const char* path, void* file_actions,
+                                   void* attr, char* const argv[],
+                                   char* const envp[], int search_path)
+{
+	(void)attr;
+
+	if (!pid || !path || !argv)
+		return EINVAL;
+
+	pid_t child = fork();
+	if (child < 0)
+		return errno;
+
+	if (child == 0) {
+		apply_spawn_file_actions(file_actions);
+		if (search_path)
+			spawn_exec_search_path(path, argv, envp);
+		else
+			spawn_exec_path(path, argv, envp);
+		_exit(errno == ENOENT ? 127 : 126);
+	}
+
+	*pid = child;
+	return 0;
+}
+
+int posix_spawn(pid_t* pid, const char* path, void* file_actions,
+                void* attr, char* const argv[], char* const envp[])
+{
+	return shim_posix_spawn_common(pid, path, file_actions, attr, argv, envp, 0);
+}
+
+int posix_spawnp(pid_t* pid, const char* file, void* file_actions,
+                 void* attr, char* const argv[], char* const envp[])
+{
+	return shim_posix_spawn_common(pid, file, file_actions, attr, argv, envp, 1);
+}
+
+int execve(const char* path, char* const argv[], char* const envp[])
+{
+	int fork_child = machgate_shim_in_fork_child();
+	int result = fork_child ?
+	             machgate_execve_macho_guest_forksafe(path, argv, envp) :
+	             machgate_execve_macho_guest(path, argv, envp);
+
+	if (!fork_child && (getenv("MACHGATE_TRACE_SYSCALL") || getenv("MACHGATE_TRACE_SHIM"))) {
+		fprintf(stderr, "libsystem_shim: execve('%s') -> -1 errno=%d\n",
+		        path, result);
+	}
+	errno = result;
+	return -1;
+}
+
+static ssize_t shim_write_with_sigpipe_guard(long syscall_number, int fd,
+                                             const void* buffer,
+                                             size_t size_or_count)
+{
+	struct sigaction ignore_action;
+	struct sigaction old_action;
+	int changed = 0;
+
+	if (!machgate_shim_in_fork_child())
+		return syscall(syscall_number, fd, buffer, size_or_count);
+
+	memset(&ignore_action, 0, sizeof(ignore_action));
+	ignore_action.sa_handler = SIG_IGN;
+	sigemptyset(&ignore_action.sa_mask);
+	if (sigaction(SIGPIPE, &ignore_action, &old_action) == 0)
+		changed = 1;
+
+	errno = 0;
+	ssize_t result = syscall(syscall_number, fd, buffer, size_or_count);
+	int saved_errno = errno;
+
+	if (changed)
+		sigaction(SIGPIPE, &old_action, NULL);
+
+	errno = saved_errno;
+	return result;
+}
+
+ssize_t write(int fd, const void* buffer, size_t size)
+{
+	return shim_write_with_sigpipe_guard(SYS_write, fd, buffer, size);
+}
+
+ssize_t writev(int fd, const struct iovec* iov, int iovcnt)
+{
+	return shim_write_with_sigpipe_guard(SYS_writev, fd, iov, (size_t)iovcnt);
 }
 
 ssize_t recvmsg_x(int fd, void* msgp, unsigned int cnt, int flags)
@@ -3499,12 +5927,10 @@ float __exp10f(float x)
  * binary's directory), saves go to <game_dir>/userdata/Library/Preferences/.
  */
 static char fake_home[4096] = {0};
+static pthread_once_t fake_home_once = PTHREAD_ONCE_INIT;
 
-static const char* get_fake_home(void)
+static void init_fake_home(void)
 {
-	if (fake_home[0])
-		return fake_home;
-
 	/* MACHISMO_HOME overrides the default userdata location */
 	const char *override = getenv("MACHISMO_HOME");
 	if (override && override[0]) {
@@ -3527,6 +5953,13 @@ static const char* get_fake_home(void)
 	}
 
 	fprintf(stderr, "libsystem_shim: HOME rewritten to %s\n", fake_home);
+}
+
+static const char* get_fake_home(void)
+{
+	int result = pthread_once(&fake_home_once, init_fake_home);
+	if (result != 0 && !fake_home[0])
+		snprintf(fake_home, sizeof(fake_home), "./userdata");
 	return fake_home;
 }
 
@@ -3640,6 +6073,24 @@ const char* getprogname(void)
 	return slash ? slash + 1 : path;
 }
 
+int getpeereid(int fd, uid_t* uid, gid_t* gid)
+{
+	if (!uid || !gid) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct ucred cred;
+	socklen_t cred_len = sizeof(cred);
+	int result = getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len);
+	if (result != 0)
+		return -1;
+
+	*uid = cred.uid;
+	*gid = cred.gid;
+	return 0;
+}
+
 void* getsegmentdata(const void* header, const char* segment_name,
                      unsigned long* size)
 {
@@ -3648,6 +6099,20 @@ void* getsegmentdata(const void* header, const char* segment_name,
 	if (size)
 		*size = 0;
 	return NULL;
+}
+
+void* getsectdata(const char* segment_name, const char* section_name,
+                  unsigned long* size)
+{
+	(void)section_name;
+	return getsegmentdata(NULL, segment_name, size);
+}
+
+void* getsectiondata(const void* header, const char* segment_name,
+                     const char* section_name, unsigned long* size)
+{
+	(void)section_name;
+	return getsegmentdata(header, segment_name, size);
 }
 
 /* ===== NSSearchPathEnumeration =====
@@ -3903,6 +6368,8 @@ static int darwin_signal_to_linux(int darwin_signal);
 static unsigned int next_darwin_tsd_key = DARWIN_TSD_FIRST_KEY;
 static void (*darwin_tsd_destructors[DARWIN_TSD_KEY_COUNT])(void *);
 static __thread void *darwin_tsd_values[DARWIN_TSD_KEY_COUNT];
+static pthread_t machgate_main_pthread;
+static int machgate_main_pthread_set;
 
 static inline uintptr_t *darwin_tsd_mirror_base(void)
 {
@@ -3942,6 +6409,9 @@ static void init_pthread_wrappers(void)
 	real_pthread_rwlock_rdlock = dlsym(RTLD_NEXT, "pthread_rwlock_rdlock");
 	real_pthread_rwlock_wrlock = dlsym(RTLD_NEXT, "pthread_rwlock_wrlock");
 	real_pthread_rwlock_unlock = dlsym(RTLD_NEXT, "pthread_rwlock_unlock");
+	machgate_main_pthread = pthread_self();
+	machgate_main_pthread_set = 1;
+	get_fake_home();
 
 	if (!real_pthread_mutex_lock)
 		fprintf(stderr, "libsystem_shim: WARNING: could not resolve real pthread_mutex_lock\n");
@@ -4061,12 +6531,44 @@ void *pthread_getspecific(pthread_key_t key)
 
 	if (index < 0)
 		return NULL;
+	if (shim_trace_enabled())
+		fprintf(stderr, "libsystem_shim: pthread_getspecific(%u) -> %p\n",
+		        (unsigned int)key, darwin_tsd_values[index]);
 	return darwin_tsd_values[index];
 }
 
 static int shim_trace_enabled(void)
 {
 	const char* value = getenv("MACHGATE_TRACE_SHIM");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static int shim_delta_vm_trace_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_DELTA_VM");
+	if (value && value[0] && strcmp(value, "0") != 0)
+		return 1;
+	return shim_trace_enabled();
+}
+
+static pid_t shim_trace_tid(void)
+{
+	return (pid_t)syscall(SYS_gettid);
+}
+
+static unsigned long shim_trace_pthread_self(void)
+{
+	return (unsigned long)pthread_self();
+}
+
+static const char* shim_trace_path(const char* path)
+{
+	return path ? path : "(null)";
+}
+
+static int shim_signal_trace_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_SIGNALS");
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
@@ -4238,7 +6740,10 @@ void* pthread_get_stackaddr_np(pthread_t thread)
 	void** machismo_stack_top;
 
 	machismo_stack_top = dlsym(RTLD_DEFAULT, "__machismo_main_stack_top");
-	if (machismo_stack_top && *machismo_stack_top && pthread_equal(thread, pthread_self())) {
+	if (machismo_stack_top && *machismo_stack_top &&
+	    machgate_main_pthread_set &&
+	    pthread_equal(thread, pthread_self()) &&
+	    pthread_equal(thread, machgate_main_pthread)) {
 		if (shim_trace_enabled())
 			fprintf(stderr, "libsystem_shim: pthread_get_stackaddr_np main -> %p\n", *machismo_stack_top);
 		return *machismo_stack_top;
@@ -4260,7 +6765,10 @@ size_t pthread_get_stacksize_np(pthread_t thread)
 	size_t* machismo_stack_size;
 
 	machismo_stack_size = dlsym(RTLD_DEFAULT, "__machismo_main_stack_size");
-	if (machismo_stack_size && *machismo_stack_size && pthread_equal(thread, pthread_self())) {
+	if (machismo_stack_size && *machismo_stack_size &&
+	    machgate_main_pthread_set &&
+	    pthread_equal(thread, pthread_self()) &&
+	    pthread_equal(thread, machgate_main_pthread)) {
 		if (shim_trace_enabled())
 			fprintf(stderr, "libsystem_shim: pthread_get_stacksize_np main -> %zu\n", *machismo_stack_size);
 		return *machismo_stack_size;
@@ -4337,9 +6845,13 @@ int pthread_cond_timedwait_relative_np(pthread_cond_t* cond,
 	return pthread_cond_timedwait(cond, mutex, &deadline);
 }
 
+static void remember_kqueue_fd(int fd, int canonical_fd);
+
 int kqueue(void)
 {
 	int result = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (result >= 0)
+		remember_kqueue_fd(result, result);
 	if (shim_trace_enabled())
 		fprintf(stderr, "libsystem_shim: kqueue() -> %d errno=%d\n",
 		        result, result < 0 ? errno : 0);
@@ -4360,9 +6872,12 @@ struct darwin_kevent_placeholder {
 #define DARWIN_EVFILT_USER (-10)
 #define DARWIN_EV_DELETE 0x0002
 #define DARWIN_EV_DISABLE 0x0008
+#define DARWIN_EV_RECEIPT 0x0040
+#define DARWIN_EV_ERROR 0x4000
 #define DARWIN_EV_EOF 0x8000
 #define DARWIN_NOTE_TRIGGER 0x01000000
 #define KQUEUE_REGISTRATION_COUNT 1024
+#define KQUEUE_ALIAS_COUNT 1024
 
 struct shim_kqueue_registration {
 	int used;
@@ -4378,6 +6893,45 @@ struct shim_kqueue_registration {
 
 static pthread_mutex_t kqueue_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct shim_kqueue_registration kqueue_registrations[KQUEUE_REGISTRATION_COUNT];
+static int kqueue_aliases[KQUEUE_ALIAS_COUNT];
+
+__attribute__((constructor))
+static void init_kqueue_aliases(void)
+{
+	for (int i = 0; i < KQUEUE_ALIAS_COUNT; i++)
+		kqueue_aliases[i] = -1;
+}
+
+static int resolve_kqueue_fd_unlocked(int kq)
+{
+	if (kq >= 0 && kq < KQUEUE_ALIAS_COUNT && kqueue_aliases[kq] >= 0)
+		return kqueue_aliases[kq];
+	return kq;
+}
+
+static void remember_kqueue_fd_unlocked(int fd, int canonical_fd)
+{
+	if (fd >= 0 && fd < KQUEUE_ALIAS_COUNT)
+		kqueue_aliases[fd] = canonical_fd;
+}
+
+static void remember_kqueue_fd(int fd, int canonical_fd)
+{
+	pthread_mutex_lock(&kqueue_mutex);
+	remember_kqueue_fd_unlocked(fd, canonical_fd);
+	pthread_mutex_unlock(&kqueue_mutex);
+}
+
+static void remember_kqueue_dup(int from_fd, int to_fd)
+{
+	pthread_mutex_lock(&kqueue_mutex);
+	int canonical_fd = resolve_kqueue_fd_unlocked(from_fd);
+	if (canonical_fd != from_fd ||
+	    (from_fd >= 0 && from_fd < KQUEUE_ALIAS_COUNT &&
+	     kqueue_aliases[from_fd] >= 0))
+		remember_kqueue_fd_unlocked(to_fd, canonical_fd);
+	pthread_mutex_unlock(&kqueue_mutex);
+}
 
 static struct shim_kqueue_registration* find_kqueue_registration(int kq,
                                                                  uint64_t ident,
@@ -4385,7 +6939,8 @@ static struct shim_kqueue_registration* find_kqueue_registration(int kq,
 {
 	for (int i = 0; i < KQUEUE_REGISTRATION_COUNT; i++) {
 		struct shim_kqueue_registration* registration = &kqueue_registrations[i];
-		if (registration->used && registration->kq == kq &&
+		if (registration->used &&
+		    registration->kq == resolve_kqueue_fd_unlocked(kq) &&
 		    registration->ident == ident && registration->filter == filter)
 			return registration;
 	}
@@ -4399,6 +6954,20 @@ static struct shim_kqueue_registration* alloc_kqueue_registration(void)
 			return &kqueue_registrations[i];
 	}
 	return NULL;
+}
+
+static void ensure_kqueue_poll_fd_nonblocking(int fd)
+{
+	int flags;
+
+	if (fd < 0)
+		return;
+
+	flags = (int)syscall(SYS_fcntl, fd, F_GETFL, 0);
+	if (flags < 0 || (flags & O_NONBLOCK))
+		return;
+
+	syscall(SYS_fcntl, fd, F_SETFL, (unsigned long)(flags | O_NONBLOCK));
 }
 
 static int update_kqueue_registration(int kq,
@@ -4418,6 +6987,10 @@ static int update_kqueue_registration(int kq,
 	    change->filter != DARWIN_EVFILT_USER)
 		return 0;
 
+	if (change->filter == DARWIN_EVFILT_READ ||
+	    change->filter == DARWIN_EVFILT_WRITE)
+		ensure_kqueue_poll_fd_nonblocking((int)change->ident);
+
 	if (!registration) {
 		registration = alloc_kqueue_registration();
 		if (!registration)
@@ -4425,7 +6998,7 @@ static int update_kqueue_registration(int kq,
 	}
 
 	registration->used = 1;
-	registration->kq = kq;
+	registration->kq = resolve_kqueue_fd_unlocked(kq);
 	registration->ident = change->ident;
 	registration->filter = change->filter;
 	registration->flags = change->flags;
@@ -4437,7 +7010,7 @@ static int update_kqueue_registration(int kq,
 	if (change->filter == DARWIN_EVFILT_USER &&
 	    (change->fflags & DARWIN_NOTE_TRIGGER)) {
 		uint64_t value = 1;
-		ssize_t write_result = write(kq, &value, sizeof(value));
+		ssize_t write_result = write(registration->kq, &value, sizeof(value));
 		(void)write_result;
 	}
 
@@ -4455,6 +7028,30 @@ static int apply_kqueue_changes(int kq,
 		}
 	}
 	return 0;
+}
+
+static int emit_kqueue_receipts(const struct darwin_kevent_placeholder* changelist,
+                                int nchanges,
+                                struct darwin_kevent_placeholder* eventlist,
+                                int nevents)
+{
+	int result = 0;
+
+	for (int index = 0; index < nchanges && result < nevents; index++) {
+		const struct darwin_kevent_placeholder* change = &changelist[index];
+		if (!(change->flags & DARWIN_EV_RECEIPT))
+			continue;
+
+		eventlist[result].ident = change->ident;
+		eventlist[result].filter = change->filter;
+		eventlist[result].flags = change->flags | DARWIN_EV_ERROR;
+		eventlist[result].fflags = change->fflags;
+		eventlist[result].data = 0;
+		eventlist[result].udata = change->udata;
+		result++;
+	}
+
+	return result;
 }
 
 static int kevent_timeout_ms(const struct timespec* timeout)
@@ -4488,12 +7085,12 @@ static int collect_kqueue_pollfds(int kq, struct pollfd* pollfds,
 
 	for (int i = 0; i < KQUEUE_REGISTRATION_COUNT && count < max_events; i++) {
 		struct shim_kqueue_registration* registration = &kqueue_registrations[i];
-		if (!registration->used || registration->kq != kq)
+		if (!registration->used ||
+		    registration->kq != resolve_kqueue_fd_unlocked(kq))
 			continue;
 		if (registration->flags & DARWIN_EV_DISABLE)
 			continue;
-		if (registration->filter == DARWIN_EVFILT_USER &&
-		    registration->triggered) {
+		if (registration->filter == DARWIN_EVFILT_USER) {
 			pollfds[count].fd = kq;
 			pollfds[count].events = POLLIN;
 		} else {
@@ -4586,6 +7183,16 @@ int kevent(int kq, const struct darwin_kevent_placeholder* changelist,
 	pthread_mutex_unlock(&kqueue_mutex);
 	if (result < 0)
 		return result;
+
+	if (changelist && nchanges > 0) {
+		if (eventlist && nevents > 0)
+			result = emit_kqueue_receipts(changelist, nchanges, eventlist,
+			                              nevents);
+		if (shim_trace_enabled())
+			fprintf(stderr, "libsystem_shim: kevent(kq=%d nchanges=%d nevents=%d receipts=%d) -> %d errno=0\n",
+			        kq, nchanges, nevents, result, result);
+		return result;
+	}
 
 	if (eventlist && nevents > 0) {
 		struct pollfd pollfds[64];
@@ -5010,9 +7617,95 @@ static uint32_t linux_sigset_to_darwin(const sigset_t* linux_set)
 	return result;
 }
 
+static void (*trace_signal_actions[_NSIG])(int, siginfo_t*, void*);
+static void (*trace_signal_handlers[_NSIG])(int);
+static int trace_signal_uses_siginfo[_NSIG];
+
+static uintptr_t trace_ucontext_pc(void* ucontext)
+{
+#if defined(__aarch64__)
+	return ((ucontext_t*)ucontext)->uc_mcontext.pc;
+#else
+	(void)ucontext;
+	return 0;
+#endif
+}
+
+static uintptr_t trace_ucontext_sp(void* ucontext)
+{
+#if defined(__aarch64__)
+	return ((ucontext_t*)ucontext)->uc_mcontext.sp;
+#else
+	(void)ucontext;
+	return 0;
+#endif
+}
+
+static uintptr_t trace_ucontext_reg(void* ucontext, int reg)
+{
+#if defined(__aarch64__)
+	if (reg == 31)
+		return ((ucontext_t*)ucontext)->uc_mcontext.sp;
+	return ((ucontext_t*)ucontext)->uc_mcontext.regs[reg];
+#else
+	(void)ucontext;
+	(void)reg;
+	return 0;
+#endif
+}
+
+static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
+{
+	if (shim_signal_trace_enabled()) {
+		fprintf(stderr,
+		        "libsystem_shim: guest signal signum=%d darwin=%d code=%d addr=%p pc=%p lr=%p sp=%p fp=%p\n",
+		        signum, linux_signal_to_darwin(signum), info ? info->si_code : 0,
+		        info ? info->si_addr : NULL,
+		        (void*)trace_ucontext_pc(ucontext),
+		        (void*)trace_ucontext_reg(ucontext, 30),
+		        (void*)trace_ucontext_sp(ucontext),
+		        (void*)trace_ucontext_reg(ucontext, 29));
+		fprintf(stderr,
+		        "libsystem_shim: guest regs x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p x16=%p\n",
+		        (void*)trace_ucontext_reg(ucontext, 0),
+		        (void*)trace_ucontext_reg(ucontext, 1),
+		        (void*)trace_ucontext_reg(ucontext, 2),
+		        (void*)trace_ucontext_reg(ucontext, 3),
+		        (void*)trace_ucontext_reg(ucontext, 4),
+		        (void*)trace_ucontext_reg(ucontext, 5),
+		        (void*)trace_ucontext_reg(ucontext, 6),
+		        (void*)trace_ucontext_reg(ucontext, 7),
+		        (void*)trace_ucontext_reg(ucontext, 8),
+		        (void*)trace_ucontext_reg(ucontext, 16));
+	}
+
+	if (signum > 0 && signum < _NSIG) {
+		if (trace_signal_uses_siginfo[signum] && trace_signal_actions[signum]) {
+			trace_signal_actions[signum](signum, info, ucontext);
+			return;
+		}
+		if (trace_signal_handlers[signum]) {
+			trace_signal_handlers[signum](signum);
+			return;
+		}
+	}
+
+	signal(signum, SIG_DFL);
+	raise(signum);
+}
+
+static int should_trace_guest_signal(int linux_signal)
+{
+	if (!shim_signal_trace_enabled())
+		return 0;
+	return linux_signal == SIGSEGV || linux_signal == SIGBUS ||
+	       linux_signal == SIGILL || linux_signal == SIGABRT;
+}
+
 int sigaltstack(const stack_t *new_stack, stack_t *old_stack)
 {
 	static int (*real_sigaltstack)(const stack_t*, stack_t*) = NULL;
+	void* caller = SHIM_CALLER_RETURN_ADDRESS();
 	const struct darwin_sigaltstack* darwin_new_stack =
 		(const struct darwin_sigaltstack*)new_stack;
 	struct darwin_sigaltstack* darwin_old_stack =
@@ -5024,14 +7717,33 @@ int sigaltstack(const stack_t *new_stack, stack_t *old_stack)
 
 	if (!real_sigaltstack)
 		real_sigaltstack = dlsym(RTLD_NEXT, "sigaltstack");
-	if (!real_sigaltstack)
+	if (!real_sigaltstack) {
+		int saved_errno = errno;
+		if (shim_delta_vm_trace_enabled()) {
+			fprintf(stderr,
+			        "libsystem_shim: sigaltstack tid=%d pthread=%#lx caller=%p new=%p old=%p -> -1 errno=%d\n",
+			        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+			        new_stack, old_stack, saved_errno);
+			errno = saved_errno;
+		}
 		return -1;
+	}
 
 	if (darwin_new_stack) {
 		int linux_flags;
 		if (!darwin_sigaltstack_flags_to_linux(darwin_new_stack->flags,
 		                                       &linux_flags)) {
 			errno = EINVAL;
+			if (shim_delta_vm_trace_enabled()) {
+				int saved_errno = errno;
+				fprintf(stderr,
+				        "libsystem_shim: sigaltstack tid=%d pthread=%#lx caller=%p new=%p new_sp=%p new_size=%llu new_flags=%#x old=%p -> -1 errno=%d\n",
+				        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+				        new_stack, (void*)(uintptr_t)darwin_new_stack->sp,
+				        (unsigned long long)darwin_new_stack->size,
+				        darwin_new_stack->flags, old_stack, saved_errno);
+				errno = saved_errno;
+			}
 			return -1;
 		}
 		linux_new_stack.ss_sp = (void*)darwin_new_stack->sp;
@@ -5041,9 +7753,18 @@ int sigaltstack(const stack_t *new_stack, stack_t *old_stack)
 	}
 
 	int result = real_sigaltstack(linux_new_stack_ptr, linux_old_stack_ptr);
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: sigaltstack(new=%p old=%p) -> %d errno=%d\n",
-		        new_stack, old_stack, result, result < 0 ? errno : 0);
+	int saved_errno = errno;
+	if (shim_delta_vm_trace_enabled()) {
+		fprintf(stderr,
+		        "libsystem_shim: sigaltstack tid=%d pthread=%#lx caller=%p new=%p new_sp=%p new_size=%llu new_flags=%#x old=%p -> %d errno=%d\n",
+		        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+		        new_stack,
+		        darwin_new_stack ? (void*)(uintptr_t)darwin_new_stack->sp : NULL,
+		        darwin_new_stack ? (unsigned long long)darwin_new_stack->size : 0,
+		        darwin_new_stack ? darwin_new_stack->flags : 0,
+		        old_stack, result, result < 0 ? saved_errno : 0);
+		errno = saved_errno;
+	}
 	if (result < 0)
 		return result;
 
@@ -5055,6 +7776,7 @@ int sigaltstack(const stack_t *new_stack, stack_t *old_stack)
 		darwin_old_stack->pad = 0;
 	}
 
+	errno = saved_errno;
 	return result;
 }
 
@@ -5105,12 +7827,35 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 			return -1;
 		}
 		memset(&linux_act, 0, sizeof(linux_act));
-		linux_act.sa_handler = (void (*)(int))(uintptr_t)darwin_act->handler;
 		linux_act.sa_flags = linux_flags;
 		linux_sigemptyset(&linux_act.sa_mask);
 		for (int bit = 1; bit < 32; bit++) {
 			if (darwin_act->mask & (1u << (bit - 1)))
 				linux_sigaddset(&linux_act.sa_mask, darwin_signal_to_linux(bit));
+		}
+		if (should_trace_guest_signal(linux_signal) &&
+		    darwin_act->handler != (uint64_t)(uintptr_t)SIG_DFL &&
+		    darwin_act->handler != (uint64_t)(uintptr_t)SIG_IGN) {
+			trace_signal_uses_siginfo[linux_signal] =
+				(linux_flags & SA_SIGINFO) != 0;
+			if (trace_signal_uses_siginfo[linux_signal]) {
+				trace_signal_actions[linux_signal] =
+					(void (*)(int, siginfo_t*, void*))(uintptr_t)darwin_act->handler;
+				trace_signal_handlers[linux_signal] = NULL;
+			} else {
+				trace_signal_handlers[linux_signal] =
+					(void (*)(int))(uintptr_t)darwin_act->handler;
+				trace_signal_actions[linux_signal] = NULL;
+			}
+			linux_act.sa_sigaction = trace_signal_dispatcher;
+			linux_act.sa_flags = linux_flags | SA_SIGINFO;
+		} else {
+			linux_act.sa_handler = (void (*)(int))(uintptr_t)darwin_act->handler;
+		}
+		if (machgate_shim_in_fork_child() &&
+		    signum == 13 &&
+		    darwin_act->handler == (uint64_t)(uintptr_t)SIG_DFL) {
+			linux_act.sa_handler = SIG_IGN;
 		}
 		linux_act_ptr = &linux_act;
 	}
@@ -5124,6 +7869,16 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 
 	if (darwin_oldact) {
 		darwin_oldact->handler = (uint64_t)(uintptr_t)linux_oldact.sa_handler;
+		if (darwin_oldact->handler ==
+		    (uint64_t)(uintptr_t)trace_signal_dispatcher &&
+		    linux_signal > 0 && linux_signal < _NSIG) {
+			if (trace_signal_uses_siginfo[linux_signal])
+				darwin_oldact->handler =
+					(uint64_t)(uintptr_t)trace_signal_actions[linux_signal];
+			else
+				darwin_oldact->handler =
+					(uint64_t)(uintptr_t)trace_signal_handlers[linux_signal];
+		}
 		darwin_oldact->mask = 0;
 		for (int linux_bit = 1; linux_bit < 32; linux_bit++) {
 			if (sigismember(&linux_oldact.sa_mask, linux_bit) == 1) {
@@ -5718,6 +8473,13 @@ uint8_t os_signpost_enabled(void* log)
 	return 0;
 }
 
+uint8_t os_log_type_enabled(void* log, uint8_t type)
+{
+	(void)log;
+	(void)type;
+	return 0;
+}
+
 void os_unfair_lock_lock(uint32_t* lock)
 {
 	if (!lock)
@@ -5987,13 +8749,29 @@ __asm__(
 	".global _tlv_bootstrap\n"
 	".type _tlv_bootstrap, %function\n"
 	"_tlv_bootstrap:\n"
-	"stp x8, x9, [sp, #-48]!\n"
-	"stp x10, x11, [sp, #16]\n"
-	"str x30, [sp, #32]\n"
+	"sub sp, sp, #160\n"
+	"stp x1, x2, [sp]\n"
+	"stp x3, x4, [sp, #16]\n"
+	"stp x5, x6, [sp, #32]\n"
+	"stp x7, x8, [sp, #48]\n"
+	"stp x9, x10, [sp, #64]\n"
+	"stp x11, x12, [sp, #80]\n"
+	"stp x13, x14, [sp, #96]\n"
+	"stp x15, x16, [sp, #112]\n"
+	"stp x17, x18, [sp, #128]\n"
+	"str x30, [sp, #144]\n"
 	"bl _tlv_bootstrap_impl\n"
-	"ldr x30, [sp, #32]\n"
-	"ldp x10, x11, [sp, #16]\n"
-	"ldp x8, x9, [sp], #48\n"
+	"ldr x30, [sp, #144]\n"
+	"ldp x17, x18, [sp, #128]\n"
+	"ldp x15, x16, [sp, #112]\n"
+	"ldp x13, x14, [sp, #96]\n"
+	"ldp x11, x12, [sp, #80]\n"
+	"ldp x9, x10, [sp, #64]\n"
+	"ldp x7, x8, [sp, #48]\n"
+	"ldp x5, x6, [sp, #32]\n"
+	"ldp x3, x4, [sp, #16]\n"
+	"ldp x1, x2, [sp]\n"
+	"add sp, sp, #160\n"
 	"ret\n"
 );
 #else
@@ -6103,6 +8881,7 @@ void _Unwind_Resume(void* exception_object)
 #define DARWIN_F_NOCACHE    48  /* no Linux equivalent */
 #define DARWIN_F_GETPATH    50  /* implement via /proc */
 #define DARWIN_F_FULLFSYNC  51  /* implement via fsync */
+#define DARWIN_F_DUPFD_CLOEXEC 67
 
 #define DARWIN_FIOCLEX      0x20006601u
 #define DARWIN_FIONCLEX     0x20006602u
@@ -6280,6 +9059,9 @@ static int shim_fcntl_fixed(int fd, int cmd, unsigned long arg)
 	case DARWIN_F_GETLK:    linux_cmd = F_GETLK;   break;
 	case DARWIN_F_SETLK:    linux_cmd = F_SETLK;   break;
 	case DARWIN_F_SETLKW:   linux_cmd = F_SETLKW;  break;
+	case DARWIN_F_DUPFD_CLOEXEC:
+		linux_cmd = F_DUPFD_CLOEXEC;
+		break;
 	case DARWIN_F_FULLFSYNC:
 		/* Best-effort: Linux fsync flushes data + metadata */
 		return fsync(fd);
@@ -6308,6 +9090,8 @@ static int shim_fcntl_fixed(int fd, int cmd, unsigned long arg)
 
 	int ret = syscall(SYS_fcntl, fd, linux_cmd, arg);
 	int saved_errno = errno;
+	if (ret >= 0 && (cmd == F_DUPFD || cmd == DARWIN_F_DUPFD_CLOEXEC))
+		remember_kqueue_dup(fd, ret);
 
 	/* Translate O_flags back to Darwin for F_GETFL */
 	if (cmd == F_GETFL && ret >= 0)
@@ -6715,25 +9499,154 @@ struct dirent *shim_readdir_r(DIR *dirp, void *entry, void **result)
 #define DARWIN_MAP_ANON  0x1000
 #define DARWIN_MAP_JIT   0x0800
 
+typedef long (*machgate_darwin_mmap_fn)(void*, size_t, int, int, int, off_t);
+typedef long (*machgate_darwin_munmap_fn)(void*, size_t);
+
+static machgate_darwin_mmap_fn shim_guest_mmap_fn;
+static machgate_darwin_munmap_fn shim_guest_munmap_fn;
+static void* (*shim_real_mmap)(void*, size_t, int, int, int, off_t);
+static int (*shim_real_munmap)(void*, size_t);
+
+static void shim_resolve_guest_vm_wrappers(void)
+{
+	if (!shim_real_mmap)
+		shim_real_mmap = dlsym(RTLD_NEXT, "mmap");
+	if (!shim_real_munmap)
+		shim_real_munmap = dlsym(RTLD_NEXT, "munmap");
+	if (!shim_guest_mmap_fn)
+		shim_guest_mmap_fn = (machgate_darwin_mmap_fn)dlsym(RTLD_DEFAULT,
+		                                                    "machgate_darwin_mmap");
+	if (!shim_guest_munmap_fn)
+		shim_guest_munmap_fn = (machgate_darwin_munmap_fn)dlsym(RTLD_DEFAULT,
+		                                                        "machgate_darwin_munmap");
+}
+
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 {
-	static void *(*real_mmap)(void*, size_t, int, int, int, off_t) = NULL;
-	if (!real_mmap)
-		real_mmap = dlsym(RTLD_NEXT, "mmap");
+	void* caller = SHIM_CALLER_RETURN_ADDRESS();
+	int darwin_flags = flags;
+	int linux_flags = flags;
+	void* result;
 
-	/* Translate macOS MAP_ANON (0x1000) → Linux MAP_ANONYMOUS (0x0020) */
+	shim_resolve_guest_vm_wrappers();
 	if (flags & DARWIN_MAP_ANON) {
-		flags &= ~DARWIN_MAP_ANON;
-		flags |= MAP_ANONYMOUS;
+		linux_flags &= ~DARWIN_MAP_ANON;
+		linux_flags |= MAP_ANONYMOUS;
 	}
-	/* Strip macOS-only MAP_JIT (0x0800) */
-	flags &= ~DARWIN_MAP_JIT;
+	linux_flags &= ~DARWIN_MAP_JIT;
 
-	void* result = real_mmap(addr, length, prot, flags, fd, offset);
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: mmap(%p, %zu, %#x, %#x, %d, %jd) -> %p errno=%d\n",
-		        addr, length, prot, flags, fd, (intmax_t)offset,
-		        result, result == MAP_FAILED ? errno : 0);
+	if (shim_guest_mmap_fn) {
+		long mapped = shim_guest_mmap_fn(addr, length, prot, linux_flags, fd, offset);
+		result = mapped < 0 ? MAP_FAILED : (void*)mapped;
+	} else if (shim_real_mmap) {
+		result = shim_real_mmap(addr, length, prot, linux_flags, fd, offset);
+	} else {
+		result = MAP_FAILED;
+		errno = ENOSYS;
+	}
+	int saved_errno = errno;
+	if (shim_delta_vm_trace_enabled()) {
+		fprintf(stderr,
+		        "libsystem_shim: mmap tid=%d pthread=%#lx caller=%p addr=%p length=%zu prot=%#x flags=%#x linux_flags=%#x fd=%d offset=%jd -> %p errno=%d\n",
+		        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+		        addr, length, prot, darwin_flags, linux_flags, fd,
+		        (intmax_t)offset, result,
+		        result == MAP_FAILED ? saved_errno : 0);
+		errno = saved_errno;
+	}
+	return result;
+}
+
+int munmap(void *addr, size_t length)
+{
+	void* caller = SHIM_CALLER_RETURN_ADDRESS();
+	long result;
+
+	shim_resolve_guest_vm_wrappers();
+	if (shim_guest_munmap_fn)
+		result = shim_guest_munmap_fn(addr, length);
+	else if (shim_real_munmap)
+		result = shim_real_munmap(addr, length);
+	else {
+		errno = ENOSYS;
+		result = -1;
+	}
+	int saved_errno = errno;
+	if (shim_delta_vm_trace_enabled()) {
+		fprintf(stderr,
+		        "libsystem_shim: munmap tid=%d pthread=%#lx caller=%p addr=%p length=%zu -> %ld errno=%d\n",
+		        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+		        addr, length, result, result < 0 ? saved_errno : 0);
+		errno = saved_errno;
+	}
+	return (int)result;
+}
+
+ssize_t readlink(const char *path, char *buffer, size_t buffer_size)
+{
+	static ssize_t (*real_readlink)(const char*, char*, size_t) = NULL;
+	void* caller = SHIM_CALLER_RETURN_ADDRESS();
+
+	if (!real_readlink)
+		real_readlink = dlsym(RTLD_NEXT, "readlink");
+	if (!real_readlink) {
+		errno = ENOSYS;
+		if (shim_delta_vm_trace_enabled()) {
+			int saved_errno = errno;
+			fprintf(stderr,
+			        "libsystem_shim: readlink tid=%d pthread=%#lx caller=%p path=\"%s\" buffer=%p size=%zu -> -1 errno=%d\n",
+			        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+			        shim_trace_path(path), buffer, buffer_size, saved_errno);
+			errno = saved_errno;
+		}
+		return -1;
+	}
+
+	ssize_t result = real_readlink(path, buffer, buffer_size);
+	int saved_errno = errno;
+	if (shim_delta_vm_trace_enabled()) {
+		fprintf(stderr,
+		        "libsystem_shim: readlink tid=%d pthread=%#lx caller=%p path=\"%s\" buffer=%p size=%zu -> %zd errno=%d\n",
+		        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+		        shim_trace_path(path), buffer, buffer_size, result,
+		        result < 0 ? saved_errno : 0);
+		errno = saved_errno;
+	}
+	return result;
+}
+
+ssize_t readlinkat(int dirfd, const char *path, char *buffer,
+                   size_t buffer_size)
+{
+	static ssize_t (*real_readlinkat)(int, const char*, char*, size_t) = NULL;
+	void* caller = SHIM_CALLER_RETURN_ADDRESS();
+
+	if (!real_readlinkat)
+		real_readlinkat = dlsym(RTLD_NEXT, "readlinkat");
+	if (!real_readlinkat) {
+		errno = ENOSYS;
+		if (shim_delta_vm_trace_enabled()) {
+			int saved_errno = errno;
+			fprintf(stderr,
+			        "libsystem_shim: readlinkat tid=%d pthread=%#lx caller=%p dirfd=%d path=\"%s\" buffer=%p size=%zu -> -1 errno=%d\n",
+			        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+			        dirfd, shim_trace_path(path), buffer, buffer_size,
+			        saved_errno);
+			errno = saved_errno;
+		}
+		return -1;
+	}
+
+	ssize_t result = real_readlinkat(dirfd, path, buffer, buffer_size);
+	int saved_errno = errno;
+	if (shim_delta_vm_trace_enabled()) {
+		fprintf(stderr,
+		        "libsystem_shim: readlinkat tid=%d pthread=%#lx caller=%p dirfd=%d path=\"%s\" buffer=%p size=%zu -> %zd errno=%d\n",
+		        (int)shim_trace_tid(), shim_trace_pthread_self(), caller,
+		        dirfd, shim_trace_path(path), buffer, buffer_size, result,
+		        result < 0 ? saved_errno : 0);
+		errno = saved_errno;
+	}
 	return result;
 }
 

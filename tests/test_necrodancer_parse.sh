@@ -19,7 +19,7 @@ fi
 # Since NecroDancer links dyld and libraries we don't have, it will print the
 # LC_LOAD_DYLINKER warning, then either segfault at the entry point or exit.
 # We just verify machismo starts parsing without errors.
-output=$(timeout -s KILL 10 env MACHISMO_CONFIG=none "$BUILD_DIR/machismo" "$NECRO_BIN" 2>&1 || true)
+output=$(timeout -s KILL 10 env MACHISMO_CONFIG=none "$BUILD_DIR/machgate" "$NECRO_BIN" 2>&1 || true)
 
 # Should have found LC_LOAD_DYLINKER
 echo "$output" | grep -q "LC_LOAD_DYLINKER"

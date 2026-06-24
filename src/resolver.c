@@ -397,6 +397,155 @@ struct resolver_state {
 	int rebases_applied;
 };
 
+static const char* dylib_action_name(enum dylib_action action)
+{
+	switch (action) {
+	case DYLIB_MAP: return "map";
+	case DYLIB_STUB: return "stub";
+	case DYLIB_SKIP: return "skip";
+	case DYLIB_MACHO: return "macho";
+	case DYLIB_DEFERRED: return "deferred";
+	}
+	return "unknown";
+}
+
+static void log_failed_bind(struct resolver_state* rs, const char* context,
+                            const char* sym_name, const char* lookup_name,
+                            int lib_ordinal, int weak,
+                            const struct dylib_entry* de)
+{
+	if (weak || rs->binds_failed >= 20)
+		return;
+
+	if (de) {
+		fprintf(stderr,
+		        "resolver: failed bind (%s): symbol '%s' lookup '%s' dylib[%d] '%s' action=%s target='%s'\n",
+		        context, sym_name, lookup_name, lib_ordinal, de->name,
+		        dylib_action_name(de->action), de->so_path);
+		return;
+	}
+
+	fprintf(stderr,
+	        "resolver: failed bind (%s): symbol '%s' lookup '%s' lib_ordinal=%d\n",
+	        context, sym_name, lookup_name, lib_ordinal);
+}
+
+static int trace_bindings_enabled(void)
+{
+	const char* trace_bindings = getenv("MACHGATE_TRACE_BINDINGS");
+	const char* trace_shim = getenv("MACHGATE_TRACE_SHIM");
+	return (trace_bindings && strcmp(trace_bindings, "1") == 0) ||
+	       (trace_shim && strcmp(trace_shim, "1") == 0);
+}
+
+static int trace_binding_symbol(const char* lookup_name)
+{
+	return strcmp(lookup_name, "mmap") == 0 ||
+	       strcmp(lookup_name, "munmap") == 0 ||
+	       strcmp(lookup_name, "readlink") == 0 ||
+	       strcmp(lookup_name, "readlinkat") == 0 ||
+	       strcmp(lookup_name, "sigaltstack") == 0 ||
+	       strcmp(lookup_name, "pthread_create") == 0 ||
+	       strcmp(lookup_name, "pthread_detach") == 0 ||
+	       strcmp(lookup_name, "pthread_setname_np") == 0;
+}
+
+static void trace_target_binding(const char* context,
+                                 const char* sym_name,
+                                 const char* lookup_name,
+                                 int lib_ordinal,
+                                 const struct dylib_entry* de,
+                                 uintptr_t slot_addr,
+                                 uintptr_t resolved,
+                                 const char* source_kind,
+                                 const char* source_path)
+{
+	if (!trace_bindings_enabled() || !trace_binding_symbol(lookup_name))
+		return;
+
+	fprintf(stderr,
+	        "resolver: trace binding context=%s symbol='%s' lookup='%s' ordinal=%d dylib='%s' slot=%p resolved=%p source='%s' path='%s'\n",
+	        context, sym_name, lookup_name, lib_ordinal,
+	        de ? de->name : "(none)", (void*)slot_addr, (void*)resolved,
+	        source_kind ? source_kind : "(unknown)",
+	        source_path ? source_path : "(unknown)");
+}
+
+static uintptr_t resolve_non_gui_framework_data(const struct dylib_entry* de,
+                                                const char* sym_name)
+{
+	static const void* ns_pasteboard_type_string = NULL;
+
+	if (!de)
+		return 0;
+
+	if (strcmp(de->name, "AppKit") == 0 &&
+	    strcmp(sym_name, "_NSPasteboardTypeString") == 0)
+		return (uintptr_t)&ns_pasteboard_type_string;
+
+	return 0;
+}
+
+static int is_darwin_runtime_symbol(const char* lookup_name)
+{
+	return strcmp(lookup_name, "pthread_key_create") == 0 ||
+	       strcmp(lookup_name, "pthread_setspecific") == 0 ||
+	       strcmp(lookup_name, "pthread_getspecific") == 0 ||
+	       strcmp(lookup_name, "pthread_kill") == 0 ||
+	       strcmp(lookup_name, "pthread_sigmask") == 0 ||
+	       strcmp(lookup_name, "mmap") == 0 ||
+	       strcmp(lookup_name, "munmap") == 0 ||
+	       strcmp(lookup_name, "mprotect") == 0 ||
+	       strcmp(lookup_name, "sigaction") == 0 ||
+	       strcmp(lookup_name, "sigaltstack") == 0;
+}
+
+static void* lookup_libsystem_symbol(struct resolver_state* rs,
+                                     const char* lookup_name,
+                                     const struct dylib_entry** provider)
+{
+	for (int i = 0; i < rs->ndylibs && i < MAX_DYLIBS; i++) {
+		struct dylib_entry* de = &rs->dylibs[i];
+		if (de->action != DYLIB_MAP || !de->handle)
+			continue;
+		if (!strstr(de->name, "libSystem"))
+			continue;
+		void* addr = dlsym(de->handle, lookup_name);
+		if (addr) {
+			if (provider)
+				*provider = de;
+			return addr;
+		}
+	}
+	return NULL;
+}
+
+static void* lookup_flat_symbol(struct resolver_state* rs,
+                                const char* lookup_name,
+                                const char** source_kind,
+                                const char** source_path)
+{
+	if (is_darwin_runtime_symbol(lookup_name)) {
+		const struct dylib_entry* provider = NULL;
+		void* addr = lookup_libsystem_symbol(rs, lookup_name, &provider);
+		if (addr) {
+			if (source_kind)
+				*source_kind = "mapped dylib handle";
+			if (source_path)
+				*source_path = provider ? provider->so_path : "(unknown)";
+			return addr;
+		}
+	}
+	void* addr = dlsym(RTLD_DEFAULT, lookup_name);
+	if (addr) {
+		if (source_kind)
+			*source_kind = "RTLD_DEFAULT";
+		if (source_path)
+			*source_path = "RTLD_DEFAULT";
+	}
+	return addr;
+}
+
 /* ---- Deferred library loading ----
  *
  * Libraries with a DEFERRED: prefix in dylib_map.conf are not dlopen'd
@@ -1613,11 +1762,18 @@ static void resolver_complete_deferred(void)
 			lookup = stripped;
 		}
 
+		const char* source_kind = "mapped dylib handle";
+		const char* source_path = de->so_path;
 		void* addr = dlsym(de->handle, lookup);
 		if (!addr && strncmp(lookup, "_ZN", 3) == 0)
 			addr = try_mangling_variants(de->handle, lookup);
-		if (!addr)
+		if (!addr) {
 			addr = dlsym(RTLD_DEFAULT, lookup);
+			if (addr) {
+				source_kind = "RTLD_DEFAULT";
+				source_path = "RTLD_DEFAULT";
+			}
+		}
 
 		if (addr) {
 			uintptr_t result = (uintptr_t)addr + db->addend;
@@ -1628,8 +1784,14 @@ static void resolver_complete_deferred(void)
 			uintptr_t page = db->got_slot & ~(uintptr_t)(page_size - 1);
 			mprotect((void*)page, page_size, PROT_READ | PROT_WRITE);
 			*(uint64_t*)db->got_slot = result;
+			trace_target_binding("deferred-complete", db->sym_name, lookup,
+			                     db->lib_ordinal, de, db->got_slot, result,
+			                     source_kind, source_path);
 			resolved++;
 		} else if (!db->weak) {
+			trace_target_binding("deferred-complete-fail", db->sym_name, lookup,
+			                     db->lib_ordinal, de, db->got_slot, 0,
+			                     "stub/fail", de->so_path);
 			if (failed < 10)
 				fprintf(stderr, "resolver: deferred symbol '%s' not found in '%s'\n",
 						lookup, de->so_path);
@@ -1647,7 +1809,8 @@ static uintptr_t resolve_import(struct resolver_state* rs,
                                 uint32_t ordinal,
                                 const struct dyld_chained_fixups_header* header,
                                 const char* chain_data,
-                                int64_t addend)
+                                int64_t addend,
+                                uintptr_t slot_addr)
 {
 	if (ordinal >= header->imports_count) {
 		fprintf(stderr, "resolver: bind ordinal %u out of range (max %u)\n",
@@ -1696,6 +1859,7 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 	}
 
 	const char* sym_name = symbols_base + name_offset;
+	const struct dylib_entry* trace_de = NULL;
 
 	/* Strip leading underscore (Mach-O convention) */
 	const char* lookup_name = sym_name;
@@ -1753,15 +1917,23 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 		/* BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE — look up in our own symbol table */
 		uintptr_t addr = lookup_macho_symbol(rs, sym_name);
 		if (addr) {
+			uintptr_t result = addr + addend;
+			trace_target_binding("chained-main-executable", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     "main executable", "main executable");
 			rs->binds_resolved++;
-			return addr + addend;
+			return result;
 		}
+		log_failed_bind(rs, "chained-main-executable", sym_name, lookup_name,
+		                lib_ordinal, weak, NULL);
 		rs->binds_failed++;
 		goto alloc_stub_slot;
 	}
 	if (lib_ordinal == -2) {
 		/* BIND_SPECIAL_DYLIB_FLAT_LOOKUP — search all */
-		void* addr = dlsym(RTLD_DEFAULT, lookup_name);
+		const char* source_kind = NULL;
+		const char* source_path = NULL;
+		void* addr = lookup_flat_symbol(rs, lookup_name, &source_kind, &source_path);
 		if (addr) {
 			uintptr_t result = (uintptr_t)addr + addend;
 			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
@@ -1775,18 +1947,29 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 					if (thunk) result = thunk;
 				}
 			}
+			trace_target_binding("chained-flat-lookup", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     source_kind, source_path);
 			rs->binds_resolved++;
 			return result;
 		}
-		if (!weak) rs->binds_failed++;
+		if (!weak) {
+			log_failed_bind(rs, "chained-flat-lookup", sym_name, lookup_name,
+			                lib_ordinal, weak, NULL);
+			rs->binds_failed++;
+		}
 		goto alloc_stub_slot;
 	}
 	if (lib_ordinal == -3) {
 		/* BIND_SPECIAL_DYLIB_WEAK_LOOKUP — search Mach-O binary first, then .so files */
 		uintptr_t macho_addr = lookup_macho_symbol(rs, sym_name);
 		if (macho_addr) {
+			uintptr_t result = macho_addr + addend;
+			trace_target_binding("chained-weak-lookup", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     "main executable", "main executable");
 			rs->binds_resolved++;
-			return macho_addr + addend;
+			return result;
 		}
 		void* addr = dlsym(RTLD_DEFAULT, lookup_name);
 		if (addr) {
@@ -1806,6 +1989,9 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 			if (result == 0)
 				fprintf(stderr, "resolver: WARNING: weak sym '%s' resolved to %p + addend %ld = 0!\n",
 						sym_name, addr, (long)addend);
+			trace_target_binding("chained-weak-lookup", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     "RTLD_DEFAULT", "RTLD_DEFAULT");
 			return result;
 		}
 		/* For unresolved weak data references (guard variables, etc.),
@@ -1829,6 +2015,9 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 				rs->binds_stubbed++;
 				if (strstr(sym_name, "s_instance"))
 					fprintf(stderr, "resolver: WEAK POOL gave %s -> %p\n", sym_name, (void*)slot);
+				trace_target_binding("chained-weak-lookup", sym_name, lookup_name,
+				                     lib_ordinal, NULL, slot_addr, slot,
+				                     "stub/fail", "weak stub pool");
 				return slot;
 			}
 		}
@@ -1840,11 +2029,25 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 	if (lib_ordinal < 1 || lib_ordinal > rs->ndylibs) {
 		fprintf(stderr, "resolver: bind ordinal %u references lib_ordinal %d (out of range)\n",
 				ordinal, lib_ordinal);
+		log_failed_bind(rs, "chained-out-of-range", sym_name, lookup_name,
+		                lib_ordinal, weak, NULL);
 		rs->binds_failed++;
 		goto alloc_stub_slot;
 	}
 
 	struct dylib_entry* de = &rs->dylibs[lib_ordinal - 1];
+	trace_de = de;
+	uintptr_t non_gui_data = resolve_non_gui_framework_data(de, sym_name);
+	if (non_gui_data) {
+		uintptr_t result = non_gui_data + addend;
+		fprintf(stderr, "resolver: non-GUI data stub: %s from %s\n",
+		        sym_name, de->name);
+		trace_target_binding("chained-non-gui-data", sym_name, lookup_name,
+		                     lib_ordinal, de, slot_addr, result,
+		                     "stub/fail", "non-GUI data stub");
+		rs->binds_resolved++;
+		return result;
+	}
 
 	switch (de->action) {
 	case DYLIB_MAP: {
@@ -1886,6 +2089,9 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 					result = (uintptr_t)wrapped_SDL_GL_SetAttribute;
 				}
 			}
+			trace_target_binding("chained-map", sym_name, lookup_name,
+			                     lib_ordinal, de, slot_addr, result,
+			                     "mapped dylib handle", de->so_path);
 			rs->binds_resolved++;
 			return result;
 		}
@@ -1894,15 +2100,16 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 		 * __register_frame, etc.) or other loaded libraries */
 		addr = dlsym(RTLD_DEFAULT, lookup_name);
 		if (addr) {
+			uintptr_t result = (uintptr_t)addr + addend;
+			trace_target_binding("chained-map", sym_name, lookup_name,
+			                     lib_ordinal, de, slot_addr, result,
+			                     "RTLD_DEFAULT", "RTLD_DEFAULT");
 			rs->binds_resolved++;
-			return (uintptr_t)addr + addend;
+			return result;
 		}
 		if (!weak) {
-			/* Only print for first few failures to avoid spam */
-			if (rs->binds_failed < 20) {
-				fprintf(stderr, "resolver: symbol '%s' not found in '%s'\n",
-						lookup_name, de->so_path);
-			}
+			log_failed_bind(rs, "chained-map", sym_name, lookup_name,
+			                lib_ordinal, weak, de);
 			rs->binds_failed++;
 		} else {
 			rs->binds_stubbed++;
@@ -1931,14 +2138,16 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 			/* NO ctor/dtor ABI adapter needed — both sides are Apple ABI.
 			 * The caller (Mach-O) expects ctor to return this in x0,
 			 * and the callee (Mach-O dylib) does return this in x0. */
+			uintptr_t result = addr + addend;
+			trace_target_binding("chained-macho", sym_name, lookup_name,
+			                     lib_ordinal, de, slot_addr, result,
+			                     "Mach-O dylib", de->so_path);
 			rs->binds_resolved++;
-			return addr + addend;
+			return result;
 		}
 		if (!weak) {
-			if (rs->binds_failed < 20) {
-				fprintf(stderr, "resolver: symbol '%s' not found in MACHO '%s'\n",
-						lookup_name, de->so_path);
-			}
+			log_failed_bind(rs, "chained-macho", sym_name, lookup_name,
+			                lib_ordinal, weak, de);
 			rs->binds_failed++;
 		} else {
 			rs->binds_stubbed++;
@@ -1950,6 +2159,8 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 		goto alloc_stub_slot;
 	case DYLIB_SKIP:
 		if (!weak) {
+			log_failed_bind(rs, "chained-skip", sym_name, lookup_name,
+			                lib_ordinal, weak, de);
 			rs->binds_failed++;
 		} else {
 			rs->binds_stubbed++;
@@ -1964,7 +2175,13 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 	}
 
 alloc_stub_slot:
-	return alloc_return0_stub();
+	{
+		uintptr_t result = alloc_return0_stub();
+		trace_target_binding("chained-stub", sym_name, lookup_name,
+		                     lib_ordinal, trace_de, slot_addr, result,
+		                     "stub/fail", trace_de ? trace_de->so_path : "stub/fail");
+		return result;
+	}
 }
 
 /* ---- Walk a single fixup chain ---- */
@@ -1984,7 +2201,8 @@ static int walk_chain(struct resolver_state* rs, uint64_t* chain_start, uint16_t
 			uint32_t ordinal = FIXUP_BIND_ORDINAL(raw);
 			int64_t addend = (int64_t)(int8_t)FIXUP_BIND_ADDEND(raw);
 
-			uintptr_t resolved = resolve_import(rs, ordinal, header, chain_data, addend);
+			uintptr_t resolved = resolve_import(rs, ordinal, header, chain_data, addend,
+			                                    (uintptr_t)loc);
 			if (resolved == 0 && getenv("MACHISMO_VERBOSE_BINDS")) {
 				/* Log unresolved binds for debugging */
 				const char* symbols_base = chain_data + header->symbols_offset;
@@ -2034,12 +2252,14 @@ static int walk_chain(struct resolver_state* rs, uint64_t* chain_start, uint16_t
  */
 static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
                                       int lib_ordinal, const char* sym_name,
-                                      int weak, int64_t addend)
+                                      int weak, int64_t addend,
+                                      uintptr_t slot_addr)
 {
 	/* Strip leading underscore (Mach-O convention) */
 	const char* lookup_name = sym_name;
 	if (lookup_name[0] == '_')
 		lookup_name++;
+	const struct dylib_entry* trace_de = NULL;
 
 	/* Strip Apple $ suffixes ($DARWIN_EXTSN, $UNIX2003, $NOCANCEL) */
 	char dollar_stripped[256];
@@ -2085,23 +2305,38 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 		 * -1 = BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE */
 		uintptr_t addr = lookup_macho_symbol(rs, sym_name);
 		if (addr) {
+			uintptr_t result = addr + addend;
+			trace_target_binding("dyld-info-self", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     "main executable", "main executable");
 			rs->binds_resolved++;
-			return addr + addend;
+			return result;
 		}
 		/* Fallback: try RTLD_DEFAULT for C++ RTTI and other symbols
 		 * that may come from linked shared libraries */
 		void* fallback = dlsym(RTLD_DEFAULT, lookup_name);
 		if (fallback) {
+			uintptr_t result = (uintptr_t)fallback + addend;
+			trace_target_binding("dyld-info-self", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     "RTLD_DEFAULT", "RTLD_DEFAULT");
 			rs->binds_resolved++;
-			return (uintptr_t)fallback + addend;
+			return result;
 		}
-		if (!weak) rs->binds_failed++;
-		else rs->binds_stubbed++;
+		if (!weak) {
+			log_failed_bind(rs, "dyld-info-self", sym_name, lookup_name,
+			                lib_ordinal, weak, NULL);
+			rs->binds_failed++;
+		} else {
+			rs->binds_stubbed++;
+		}
 		goto alloc_stub;
 	}
 	if (lib_ordinal == -2) {
 		/* BIND_SPECIAL_DYLIB_FLAT_LOOKUP */
-		void* addr = dlsym(RTLD_DEFAULT, lookup_name);
+		const char* source_kind = NULL;
+		const char* source_path = NULL;
+		void* addr = lookup_flat_symbol(rs, lookup_name, &source_kind, &source_path);
 		if (addr) {
 			uintptr_t result = (uintptr_t)addr + addend;
 			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
@@ -2115,18 +2350,29 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 					if (thunk) result = thunk;
 				}
 			}
+			trace_target_binding("dyld-info-flat-lookup", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     source_kind, source_path);
 			rs->binds_resolved++;
 			return result;
 		}
-		if (!weak) rs->binds_failed++;
+		if (!weak) {
+			log_failed_bind(rs, "dyld-info-flat-lookup", sym_name, lookup_name,
+			                lib_ordinal, weak, NULL);
+			rs->binds_failed++;
+		}
 		goto alloc_stub;
 	}
 	if (lib_ordinal == -3) {
 		/* BIND_SPECIAL_DYLIB_WEAK_LOOKUP */
 		uintptr_t macho_addr = lookup_macho_symbol(rs, sym_name);
 		if (macho_addr) {
+			uintptr_t result = macho_addr + addend;
+			trace_target_binding("dyld-info-weak-lookup", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     "main executable", "main executable");
 			rs->binds_resolved++;
-			return macho_addr + addend;
+			return result;
 		}
 		void* addr = dlsym(RTLD_DEFAULT, lookup_name);
 		if (addr) {
@@ -2134,6 +2380,9 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 			if (is_ctor_or_dtor(sym_name) && !ctor_has_stack_params(sym_name))
 				result = wrap_ctor_for_apple_abi(result);
 			result = wrap_fixed_stack_arg_symbol(lookup_name, result, NULL);
+			trace_target_binding("dyld-info-weak-lookup", sym_name, lookup_name,
+			                     lib_ordinal, NULL, slot_addr, result,
+			                     "RTLD_DEFAULT", "RTLD_DEFAULT");
 			rs->binds_resolved++;
 			return result;
 		}
@@ -2147,11 +2396,25 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 		if (machismo_verbose)
 			fprintf(stderr, "resolver: dyld_info bind '%s' lib_ordinal %d out of range\n",
 					sym_name, lib_ordinal);
+		log_failed_bind(rs, "dyld-info-out-of-range", sym_name, lookup_name,
+		                lib_ordinal, weak, NULL);
 		rs->binds_failed++;
 		goto alloc_stub;
 	}
 
 	struct dylib_entry* de = &rs->dylibs[lib_ordinal - 1];
+	trace_de = de;
+	uintptr_t non_gui_data = resolve_non_gui_framework_data(de, sym_name);
+	if (non_gui_data) {
+		uintptr_t result = non_gui_data + addend;
+		fprintf(stderr, "resolver: non-GUI data stub: %s from %s\n",
+		        sym_name, de->name);
+		trace_target_binding("dyld-info-non-gui-data", sym_name, lookup_name,
+		                     lib_ordinal, de, slot_addr, result,
+		                     "stub/fail", "non-GUI data stub");
+		rs->binds_resolved++;
+		return result;
+	}
 
 	switch (de->action) {
 	case DYLIB_MAP: {
@@ -2183,19 +2446,25 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 					result = (uintptr_t)wrapped_SDL_GL_SetAttribute;
 				}
 			}
+			trace_target_binding("dyld-info-map", sym_name, lookup_name,
+			                     lib_ordinal, de, slot_addr, result,
+			                     "mapped dylib handle", de->so_path);
 			rs->binds_resolved++;
 			return result;
 		}
 		/* Fallback: try RTLD_DEFAULT for compiler runtime symbols */
 		addr = dlsym(RTLD_DEFAULT, lookup_name);
 		if (addr) {
+			uintptr_t result = (uintptr_t)addr + addend;
+			trace_target_binding("dyld-info-map", sym_name, lookup_name,
+			                     lib_ordinal, de, slot_addr, result,
+			                     "RTLD_DEFAULT", "RTLD_DEFAULT");
 			rs->binds_resolved++;
-			return (uintptr_t)addr + addend;
+			return result;
 		}
 		if (!weak) {
-			if (rs->binds_failed < 20)
-				fprintf(stderr, "resolver: symbol '%s' not found in '%s'\n",
-						lookup_name, de->so_path);
+			log_failed_bind(rs, "dyld-info-map", sym_name, lookup_name,
+			                lib_ordinal, weak, de);
 			rs->binds_failed++;
 		} else {
 			rs->binds_stubbed++;
@@ -2216,13 +2485,16 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 			}
 		}
 		if (addr) {
+			uintptr_t result = addr + addend;
+			trace_target_binding("dyld-info-macho", sym_name, lookup_name,
+			                     lib_ordinal, de, slot_addr, result,
+			                     "Mach-O dylib", de->so_path);
 			rs->binds_resolved++;
-			return addr + addend;
+			return result;
 		}
 		if (!weak) {
-			if (rs->binds_failed < 20)
-				fprintf(stderr, "resolver: symbol '%s' not found in MACHO '%s'\n",
-						lookup_name, de->so_path);
+			log_failed_bind(rs, "dyld-info-macho", sym_name, lookup_name,
+			                lib_ordinal, weak, de);
 			rs->binds_failed++;
 		} else {
 			rs->binds_stubbed++;
@@ -2233,8 +2505,13 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 		rs->binds_stubbed++;
 		goto alloc_stub;
 	case DYLIB_SKIP:
-		if (!weak) rs->binds_failed++;
-		else rs->binds_stubbed++;
+		if (!weak) {
+			log_failed_bind(rs, "dyld-info-skip", sym_name, lookup_name,
+			                lib_ordinal, weak, de);
+			rs->binds_failed++;
+		} else {
+			rs->binds_stubbed++;
+		}
 		goto alloc_stub;
 	case DYLIB_DEFERRED:
 		/* Handled by do_bind_one before calling this function.
@@ -2244,7 +2521,13 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 	}
 
 alloc_stub:
-	return alloc_return0_stub();
+	{
+		uintptr_t result = alloc_return0_stub();
+		trace_target_binding("dyld-info-stub", sym_name, lookup_name,
+		                     lib_ordinal, trace_de, slot_addr, result,
+		                     "stub/fail", trace_de ? trace_de->so_path : "stub/fail");
+		return result;
+	}
 }
 
 /* ---- Bind helper with deferred library support ---- */
@@ -2267,12 +2550,26 @@ static void do_bind_one(struct resolver_state* rs, int seg_index,
 			db->weak = weak;
 			db->addend = addend;
 		}
-		*(uint64_t*)addr = alloc_return0_stub();
+		const char* lookup_name = sym_name;
+		if (lookup_name[0] == '_')
+			lookup_name++;
+		char stripped[256];
+		const char* dollar = strchr(lookup_name, '$');
+		if (dollar && (size_t)(dollar - lookup_name) < sizeof(stripped)) {
+			memcpy(stripped, lookup_name, dollar - lookup_name);
+			stripped[dollar - lookup_name] = '\0';
+			lookup_name = stripped;
+		}
+		uintptr_t stub = alloc_return0_stub();
+		trace_target_binding("dyld-info-deferred", sym_name, lookup_name,
+		                     lib_ordinal, &rs->dylibs[lib_ordinal - 1], addr, stub,
+		                     "stub/fail", rs->dylibs[lib_ordinal - 1].so_path);
+		*(uint64_t*)addr = stub;
 		rs->binds_stubbed++;
 		return;
 	}
 
-	uintptr_t resolved = resolve_bind_by_name(rs, lib_ordinal, sym_name, weak, addend);
+	uintptr_t resolved = resolve_bind_by_name(rs, lib_ordinal, sym_name, weak, addend, addr);
 	*(uint64_t*)addr = resolved;
 }
 

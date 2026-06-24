@@ -388,6 +388,7 @@
 #define DARWIN_F_SETLK     8
 #define DARWIN_F_SETLKW    9
 #define DARWIN_F_FULLFSYNC 51
+#define DARWIN_F_DUPFD_CLOEXEC 67
 
 #define DARWIN_FD_CLOEXEC 1
 #define DARWIN_FD_CLOFORK 2
@@ -1187,10 +1188,9 @@ static void dispatch_guarded_write(struct syscall_gate_state* state)
 	                       (const uint64_t*)state->x[1], NULL))
 		return;
 
-	errno = 0;
-	long result = syscall(SYS_write, (int)state->x[0],
-	                      (const void*)state->x[2],
-	                      (size_t)state->x[3]);
+	long result = machgate_syscall_write_no_sigpipe((int)state->x[0],
+	                                                (const void*)state->x[2],
+	                                                (size_t)state->x[3]);
 	finish_syscall_result(state, result);
 }
 
@@ -1213,10 +1213,9 @@ static void dispatch_guarded_writev(struct syscall_gate_state* state)
 	                       (const uint64_t*)state->x[1], NULL))
 		return;
 
-	errno = 0;
-	long result = syscall(SYS_writev, (int)state->x[0],
-	                      (const struct iovec*)state->x[2],
-	                      (int)state->x[3]);
+	long result = machgate_syscall_writev_no_sigpipe((int)state->x[0],
+	                                                 (const struct iovec*)state->x[2],
+	                                                 (int)state->x[3]);
 	finish_syscall_result(state, result);
 }
 
@@ -2028,8 +2027,8 @@ static void dispatch_connectx(struct syscall_gate_state* state)
 		*len = 0;
 
 	if (iovcnt != 0) {
-		errno = 0;
-		result = syscall(SYS_writev, (int)state->x[0], iov, (int)iovcnt);
+		result = machgate_syscall_writev_no_sigpipe((int)state->x[0], iov,
+		                                            (int)iovcnt);
 		if (result < 0) {
 			finish_syscall_result(state, result);
 			return;
@@ -2200,6 +2199,25 @@ static int translate_dirfd(int darwin_fd)
 	if (darwin_fd == DARWIN_AT_FDCWD)
 		return AT_FDCWD;
 	return darwin_fd;
+}
+
+static int should_hide_proc_exe_symlink(const char* path)
+{
+	const char* cursor;
+
+	if (!path)
+		return 0;
+	if (strcmp(path, "/proc/self/exe") == 0)
+		return 0;
+	if (strncmp(path, "/proc/", 6) != 0)
+		return 0;
+
+	cursor = path + 6;
+	if (*cursor < '0' || *cursor > '9')
+		return 0;
+	while (*cursor >= '0' && *cursor <= '9')
+		cursor++;
+	return strcmp(cursor, "/exe") == 0;
 }
 
 static int translate_open_flags(int darwin_flags)
@@ -3088,9 +3106,9 @@ static void finish_clone_copy_range_400_plus(struct syscall_gate_state* state,
 		char* cursor = buffer;
 		long remaining = read_result;
 		while (remaining > 0) {
-			errno = 0;
-			long write_result = syscall(SYS_write, out_fd, cursor,
-			                            (size_t)remaining);
+			long write_result = machgate_syscall_write_no_sigpipe(out_fd,
+			                                                      cursor,
+			                                                      (size_t)remaining);
 			if (write_result < 0) {
 				clonefile_cleanup_failure(state, out_fd, dst_dirfd, dst,
 				                          errno ? errno : EIO);
@@ -3226,6 +3244,9 @@ static long raw_fcntl(int fd, int darwin_cmd, uint64_t arg)
 		break;
 	case DARWIN_F_SETLKW:
 		linux_cmd = F_SETLKW;
+		break;
+	case DARWIN_F_DUPFD_CLOEXEC:
+		linux_cmd = F_DUPFD_CLOEXEC;
 		break;
 	case DARWIN_F_FULLFSYNC:
 		return syscall(SYS_fsync, fd);
@@ -4902,10 +4923,9 @@ int syscall_range_400_plus_dispatch(struct syscall_gate_state* state)
 		return 1;
 	}
 	case DARWIN_SYS_writev_nocancel: {
-		errno = 0;
-		long result = syscall(SYS_writev, (int)state->x[0],
-		                      (const struct iovec*)state->x[1],
-		                      (int)state->x[2]);
+		long result = machgate_syscall_writev_no_sigpipe((int)state->x[0],
+		                                                 (const struct iovec*)state->x[1],
+		                                                 (int)state->x[2]);
 		finish_syscall_result(state, result);
 		return 1;
 	}
@@ -5233,10 +5253,14 @@ int syscall_range_400_plus_dispatch(struct syscall_gate_state* state)
 		finish_syscall_result(state, result);
 		return 1;
 	}
-	case DARWIN_SYS_readlinkat: {
-		errno = 0;
-		long result = syscall(SYS_readlinkat, translate_dirfd((int)state->x[0]),
-		                      (const char*)state->x[1], (char*)state->x[2],
+		case DARWIN_SYS_readlinkat: {
+			if (should_hide_proc_exe_symlink((const char*)state->x[1])) {
+				set_failure(state, DARWIN_ENOENT);
+				return 1;
+			}
+			errno = 0;
+			long result = syscall(SYS_readlinkat, translate_dirfd((int)state->x[0]),
+			                      (const char*)state->x[1], (char*)state->x[2],
 		                      (size_t)state->x[3]);
 		finish_syscall_result(state, result);
 		return 1;

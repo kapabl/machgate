@@ -6,14 +6,17 @@
 #include "syscall_range_200_399.h"
 #include "syscall_range_400_plus.h"
 
+#include "guest_vm_dispatch.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #define DARWIN_SYS_exit  1
@@ -63,6 +66,22 @@ struct syscall_gate_pool {
 
 static struct syscall_gate_pool gate_pools[SYSCALL_GATE_MAX_POOLS];
 static size_t gate_pool_count;
+static pid_t syscall_gate_process_pid;
+
+
+
+__attribute__((constructor))
+static void init_syscall_gate_process_pid(void)
+{
+	syscall_gate_process_pid = (pid_t)syscall(SYS_getpid);
+}
+
+static int syscall_gate_in_fork_child(void)
+{
+	if (syscall_gate_process_pid == 0)
+		return 0;
+	return (pid_t)syscall(SYS_getpid) != syscall_gate_process_pid;
+}
 
 static uint32_t enc_stp_sp(int rt, int rt2, int offset)
 {
@@ -228,6 +247,47 @@ static void finish_syscall_result(struct syscall_gate_state* state, long result)
 		set_success(state, (uint64_t)result);
 }
 
+static long write_syscall_with_sigpipe_guard(long syscall_number, int fd,
+                                             const void* buffer,
+                                             size_t size_or_count)
+{
+	struct sigaction ignore_action;
+	struct sigaction old_action;
+	int changed = 0;
+
+	if (!syscall_gate_in_fork_child()) {
+		errno = 0;
+		return syscall(syscall_number, fd, buffer, size_or_count);
+	}
+
+	memset(&ignore_action, 0, sizeof(ignore_action));
+	ignore_action.sa_handler = SIG_IGN;
+	sigemptyset(&ignore_action.sa_mask);
+	if (sigaction(SIGPIPE, &ignore_action, &old_action) == 0)
+		changed = 1;
+
+	errno = 0;
+	long result = syscall(syscall_number, fd, buffer, size_or_count);
+	int saved_errno = errno;
+
+	if (changed)
+		sigaction(SIGPIPE, &old_action, NULL);
+
+	errno = saved_errno;
+	return result;
+}
+
+long machgate_syscall_write_no_sigpipe(int fd, const void* buffer, size_t size)
+{
+	return write_syscall_with_sigpipe_guard(SYS_write, fd, buffer, size);
+}
+
+long machgate_syscall_writev_no_sigpipe(int fd, const struct iovec* iov,
+                                        int iovcnt)
+{
+	return write_syscall_with_sigpipe_guard(SYS_writev, fd, iov, (size_t)iovcnt);
+}
+
 void syscall_gate_dispatch(struct syscall_gate_state* state)
 {
 	switch (state->x[16]) {
@@ -243,10 +303,9 @@ void syscall_gate_dispatch(struct syscall_gate_state* state)
 		return;
 	}
 	case DARWIN_SYS_write: {
-		errno = 0;
-		long result = syscall(SYS_write, (int)state->x[0],
-		                      (const void*)state->x[1],
-		                      (size_t)state->x[2]);
+		long result = machgate_syscall_write_no_sigpipe((int)state->x[0],
+		                                                (const void*)state->x[1],
+		                                                (size_t)state->x[2]);
 		finish_syscall_result(state, result);
 		return;
 	}
@@ -266,9 +325,8 @@ void syscall_gate_dispatch(struct syscall_gate_state* state)
 		return;
 	}
 	case DARWIN_SYS_munmap: {
-		errno = 0;
-		long result = syscall(SYS_munmap, (void*)state->x[0],
-		                      (size_t)state->x[1]);
+		long result = machgate_dispatch_darwin_munmap((void*)state->x[0],
+		                                    (size_t)state->x[1]);
 		finish_syscall_result(state, result);
 		return;
 	}
@@ -292,11 +350,12 @@ void syscall_gate_dispatch(struct syscall_gate_state* state)
 		return;
 	}
 	case DARWIN_SYS_mmap: {
-		errno = 0;
-		long result = syscall(SYS_mmap, (void*)state->x[0],
-		                      (size_t)state->x[1], (int)state->x[2],
-		                      translate_mmap_flags((int)state->x[3]),
-		                      (int)state->x[4], (off_t)state->x[5]);
+		long result = machgate_dispatch_darwin_mmap((void*)state->x[0],
+		                                  (size_t)state->x[1],
+		                                  (int)state->x[2],
+		                                  translate_mmap_flags((int)state->x[3]),
+		                                  (int)state->x[4],
+		                                  (off_t)state->x[5]);
 		finish_syscall_result(state, result);
 		return;
 	}

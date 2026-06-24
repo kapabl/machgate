@@ -1,4 +1,6 @@
 #include "syscall_range_000_099.h"
+#include "execve_reexec.h"
+#include "guest_vm_dispatch.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -28,6 +30,7 @@
 
 #define DARWIN_ENOSYS 78
 #define DARWIN_EPERM 1
+#define DARWIN_ENOENT 2
 #define DARWIN_EIO 5
 #define DARWIN_ECHILD 10
 #define DARWIN_EFAULT 14
@@ -109,6 +112,7 @@
 #define DARWIN_F_SETLK     8
 #define DARWIN_F_SETLKW    9
 #define DARWIN_F_FULLFSYNC 51
+#define DARWIN_F_DUPFD_CLOEXEC 67
 
 #define DARWIN_MS_ASYNC      0x0001
 #define DARWIN_MS_INVALIDATE 0x0002
@@ -270,6 +274,25 @@ static void finish_syscall_result(struct syscall_gate_state* state, long result)
 		set_failure(state, darwin_errno_from_linux(errno));
 	else
 		set_success(state, (uint64_t)result);
+}
+
+static int should_hide_proc_exe_symlink(const char* path)
+{
+	const char* cursor;
+
+	if (!path)
+		return 0;
+	if (strcmp(path, "/proc/self/exe") == 0)
+		return 0;
+	if (strncmp(path, "/proc/", 6) != 0)
+		return 0;
+
+	cursor = path + 6;
+	if (*cursor < '0' || *cursor > '9')
+		return 0;
+	while (*cursor >= '0' && *cursor <= '9')
+		cursor++;
+	return strcmp(cursor, "/exe") == 0;
 }
 
 static int translate_open_flags_to_linux(int darwin_flags)
@@ -1172,6 +1195,9 @@ static long raw_fcntl(int fd, int darwin_cmd, uint64_t arg)
 	case DARWIN_F_SETLKW:
 		linux_cmd = F_SETLKW;
 		break;
+	case DARWIN_F_DUPFD_CLOEXEC:
+		linux_cmd = F_DUPFD_CLOEXEC;
+		break;
 	case DARWIN_F_FULLFSYNC:
 		return syscall(SYS_fsync, fd);
 	default:
@@ -1498,6 +1524,14 @@ static void handle_getlogin(struct syscall_gate_state* state)
 	set_success(state, 0);
 }
 
+static void handle_execve(struct syscall_gate_state* state)
+{
+	int result = machgate_execve_macho_guest((const char*)state->x[0],
+	                                        (char* const*)state->x[1],
+	                                        (char* const*)state->x[2]);
+	set_failure(state, result);
+}
+
 static void handle_setlogin(struct syscall_gate_state* state)
 {
 	const char* name = (const char*)state->x[0];
@@ -1572,10 +1606,10 @@ int syscall_range_000_099_dispatch(struct syscall_gate_state* state)
 		handle_wait4_single_process(state);
 		return 1;
 	case 4:
-		errno = 0;
-		finish_syscall_result(state, syscall(SYS_write, (int)state->x[0],
-		                                     (const void*)state->x[1],
-		                                     (size_t)state->x[2]));
+		finish_syscall_result(state,
+		                      machgate_syscall_write_no_sigpipe((int)state->x[0],
+		                                                        (const void*)state->x[1],
+		                                                        (size_t)state->x[2]));
 		return 1;
 	case 5:
 		errno = 0;
@@ -1751,10 +1785,14 @@ int syscall_range_000_099_dispatch(struct syscall_gate_state* state)
 		                                        AT_FDCWD,
 		                                        (const char*)state->x[1]));
 		return 1;
-	case 58:
-		errno = 0;
-		finish_syscall_result(state, syscall(SYS_readlinkat, AT_FDCWD,
-		                                        (const char*)state->x[0],
+		case 58:
+			if (should_hide_proc_exe_symlink((const char*)state->x[0])) {
+				set_failure(state, DARWIN_ENOENT);
+				return 1;
+			}
+			errno = 0;
+			finish_syscall_result(state, syscall(SYS_readlinkat, AT_FDCWD,
+			                                        (const char*)state->x[0],
 		                                        (char*)state->x[1],
 		                                        (size_t)state->x[2]));
 		return 1;
@@ -1763,7 +1801,7 @@ int syscall_range_000_099_dispatch(struct syscall_gate_state* state)
 		finish_syscall_result(state, syscall(SYS_umask, (mode_t)state->x[0]));
 		return 1;
 	case DARWIN_SYS_execve:
-		set_failure(state, DARWIN_ENOTSUP);
+		handle_execve(state);
 		return 1;
 	case DARWIN_SYS_chroot:
 		set_failure(state, DARWIN_EPERM);
@@ -1779,9 +1817,9 @@ int syscall_range_000_099_dispatch(struct syscall_gate_state* state)
 		set_success(state, 0);
 		return 1;
 	case 73:
-		errno = 0;
-		finish_syscall_result(state, syscall(SYS_munmap, (void*)state->x[0],
-		                                     (size_t)state->x[1]));
+		finish_syscall_result(state,
+		                    machgate_dispatch_darwin_munmap((void*)state->x[0],
+		                                                    (size_t)state->x[1]));
 		return 1;
 	case 74:
 		errno = 0;

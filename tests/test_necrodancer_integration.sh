@@ -39,7 +39,7 @@ output=$(timeout -s KILL 10 env \
     MACHISMO_CONFIG="$TMPDIR/machismo.conf" \
     SDL_VIDEODRIVER=dummy \
     LD_LIBRARY_PATH="$BUILD_DIR" \
-    "$BUILD_DIR/machismo" "$BINARY" 2>&1 || true)
+    "$BUILD_DIR/machgate" "$BINARY" 2>&1 || true)
 
 # Verify libSystem.B loaded via shim (not stubbed)
 echo "$output" | grep -q "libSystem.B.dylib.*libsystem_shim.so.*loaded"

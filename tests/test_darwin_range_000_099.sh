@@ -24,5 +24,5 @@ rm -f tests/fixtures/range000099.link tests/fixtures/darwin_range_000_099.o "$fi
     -o "$fixture" -e _main tests/fixtures/darwin_range_000_099.o
 rm -f tests/fixtures/darwin_range_000_099.o
 
-output="$("$BUILD_DIR/machismo" "$fixture" 2>/dev/null)"
+output="$("$BUILD_DIR/machgate" "$fixture" 2>/dev/null)"
 [ "$output" = "range000099" ]

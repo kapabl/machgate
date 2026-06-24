@@ -25,7 +25,7 @@ fi
 
 mkdir -p "$CACHE_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR"
 
-[ -x "$BUILD_DIR/machismo" ] || { echo "machismo not found at $BUILD_DIR/machismo" >&2; exit 1; }
+[ -x "$BUILD_DIR/machgate" ] || { echo "machgate not found at $BUILD_DIR/machgate" >&2; exit 1; }
 [ -f "$MANIFEST" ] || { echo "manifest not found: $MANIFEST" >&2; exit 1; }
 
 if [ -n "$LIBCXX_DYLIB" ]; then
@@ -134,7 +134,7 @@ run_with_diagnostics()
 	fi
 
     MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
-        "${timeout_cmd[@]}" "$BUILD_DIR/machismo" "$binary" $args >"$out_log" 2>"$err_log"
+        "${timeout_cmd[@]}" "$BUILD_DIR/machgate" "$binary" $args >"$out_log" 2>"$err_log"
     local status=$?
     if [ "$status" -eq 0 ]; then
         echo "PASS: external $name"
@@ -147,12 +147,12 @@ run_with_diagnostics()
 
 	if command -v strace >/dev/null 2>&1; then
 		MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
-			"${timeout_cmd[@]}" strace -f -o "$strace_log" "$BUILD_DIR/machismo" "$binary" $args >"$out_log.strace-run" 2>"$err_log.strace-run" || true
+			"${timeout_cmd[@]}" strace -f -o "$strace_log" "$BUILD_DIR/machgate" "$binary" $args >"$out_log.strace-run" 2>"$err_log.strace-run" || true
 		echo "  strace: $strace_log"
 	fi
 
 	QEMU_STRACE=1 MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
-		"${timeout_cmd[@]}" "$BUILD_DIR/machismo" "$binary" $args >"$out_log.qemu-strace-run" 2>"$qemu_strace_log" || true
+		"${timeout_cmd[@]}" "$BUILD_DIR/machgate" "$binary" $args >"$out_log.qemu-strace-run" 2>"$qemu_strace_log" || true
 	echo "  qemu-strace: $qemu_strace_log"
 
 	return 1

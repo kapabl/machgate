@@ -271,7 +271,7 @@ Next action:
 1. Install or locate a package that provides `/usr/bin/qemu-aarch64`.
 2. Install an ARM64 glibc/sysroot package or provide a sysroot path.
 3. Configure `build-aarch64-host`.
-4. Run `build-aarch64-host/machismo tests/external/work/yq --version` through binfmt/QEMU.
+4. Run `build-aarch64-host/machgate tests/external/work/yq --version` through binfmt/QEMU.
 
 ## Current Patch Under Test
 

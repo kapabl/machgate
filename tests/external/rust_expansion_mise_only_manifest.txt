@@ -1,0 +1,1 @@
+mise|https://github.com/jdx/mise/releases/download/v2026.6.13/mise-v2026.6.13-macos-arm64.tar.gz|36478f14679e37ff38dfd3f238db6355dd5a90e1b3798b8a631d4574f46a280f|mise/bin/mise|--version

@@ -1,4 +1,5 @@
 #include "syscall_range_100_199.h"
+#include "guest_vm_dispatch.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1328,10 +1329,9 @@ int syscall_range_100_199_dispatch(struct syscall_gate_state* state)
 		return 1;
 	}
 	case 121: {
-		errno = 0;
-		long result = syscall(SYS_writev, (int)state->x[0],
-		                      (const struct iovec*)state->x[1],
-		                      (int)state->x[2]);
+		long result = machgate_syscall_writev_no_sigpipe((int)state->x[0],
+		                                                 (const struct iovec*)state->x[1],
+		                                                 (int)state->x[2]);
 		finish_syscall_result(state, result);
 		return 1;
 	}
@@ -1605,11 +1605,12 @@ int syscall_range_100_199_dispatch(struct syscall_gate_state* state)
 		handle_getdirentries(state);
 		return 1;
 	case 197: {
-		errno = 0;
-		long result = syscall(SYS_mmap, (void*)state->x[0],
-		                      (size_t)state->x[1], (int)state->x[2],
-		                      translate_mmap_flags((int)state->x[3]),
-		                      (int)state->x[4], (off_t)state->x[5]);
+		long result = machgate_dispatch_darwin_mmap((void*)state->x[0],
+		                                   (size_t)state->x[1],
+		                                   (int)state->x[2],
+		                                   translate_mmap_flags((int)state->x[3]),
+		                                   (int)state->x[4],
+		                                   (off_t)state->x[5]);
 		finish_syscall_result(state, result);
 		return 1;
 	}

@@ -9,5 +9,5 @@ BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
 # The fat binary has x86_64 (exits 99) and arm64 (exits 42).
 # On aarch64, machismo should select the arm64 slice and exit 42.
 status=0
-"$BUILD_DIR/machismo" tests/fixtures/fat_binary 2>/dev/null || status=$?
+"$BUILD_DIR/machgate" tests/fixtures/fat_binary 2>/dev/null || status=$?
 [ $status -eq 42 ]

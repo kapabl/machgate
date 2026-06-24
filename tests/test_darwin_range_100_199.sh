@@ -26,7 +26,7 @@ rm -rf "$FIXTURE_DIR/range_100_199.tmp"
 rm -f "$FIXTURE_DIR/range_100_199.file"
 rm -f "$FIXTURE_DIR/range_100_199.sock"
 cd "$FIXTURE_DIR"
-output="$("$BUILD_DIR/machismo" darwin_range_100_199 2>/dev/null)"
+output="$("$BUILD_DIR/machgate" darwin_range_100_199 2>/dev/null)"
 [ "$output" = "range100_199" ]
 rm -f "$FIXTURE_DIR/range_100_199.file"
 rm -f "$FIXTURE_DIR/range_100_199.sock"

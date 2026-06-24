@@ -372,6 +372,10 @@ _main:
     b.ne fail
 
     mov x21, #59
+    adrp x0, access_path@PAGE
+    add x0, x0, access_path@PAGEOFF
+    mov x1, #0
+    mov x2, #0
     mov x16, #59
     svc #0x80
     b.cc fail

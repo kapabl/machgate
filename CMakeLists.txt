@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(machismo C CXX)
+project(machgate C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 14)
@@ -7,9 +7,9 @@ set(CMAKE_CXX_STANDARD 14)
 option(BUILD_WRAPGEN "Build the wrapgen utility" ON)
 option(BUILD_TESTS "Build test fixtures" ON)
 
-# --- machismo loader executable ---
+# --- machgate loader executable ---
 
-set(MACHISMO_SOURCES
+set(MACHGATE_SOURCES
     src/machismo.c
     src/commpage.c
     src/resolver.c
@@ -23,31 +23,35 @@ set(MACHISMO_SOURCES
     src/dylib_loader.c
     src/isa_emul.c
     src/syscall/syscall_gate.c
+    src/syscall/guest_vm_dispatch.c
+    src/syscall/guest_vm_track.c
     src/syscall/syscall_range_000_099.c
     src/syscall/syscall_range_100_199.c
     src/syscall/syscall_range_200_399.c
     src/syscall/syscall_range_400_plus.c
+    src/syscall/execve_reexec.c
     src/lua_entity_opt.c
     src/elfcalls/elfcalls.c
     src/elfcalls/threads.c
 )
 
-add_executable(machismo ${MACHISMO_SOURCES})
+add_executable(machgate ${MACHGATE_SOURCES})
 
-target_include_directories(machismo PRIVATE src)
-target_compile_options(machismo PRIVATE -Wall -O2 -g)
-target_compile_definitions(machismo PRIVATE
+target_include_directories(machgate PRIVATE src)
+target_compile_options(machgate PRIVATE -Wall -O2 -g)
+target_compile_definitions(machgate PRIVATE
     INSTALL_PREFIX=""
     SYSTEM_ROOT=""
     _GNU_SOURCE
 )
-target_link_libraries(machismo PRIVATE dl rt pthread m)
-target_link_options(machismo PRIVATE -rdynamic)
+target_link_libraries(machgate PRIVATE dl rt pthread m)
+target_link_options(machgate PRIVATE -rdynamic)
 
 # --- libsystem_shim.so ---
 
 add_library(system_shim SHARED
     src/shim/libsystem_shim.c
+    src/syscall/execve_reexec.c
 )
 set_target_properties(system_shim PROPERTIES
     OUTPUT_NAME "system_shim"
@@ -105,7 +109,7 @@ endif()
 
 # --- install ---
 
-install(TARGETS machismo RUNTIME DESTINATION bin)
+install(TARGETS machgate RUNTIME DESTINATION bin)
 install(TARGETS system_shim LIBRARY DESTINATION lib)
 if(BUILD_WRAPGEN)
     install(TARGETS wrapgen RUNTIME DESTINATION bin)

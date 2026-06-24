@@ -744,6 +744,30 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		        (void*)ucontext_reg(ucontext, 6),
 		        (void*)ucontext_reg(ucontext, 7),
 		        (void*)ucontext_reg(ucontext, 8));
+		fprintf(stderr,
+		        "machismo: regs x9=%p x10=%p x11=%p x12=%p x13=%p x14=%p x15=%p x16=%p x17=%p\n",
+		        (void*)ucontext_reg(ucontext, 9),
+		        (void*)ucontext_reg(ucontext, 10),
+		        (void*)ucontext_reg(ucontext, 11),
+		        (void*)ucontext_reg(ucontext, 12),
+		        (void*)ucontext_reg(ucontext, 13),
+		        (void*)ucontext_reg(ucontext, 14),
+		        (void*)ucontext_reg(ucontext, 15),
+		        (void*)ucontext_reg(ucontext, 16),
+		        (void*)ucontext_reg(ucontext, 17));
+		fprintf(stderr,
+		        "machismo: regs x18=%p x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p\n",
+		        (void*)ucontext_reg(ucontext, 18),
+		        (void*)ucontext_reg(ucontext, 19),
+		        (void*)ucontext_reg(ucontext, 20),
+		        (void*)ucontext_reg(ucontext, 21),
+		        (void*)ucontext_reg(ucontext, 22),
+		        (void*)ucontext_reg(ucontext, 23),
+		        (void*)ucontext_reg(ucontext, 24),
+		        (void*)ucontext_reg(ucontext, 25),
+		        (void*)ucontext_reg(ucontext, 26),
+		        (void*)ucontext_reg(ucontext, 27),
+		        (void*)ucontext_reg(ucontext, 28));
 		print_signal_macho_context(pc);
 	}
 
