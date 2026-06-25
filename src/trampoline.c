@@ -15,6 +15,7 @@
 
 #include "trampoline.h"
 #include "macho_defs.h"
+#include "gdb_jit.h"
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -702,6 +703,9 @@ static void print_signal_macho_context(uintptr_t pc)
 			}
 		}
 
+		const char* symbol = gdb_jit_lookup_addr(pc);
+		uintptr_t symbol_addr = symbol ? gdb_jit_lookup_name(symbol) : 0;
+		unsigned long symbol_offset = symbol_addr ? (unsigned long)(pc - symbol_addr) : 0;
 		uint32_t prev_insn = 0;
 		uint32_t insn = 0;
 		uint32_t next_insn = 0;
@@ -713,12 +717,21 @@ static void print_signal_macho_context(uintptr_t pc)
 			insn = *(uint32_t*)pc;
 		}
 
-		fprintf(stderr,
-		        "machgate: guest context pc=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
-		        (void*)pc, (unsigned long)(pc - signal_diag_slide),
-		        16, seg->segname, 16, section_name,
-		        (unsigned long long)section_fileoff,
-		        insn, prev_insn, next_insn);
+		if (symbol) {
+			fprintf(stderr,
+			        "machgate: guest context pc=%p vmaddr=0x%lx symbol=%s+0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
+			        (void*)pc, (unsigned long)(pc - signal_diag_slide),
+			        symbol, symbol_offset, 16, seg->segname, 16, section_name,
+			        (unsigned long long)section_fileoff,
+			        insn, prev_insn, next_insn);
+		} else {
+			fprintf(stderr,
+			        "machgate: guest context pc=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
+			        (void*)pc, (unsigned long)(pc - signal_diag_slide),
+			        16, seg->segname, 16, section_name,
+			        (unsigned long long)section_fileoff,
+			        insn, prev_insn, next_insn);
+		}
 		return;
 	}
 

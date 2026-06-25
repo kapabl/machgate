@@ -668,6 +668,56 @@ Rejected candidates from this search pass:
 Verified candidates from Homebrew bottle, conda-forge, and GitHub release
 metadata search. Rows below are exact manifest candidates:
 
+## Private 707-Constructor Crash Evidence
+
+Latest private C++/Catch2-style runner signal trace:
+
+```text
+machgate: mod_init[3/707] at 0x10000b41c
+libsystem_shim: guest signal signum=11 darwin=11 code=1 addr=(nil) pc=(nil) lr=0x1008a26a0
+libsystem_shim: current initializer kind=__mod_init_func index=3 total=707 address=0x10000b41c
+libsystem_shim: signal callsite 0x1008a269c insn=0xd63f0100 blr x8 target=(nil)
+machgate: guest context signal.lr-4=0x1008a269c vmaddr=0x1008a269c segment=__TEXT section=__text fileoff=0x8a269c insn=0xd63f0100
+```
+
+What this proves:
+
+- The constructor runner is not stuck in the 707-entry loop; it reaches
+  `__mod_init_func` entry `3` and then faults inside guest `__TEXT`.
+- The actual fault is an ARM64 indirect branch with link, `blr x8`, where the
+  signal frame reports `x8 == NULL`.
+- This is not directly a patched Darwin syscall instruction. The callsite is
+  a guest `blr`, not `svc #0x80`.
+- The next distinction to make is whether guest code loaded NULL from an
+  unresolved/badly initialized function slot, or whether MachGate clobbered
+  `x8` immediately before the indirect call.
+
+Diagnostic improvement added after this trace:
+
+- `machgate_trace_guest_address()` now prints the nearest retained Mach-O
+  symbol for guest addresses when the symbol table is available.
+- For `signal.lr-4`, MachGate prints a small instruction window around the
+  indirect branch. This should show the load/move/call sequence that produced
+  the NULL `x8` target.
+
+Expected next private run output shape:
+
+```text
+machgate: guest context signal.lr-4=0x... vmaddr=0x... symbol=<name>+0x... segment=__TEXT section=__text fileoff=0x... insn=0xd63f0100
+machgate: guest context signal.lr-4 window   0x... vmaddr=0x... fileoff=0x... insn=0x...
+machgate: guest context signal.lr-4 window > 0x... vmaddr=0x... fileoff=0x... insn=0xd63f0100
+```
+
+Interpretation rule for the next loop:
+
+- If the instruction window shows `ldr x8, [...]` from a Mach-O bind/lazy-bind
+  slot that is zero, investigate resolver binding or missing shim export.
+- If it shows `mov x8, x0` or similar immediately after a shim/native call,
+  inspect that callee's return convention and whether the interposed function
+  should return a callback/table pointer.
+- If it shows `x8` expected to survive across a MachGate/native call, inspect
+  the exact patched call path, but remember `x8` is caller-saved under AAPCS64.
+
 ```text
 homebrew-cmake-ctest|https://ghcr.io/v2/homebrew/core/cmake/blobs/sha256:5648b07aa9fefcae2347c2293b87230f89977a8175c9aa25e4ef453199474852|5648b07aa9fefcae2347c2293b87230f89977a8175c9aa25e4ef453199474852|cmake/4.3.4/bin/ctest|--version
 conda-cmake-ctest|https://conda.anaconda.org/conda-forge/osx-arm64/cmake-4.3.4-h8cb302d_0.conda|8c82c756a3833debe2039ab05ff4214eb0a3316a5e8b5723ac8349379ee7e30b|bin/ctest|--version

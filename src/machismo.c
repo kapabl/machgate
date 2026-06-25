@@ -157,16 +157,49 @@ void machgate_trace_guest_address(const char* label, uintptr_t address)
 			}
 		}
 
+		const char* symbol = gdb_jit_lookup_addr(address);
+		uintptr_t symbol_addr = symbol ? gdb_jit_lookup_name(symbol) : 0;
+		unsigned long symbol_offset = symbol_addr ? (unsigned long)(address - symbol_addr) : 0;
 		uint32_t insn = 0;
 		if ((address & 3u) == 0 && address + sizeof(insn) <= seg_end)
 			insn = *(uint32_t*)address;
 
-		fprintf(stderr,
-		        "machgate: guest context %s=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x\n",
-		        label ? label : "address", (void*)address,
-		        (unsigned long)(address - machismo_load_results.slide),
-		        16, seg->segname, 16, section_name,
-		        (unsigned long long)section_fileoff, insn);
+		if (symbol) {
+			fprintf(stderr,
+			        "machgate: guest context %s=%p vmaddr=0x%lx symbol=%s+0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x\n",
+			        label ? label : "address", (void*)address,
+			        (unsigned long)(address - machismo_load_results.slide),
+			        symbol, symbol_offset, 16, seg->segname, 16, section_name,
+			        (unsigned long long)section_fileoff, insn);
+		} else {
+			fprintf(stderr,
+			        "machgate: guest context %s=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x\n",
+			        label ? label : "address", (void*)address,
+			        (unsigned long)(address - machismo_load_results.slide),
+			        16, seg->segname, 16, section_name,
+			        (unsigned long long)section_fileoff, insn);
+		}
+
+		if (label && strstr(label, "lr-4") && (address & 3u) == 0) {
+			uintptr_t window_start = address >= seg_start + 20 ? address - 20 : seg_start;
+			uintptr_t window_end = address + 16 <= seg_end ? address + 16 : seg_end;
+			window_start &= ~(uintptr_t)3u;
+			window_end &= ~(uintptr_t)3u;
+			for (uintptr_t cursor = window_start; cursor < window_end; cursor += 4) {
+				uint64_t cursor_fileoff = section_fileoff;
+				if (cursor >= address)
+					cursor_fileoff += cursor - address;
+				else
+					cursor_fileoff -= address - cursor;
+				fprintf(stderr,
+				        "machgate: guest context %s window %c %p vmaddr=0x%lx fileoff=0x%llx insn=0x%08x\n",
+				        label, cursor == address ? '>' : ' ',
+				        (void*)cursor,
+				        (unsigned long)(cursor - machismo_load_results.slide),
+				        (unsigned long long)cursor_fileoff,
+				        *(uint32_t*)cursor);
+			}
+		}
 		return;
 	}
 
