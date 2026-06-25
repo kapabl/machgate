@@ -172,51 +172,32 @@ docker run --privileged --rm tonistiigi/binfmt --install arm64
 Run the published release against a local ARM64 macOS CLI binary:
 
 ```bash
-mkdir -p macho-input
-cp /path/to/macos-arm64-binary macho-input/
-
-docker run --rm --platform linux/arm64 \
-  -v "$PWD/macho-input:/input:ro" \
-  ubuntu:24.04 \
-  bash -lc '
-    set -euo pipefail
-    apt-get update
-    apt-get install -y --no-install-recommends ca-certificates curl tar
-    curl -L -o /tmp/machgate.tar.gz \
-      https://github.com/kapabl/machgate/releases/download/v0.3.0/machgate-0.3.0-linux-arm64.tar.gz
-    tar -xzf /tmp/machgate.tar.gz -C /opt
-
-    cat > /tmp/machismo.conf <<EOF
-[general]
-dylib_map = /tmp/dylib_map.conf
-EOF
-
-    cat > /tmp/dylib_map.conf <<EOF
-libSystem.B = /opt/machgate/lib/libsystem_shim.so
-CoreFoundation = /opt/machgate/lib/libsystem_shim.so
-CoreServices = /opt/machgate/lib/libsystem_shim.so
-Security = /opt/machgate/lib/libsystem_shim.so
-IOKit = /opt/machgate/lib/libsystem_shim.so
-libresolv = /opt/machgate/lib/libsystem_shim.so
-libicucore = /opt/machgate/lib/libsystem_shim.so
-libz.1 = libz.so
-libiconv = libc.so.6
-libobjc = STUB
-Foundation = SKIP
-SystemConfiguration = SKIP
-AppKit = SKIP
-EOF
-
-    export LD_LIBRARY_PATH=/opt/machgate/lib
-    export MACHISMO_CONFIG=/tmp/machismo.conf
-    /opt/machgate/bin/machgate /input/macos-arm64-binary --version
-  '
+scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
-Replace `macos-arm64-binary` and `--version` with the binary name and arguments
-you want to run. This path is slower than native ARM64 because Docker is
-emulating the ARM64 Linux container, but it is useful for testing from an Intel
-workstation.
+By default the script downloads the latest GitHub release. To pin a specific
+release:
+
+```bash
+MACHGATE_VERSION=0.3.0 scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+```
+
+Pass any guest arguments after the binary path:
+
+```bash
+scripts/run-macho-docker.sh /path/to/macos-arm64-binary --version
+```
+
+The script:
+
+1. starts `ubuntu:24.04` as `linux/arm64`
+2. downloads the published MachGate release
+3. generates a default `machismo.conf` and `dylib_map.conf`
+4. mounts the binary's directory at `/input`
+5. runs `/opt/machgate/bin/machgate /input/<binary> ...`
+
+This path is slower than native ARM64 because Docker is emulating the ARM64
+Linux container, but it is useful for testing from an Intel workstation.
 
 Some C++ Mach-O binaries also need an Apple-ABI-compatible `libc++.so.1` and a
 `libc++.1 = /path/to/libc++.so.1` entry in `dylib_map.conf`. Most Go/Rust/static
