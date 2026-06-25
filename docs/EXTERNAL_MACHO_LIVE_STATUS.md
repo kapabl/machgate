@@ -71,6 +71,21 @@ in `loop-q6-packer-post-unitfix-attempt{1..5}`.
 | --- | ---: | --- | --- |
 | None | 0 | none | No current functional blocker remains. The latest integrated 120s full-corpus run `full-loop-2026-06-24-R-functional120` passes `57 / 57`; strict 30s remains a timing gate because `node` needs the longer timeout under QEMU. |
 
+## Focused C++ / Test-Runner Research
+
+The C++ static-initializer research loop is tracked in
+`docs/CATCH2_STATIC_INIT_EXTERNAL_LOOP.md`.
+
+Latest focused result:
+
+- Generated local `cpp_many_ctors` fixture: `707 / 707` constructors completed, exit `0`.
+- Optional generated local `cpp_public_test_registrars` fixture: `707 / 707` source-derived Catch2/gtest-style registrar constructors completed, exit `0` when enabled with `MACHGATE_TEST_CPP_PUBLIC_REGISTRARS=1`.
+- Public C++ focused rows after Loop K/L: `18 / 22` passing.
+- Passing focused rows: `cmake`, `ctest`, `protoc`, `duckdb`, `ninja`, `bitcoin-util`, `knots-util`, `elements-util`, `dash-util`, `syscoin-cli`, `bitcoin-test`, `bitcoin-30.2-test`, `bitcoin-28.2-test`, `bitcoin-27.2-test`, `bitcoin-25.2-test`, `elements-test`, `dash-test`, and `groestlcoin-test`.
+- Current focused failing rows: `bitcoin-29.2-test`, `bitcoin-26.2-test`, `knots-test`, and `qtum-test`.
+- All current focused failing rows are real external C++ Boost.Test runners. The original `BOOST_AUTO_START_DBG` parser failure is fixed, and the original `TIMEOUT_AFTER_MAIN` bucket is fixed `8 / 8`. The remaining failure bucket is `BOOST_NOTHING_TO_TEST_ABORT` (4): the binary prints Boost help for `--help`, then aborts with `boost::unit_test::framework::nothing_to_test`.
+- Argv-only triage did not make the original four test-runner failures pass; logs are under `tests/external/logs/cpp-static-init-argv-matrix/`.
+
 ## Timeout-Only Functional Passes
 
 | Class | Count | Binaries | Current evidence |

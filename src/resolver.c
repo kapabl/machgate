@@ -188,6 +188,15 @@ static void* try_mangling_variants(void* lib, const char* name)
 {
 	size_t len = strlen(name);
 
+	if (strcmp(name, "_ZNSt3__120__libcpp_atomic_waitEPVKvx") == 0) {
+		void* result = dlsym(lib, "_ZNSt3__120__libcpp_atomic_waitEPVKvi");
+		if (result) {
+			fprintf(stderr, "resolver: mangling fallback: %s -> %s\n",
+			        name, "_ZNSt3__120__libcpp_atomic_waitEPVKvi");
+			return result;
+		}
+	}
+
 	int y_pos[16];
 	int ny = 0;
 	for (size_t i = 0; i < len && ny < 16; i++) {

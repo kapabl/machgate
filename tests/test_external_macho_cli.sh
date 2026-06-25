@@ -18,6 +18,11 @@ LOG_DIR="${MACHGATE_EXTERNAL_LOGS:-$MACHISMO_ROOT/tests/external/logs}"
 TIMEOUT="${MACHGATE_EXTERNAL_TIMEOUT:-10}"
 CONFIG_DIR="$WORK_DIR/config"
 LIBCXX_DYLIB="${MACHGATE_EXTERNAL_LIBCXX:-}"
+MACHGATE_ARGS=()
+
+if [ "${MACHGATE_EXTERNAL_VERBOSE:-0}" = "1" ]; then
+    MACHGATE_ARGS=(-v)
+fi
 
 if [ -z "$LIBCXX_DYLIB" ] && [ "${MACHGATE_EXTERNAL_MAP_LIBCXX:-0}" = "1" ]; then
     LIBCXX_DYLIB="$MACHISMO_ROOT/build-libcxx/lib/libc++.so.1"
@@ -134,7 +139,7 @@ run_with_diagnostics()
 	fi
 
     MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
-        "${timeout_cmd[@]}" "$BUILD_DIR/machgate" "$binary" $args >"$out_log" 2>"$err_log"
+        "${timeout_cmd[@]}" "$BUILD_DIR/machgate" "${MACHGATE_ARGS[@]}" "$binary" $args >"$out_log" 2>"$err_log"
     local status=$?
     if [ "$status" -eq 0 ]; then
         echo "PASS: external $name"
@@ -147,12 +152,12 @@ run_with_diagnostics()
 
 	if command -v strace >/dev/null 2>&1; then
 		MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
-			"${timeout_cmd[@]}" strace -f -o "$strace_log" "$BUILD_DIR/machgate" "$binary" $args >"$out_log.strace-run" 2>"$err_log.strace-run" || true
+			"${timeout_cmd[@]}" strace -f -o "$strace_log" "$BUILD_DIR/machgate" "${MACHGATE_ARGS[@]}" "$binary" $args >"$out_log.strace-run" 2>"$err_log.strace-run" || true
 		echo "  strace: $strace_log"
 	fi
 
 	QEMU_STRACE=1 MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
-		"${timeout_cmd[@]}" "$BUILD_DIR/machgate" "$binary" $args >"$out_log.qemu-strace-run" 2>"$qemu_strace_log" || true
+		"${timeout_cmd[@]}" "$BUILD_DIR/machgate" "${MACHGATE_ARGS[@]}" "$binary" $args >"$out_log.qemu-strace-run" 2>"$qemu_strace_log" || true
 	echo "  qemu-strace: $qemu_strace_log"
 
 	return 1

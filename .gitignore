@@ -34,6 +34,8 @@ tests/fixtures/darwin_read_close
 tests/fixtures/darwin_open_lseek
 tests/fixtures/darwin_fstat
 tests/fixtures/darwin_mmap_protect
+tests/fixtures/cpp_many_ctors
+tests/fixtures/cpp_public_test_registrars
 tests/fixtures/darwin_range_000_099
 tests/fixtures/darwin_range_100_199
 tests/fixtures/darwin_range_200_399

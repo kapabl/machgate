@@ -299,3 +299,89 @@ Expected pass signal for `yq`:
 - The crash no longer occurs at `pc=0x10006a6d0`.
 - Best case: `yq --version` prints version output.
 - If the next failure is `runtime.tlsinit` abort at `0x10006a714`, the rewrite helped but Linux pthread TLS layout still needs emulation.
+
+## Gemini CLI
+
+Gemini CLI was checked as an additional external agent lane.
+
+The plain `gemini` command is not on `PATH` in this shell. The npm entrypoint is
+available:
+
+```sh
+npx -y @google/gemini-cli --help
+```
+
+Useful headless command shape:
+
+```sh
+timeout 1200s npx -y @google/gemini-cli \
+  --skip-trust \
+  --approval-mode yolo \
+  --output-format stream-json \
+  -p 'Read AGENTS.md and docs/LOOP_ENGINEERING.md. Execute the assigned MachGate failure-bucket loop.'
+```
+
+Current blocker:
+
+```text
+Error authenticating: IneligibleTierError: This client is no longer supported for Gemini Code Assist for individuals.
+```
+
+Gemini is therefore documented and ready, but not usable in this environment
+until OAuth is tied to an eligible account or `GEMINI_API_KEY` / Vertex AI
+credentials are provided. See `docs/GEMINI_CLI_USAGE.md`.
+
+## AGY / Antigravity CLI
+
+Google's Antigravity CLI is installed as `agy`:
+
+```sh
+command -v agy
+agy --version
+```
+
+Current result:
+
+```text
+/root/.local/bin/agy
+1.0.12
+```
+
+Useful headless command shape:
+
+```sh
+timeout 1200s agy \
+  --print-timeout 20m \
+  --dangerously-skip-permissions \
+  --print 'Read AGENTS.md and docs/LOOP_ENGINEERING.md. Execute the assigned MachGate failure-bucket loop.'
+```
+
+The CLI supports:
+
+- `--print` / `-p` for single-prompt headless mode.
+- `--print-timeout` to extend the default `5m` wait.
+- `--dangerously-skip-permissions` to auto-approve tool permissions.
+- `--project`, `--new-project`, `--continue`, and `--conversation` for project
+  and session control.
+- `--add-dir` to add source/context directories.
+- `agy plugin import gemini` and `agy plugin import claude` for plugin import.
+
+Current blocker:
+
+```text
+Authentication required. Please visit the URL to log in:
+Waiting for authentication (timeout 30s)...
+Or, paste the authorization code here and press Enter:
+Error: authentication timed out.
+```
+
+`agy models` also reports:
+
+```text
+Error: Please sign in to view available models. Launch the CLI without arguments to sign in.
+```
+
+Run `agy` interactively and complete OAuth login before using it as a background
+worker. Changelog `1.0.11` also says `USE_ADC=1 agy` can use Application
+Default Credentials when configured, but `USE_ADC=1 agy --print ...` currently
+also reports `authentication required`. See `docs/AGY_CLI_USAGE.md`.

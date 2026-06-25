@@ -67,7 +67,13 @@ static char* getenv_from_guest_envp(const char* name);
 static int shim_errno_from_linux(int linux_errno);
 static int translate_oflags(int darwin_flags);
 static void trace_guest_address_context(const char* label, uintptr_t address);
+static uintptr_t trace_ucontext_reg(void* ucontext, int reg);
+static void trace_signal_indirect_branch(uintptr_t call_site, void* ucontext);
 static pid_t machgate_shim_process_pid;
+static const char* shim_init_kind;
+static int shim_init_index = -1;
+static int shim_init_total;
+static uintptr_t shim_init_address;
 static int shim_last_wait_valid;
 static pid_t shim_last_wait_owner_pid;
 static pid_t shim_last_wait_result_pid;
@@ -635,6 +641,21 @@ int semaphore_timedwait(uint32_t semaphore, uint32_t seconds,
 
 uint8_t NDR_record[8] = { 0 };
 int __mb_cur_max = 4;
+
+enum {
+	DARWIN_FP_NAN = 1,
+	DARWIN_FP_INFINITE = 2,
+	DARWIN_FP_ZERO = 3,
+	DARWIN_FP_NORMAL = 4,
+	DARWIN_FP_SUBNORMAL = 5,
+};
+
+int __fpclassifyd(double value)
+{
+	return __builtin_fpclassify(DARWIN_FP_NAN, DARWIN_FP_INFINITE,
+	                            DARWIN_FP_NORMAL, DARWIN_FP_SUBNORMAL,
+	                            DARWIN_FP_ZERO, value);
+}
 
 /* ===== dyld / process bootstrap compatibility ===== */
 
@@ -6311,12 +6332,12 @@ unsigned int NSGetNextSearchPathEnumeration(unsigned int state, char *path)
  * bitmask of character class flags.
  *
  * Apple _CTYPE bit definitions (from <ctype.h>):
- *   0x0001 _CTYPE_A  alpha        0x0002 _CTYPE_C  control
- *   0x0004 _CTYPE_D  digit        0x0008 _CTYPE_G  graph (visible)
- *   0x0010 _CTYPE_L  lowercase    0x0020 _CTYPE_P  punctuation
- *   0x0040 _CTYPE_S  space        0x0080 _CTYPE_U  uppercase
- *   0x0100 _CTYPE_X  hex digit    0x0200 _CTYPE_B  blank
- *   0x0400 _CTYPE_D2 decimal      0x0800 _CTYPE_N  number
+ *   0x00000100 _CTYPE_A  alpha        0x00000200 _CTYPE_C  control
+ *   0x00000400 _CTYPE_D  digit        0x00000800 _CTYPE_G  graph
+ *   0x00001000 _CTYPE_L  lowercase    0x00002000 _CTYPE_P  punctuation
+ *   0x00004000 _CTYPE_S  space        0x00008000 _CTYPE_U  uppercase
+ *   0x00010000 _CTYPE_X  hex digit    0x00020000 _CTYPE_B  blank
+ *   0x00040000 _CTYPE_R  print
  *
  * On macOS, _DefaultRuneLocale is the struct itself (not a pointer).
  * Game code accesses it as:  *(uint32_t*)(_DefaultRuneLocale + ch*4 + 0x3c)
@@ -6332,18 +6353,17 @@ struct _RuneLocale {
 struct _RuneLocale _DefaultRuneLocale;
 
 /* Apple ctype flag bits */
-#define _CTYPE_A  0x0001
-#define _CTYPE_C  0x0002
-#define _CTYPE_D  0x0004
-#define _CTYPE_G  0x0008
-#define _CTYPE_L  0x0010
-#define _CTYPE_P  0x0020
-#define _CTYPE_S  0x0040
-#define _CTYPE_U  0x0080
-#define _CTYPE_X  0x0100
-#define _CTYPE_B  0x0200
-#define _CTYPE_D2 0x0400
-#define _CTYPE_N  0x0800
+#define _CTYPE_A 0x00000100
+#define _CTYPE_C 0x00000200
+#define _CTYPE_D 0x00000400
+#define _CTYPE_G 0x00000800
+#define _CTYPE_L 0x00001000
+#define _CTYPE_P 0x00002000
+#define _CTYPE_S 0x00004000
+#define _CTYPE_U 0x00008000
+#define _CTYPE_X 0x00010000
+#define _CTYPE_B 0x00020000
+#define _CTYPE_R 0x00040000
 
 __attribute__((constructor))
 static void init_rune_locale(void)
@@ -6362,21 +6382,21 @@ static void init_rune_locale(void)
 	_DefaultRuneLocale.__runetype['\v'] = _CTYPE_S;
 
 	for (int c = '0'; c <= '9'; c++)
-		_DefaultRuneLocale.__runetype[c] = _CTYPE_D | _CTYPE_D2 | _CTYPE_N | _CTYPE_G | _CTYPE_X;
+		_DefaultRuneLocale.__runetype[c] = _CTYPE_D | _CTYPE_G | _CTYPE_R | _CTYPE_X;
 
 	for (int c = 'A'; c <= 'Z'; c++)
-		_DefaultRuneLocale.__runetype[c] = _CTYPE_A | _CTYPE_U | _CTYPE_G;
+		_DefaultRuneLocale.__runetype[c] = _CTYPE_A | _CTYPE_U | _CTYPE_G | _CTYPE_R;
 	for (int c = 'A'; c <= 'F'; c++)
 		_DefaultRuneLocale.__runetype[c] |= _CTYPE_X;
 
 	for (int c = 'a'; c <= 'z'; c++)
-		_DefaultRuneLocale.__runetype[c] = _CTYPE_A | _CTYPE_L | _CTYPE_G;
+		_DefaultRuneLocale.__runetype[c] = _CTYPE_A | _CTYPE_L | _CTYPE_G | _CTYPE_R;
 	for (int c = 'a'; c <= 'f'; c++)
 		_DefaultRuneLocale.__runetype[c] |= _CTYPE_X;
 
 	const char* punct = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 	for (int i = 0; punct[i]; i++)
-		_DefaultRuneLocale.__runetype[(unsigned char)punct[i]] = _CTYPE_P | _CTYPE_G;
+		_DefaultRuneLocale.__runetype[(unsigned char)punct[i]] = _CTYPE_P | _CTYPE_G | _CTYPE_R;
 
 	for (int c = 0; c < 256; c++) {
 		_DefaultRuneLocale.__maplower[c] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
@@ -6732,6 +6752,34 @@ static int shim_signal_trace_enabled(void)
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
+void machgate_shim_note_init_context(const char* kind, int index, int total,
+                                     uintptr_t address)
+{
+	shim_init_kind = kind;
+	shim_init_index = index;
+	shim_init_total = total;
+	shim_init_address = address;
+}
+
+void machgate_shim_clear_init_context(void)
+{
+	shim_init_kind = NULL;
+	shim_init_index = -1;
+	shim_init_total = 0;
+	shim_init_address = 0;
+}
+
+static void trace_init_context(void)
+{
+	if (!shim_init_kind)
+		return;
+
+	fprintf(stderr,
+	        "libsystem_shim: current initializer kind=%s index=%d total=%d address=%p\n",
+	        shim_init_kind, shim_init_index, shim_init_total,
+	        (void*)shim_init_address);
+}
+
 static void trace_guest_address_context(const char* label, uintptr_t address)
 {
 	typedef void (*trace_guest_address_fn)(const char*, uintptr_t);
@@ -6746,6 +6794,32 @@ static void trace_guest_address_context(const char* label, uintptr_t address)
 
 	if (trace_guest_address)
 		trace_guest_address(label, address);
+}
+
+static void trace_signal_indirect_branch(uintptr_t call_site, void* ucontext)
+{
+	if (!call_site)
+		return;
+
+	uint32_t insn = *(uint32_t*)call_site;
+	uint32_t masked = insn & 0xfffffc1fu;
+	const char* mnemonic = NULL;
+
+	if (masked == 0xd61f0000u)
+		mnemonic = "br";
+	else if (masked == 0xd63f0000u)
+		mnemonic = "blr";
+	else if (masked == 0xd65f0000u)
+		mnemonic = "ret";
+
+	if (!mnemonic)
+		return;
+
+	int reg = (int)((insn >> 5) & 0x1f);
+	fprintf(stderr,
+	        "libsystem_shim: signal callsite %p insn=0x%08x %s x%d target=%p\n",
+	        (void*)call_site, insn, mnemonic, reg,
+	        (void*)trace_ucontext_reg(ucontext, reg));
 }
 
 static int shim_wait_trace_enabled(void)
@@ -8228,6 +8302,9 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		        (void*)lr,
 		        (void*)trace_ucontext_sp(ucontext),
 		        (void*)trace_ucontext_reg(ucontext, 29));
+		trace_init_context();
+		if (lr >= 4)
+			trace_signal_indirect_branch(lr - 4, ucontext);
 		fprintf(stderr,
 		        "libsystem_shim: guest regs x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p x16=%p\n",
 		        (void*)trace_ucontext_reg(ucontext, 0),
@@ -9428,12 +9505,15 @@ void _Unwind_Resume(void* exception_object)
 {
 	static void (*real_unwind_resume)(void*) = NULL;
 	if (!real_unwind_resume) {
-		real_unwind_resume = dlsym(RTLD_NEXT, "_Unwind_Resume");
+		void* libgcc = dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_GLOBAL);
+		if (libgcc)
+			real_unwind_resume = dlsym(libgcc, "_Unwind_Resume");
 		if (!real_unwind_resume)
-			real_unwind_resume = dlsym(RTLD_DEFAULT, "_Unwind_Resume");
+			real_unwind_resume = dlsym(RTLD_NEXT, "_Unwind_Resume");
 	}
-	if (real_unwind_resume)
+	if (real_unwind_resume && real_unwind_resume != _Unwind_Resume)
 		real_unwind_resume(exception_object);
+	abort();
 }
 
 /* ===== File operation ABI translation ===== */

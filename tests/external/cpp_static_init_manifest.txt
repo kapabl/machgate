@@ -1,0 +1,24 @@
+# C++ static-constructor-heavy ARM64 macOS CLI fixtures.
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+cmake|https://github.com/Kitware/CMake/releases/download/v4.3.3/cmake-4.3.3-macos-universal.tar.gz|5221a13450c7a0219a2a0d1b6c9085eb06489721fafd8488ccebc1584175d2fb|cmake-4.3.3-macos-universal/CMake.app/Contents/bin/cmake|--version
+ctest|https://github.com/Kitware/CMake/releases/download/v4.3.3/cmake-4.3.3-macos-universal.tar.gz|5221a13450c7a0219a2a0d1b6c9085eb06489721fafd8488ccebc1584175d2fb|cmake-4.3.3-macos-universal/CMake.app/Contents/bin/ctest|--version
+protoc|https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip|193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2|bin/protoc|--version
+duckdb|https://github.com/duckdb/duckdb/releases/download/v1.5.4/duckdb_cli-osx-arm64.zip|d6c35195683fd1378e5624b01ca390069d399f8341c38986b7e3dfa0b3470d10|duckdb|--version
+ninja|https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-mac.zip|c99048673aa765960a99cf10c6ddb9f1fad506099ff0a0e137ad8960a88f321b|ninja|--version
+bitcoin-test|https://bitcoincore.org/bin/bitcoin-core-31.0/bitcoin-31.0-arm64-apple-darwin.tar.gz|a2d7a13b4da53d4a3e4c517f3a0269e2429813417bb320d3b268993cfdc545d0|bitcoin-31.0/libexec/test_bitcoin|--help
+bitcoin-util|https://bitcoincore.org/bin/bitcoin-core-31.0/bitcoin-31.0-arm64-apple-darwin.tar.gz|a2d7a13b4da53d4a3e4c517f3a0269e2429813417bb320d3b268993cfdc545d0|bitcoin-31.0/bin/bitcoin-util|--version
+bitcoin-30.2-test|https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-arm64-apple-darwin.tar.gz|c2ecab62891de22228043815cb6211549a32272be3d5d052ff19847d3420bd10|bitcoin-30.2/libexec/test_bitcoin|--help
+bitcoin-29.2-test|https://bitcoincore.org/bin/bitcoin-core-29.2/bitcoin-29.2-arm64-apple-darwin.tar.gz|bd07450f76d149d094842feab58e6240673120c8a317a1c51d45ba30c34e85ef|bitcoin-29.2/bin/test_bitcoin|--help
+bitcoin-28.2-test|https://bitcoincore.org/bin/bitcoin-core-28.2/bitcoin-28.2-arm64-apple-darwin.tar.gz|c0270ed50effc174f7ff3332dba5183a8693999dac2ba78b37d8c8797b3ea2b2|bitcoin-28.2/bin/test_bitcoin|--help
+bitcoin-27.2-test|https://bitcoincore.org/bin/bitcoin-core-27.2/bitcoin-27.2-arm64-apple-darwin.tar.gz|8f2247f4786f3559d37189b58452c91623efc5fa6886c975fa9386f9ff3f1001|bitcoin-27.2/bin/test_bitcoin|--help
+bitcoin-26.2-test|https://bitcoincore.org/bin/bitcoin-core-26.2/bitcoin-26.2-arm64-apple-darwin.tar.gz|863960b4f78130ebb9a5e7f68e5cc021778892ff9b3f8b060056c485470640d5|bitcoin-26.2/bin/test_bitcoin|--help
+bitcoin-25.2-test|https://bitcoincore.org/bin/bitcoin-core-25.2/bitcoin-25.2-arm64-apple-darwin.tar.gz|f55b394eebaa11d4b717d68aad9f75b824aaf3a7841dac7c26b1ef3d6d2915f5|bitcoin-25.2/bin/test_bitcoin|--help
+knots-test|https://github.com/bitcoinknots/bitcoin/releases/download/v29.3.knots20260508/bitcoin-29.3.knots20260508-arm64-apple-darwin.tar.gz|494df758b90f1d5fde607716ef8200361e240a1e5887e3db87fc73e7783d911f|bitcoin-29.3.knots20260508/bin/test_bitcoin|--help
+knots-util|https://github.com/bitcoinknots/bitcoin/releases/download/v29.3.knots20260508/bitcoin-29.3.knots20260508-arm64-apple-darwin.tar.gz|494df758b90f1d5fde607716ef8200361e240a1e5887e3db87fc73e7783d911f|bitcoin-29.3.knots20260508/bin/bitcoin-util|--version
+elements-test|https://github.com/ElementsProject/elements/releases/download/elements-23.3.3/elements-23.3.3-arm64-apple-darwin.tar.gz|b23a495e191936ea50f2b3e78ff3613165dbea718bee68100cf3bb02cd46a1f8|elements-23.3.3/bin/test_bitcoin|--help
+elements-util|https://github.com/ElementsProject/elements/releases/download/elements-23.3.3/elements-23.3.3-arm64-apple-darwin.tar.gz|b23a495e191936ea50f2b3e78ff3613165dbea718bee68100cf3bb02cd46a1f8|elements-23.3.3/bin/elements-util|--version
+dash-test|https://github.com/dashpay/dash/releases/download/v23.1.4/dashcore-23.1.4-arm64-apple-darwin.tar.gz|ad1e527a2c883b31925ddbc0e88364cd30783a80edeef06ee7b888fbe2d6ceae|dashcore-23.1.4/bin/test_dash|--help
+dash-util|https://github.com/dashpay/dash/releases/download/v23.1.4/dashcore-23.1.4-arm64-apple-darwin.tar.gz|ad1e527a2c883b31925ddbc0e88364cd30783a80edeef06ee7b888fbe2d6ceae|dashcore-23.1.4/bin/dash-util|--version
+syscoin-cli|https://github.com/syscoin/syscoin/releases/download/v5.0.5/syscoin-5.0.5-arm64-apple-darwin.tar.gz|d0cca31ee34e8bb22e635604e3c282bb8d915b98d36667d5b2a369d11e7b26c2|syscoin-5.0.5/bin/syscoin-cli|--version
+qtum-test|https://github.com/qtumproject/qtum/releases/download/v29.1/qtum-29.1-arm64-apple-darwin-unsigned.tar.gz|fd571ca305c5cb76b802a004d301620d3def11da4f882ef543ef11fa8f0438ca|qtum-29.1/bin/test_qtum|--help
+groestlcoin-test|https://github.com/Groestlcoin/groestlcoin/releases/download/v31.0/groestlcoin-31.0-arm64-apple-darwin-unsigned.tar.gz|438d66162b2848f18b98462a4c4401d93c2de4a3c81a15269453f6e88bccc587|groestlcoin-31.0/libexec/test_groestlcoin|--help

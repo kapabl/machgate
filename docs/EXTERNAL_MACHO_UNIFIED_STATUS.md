@@ -23,6 +23,15 @@ Last refreshed: 2026-06-24
 
 Functional completion: `70 / 70` working (`100.0%`).
 
+Focused C++ / test-runner addendum:
+
+- `docs/CATCH2_STATIC_INIT_EXTERNAL_LOOP.md` tracks the focused C++ static-init loop.
+- Generated local `cpp_many_ctors`: `707 / 707` constructors completed and exited `0`.
+- Optional generated local `cpp_public_test_registrars`: `707 / 707` source-derived Catch2/gtest-style registrar constructors completed and exited `0`.
+- Public focused C++ rows: `18 / 22` passing after Loop K/L.
+- Focused blockers: `bitcoin-29.2-test`, `bitcoin-26.2-test`, `knots-test`, and `qtum-test`.
+- All focused blockers are real external C++ Boost.Test runners. `TIMEOUT_AFTER_MAIN` is fixed `8 / 8`, and the original `BOOST_AUTO_START_DBG` parser error is fixed. The remaining focused bucket is `BOOST_NOTHING_TO_TEST_ABORT` (4): `--help` prints Boost help, then aborts with `boost::unit_test::framework::nothing_to_test`.
+
 ## Unified Table
 
 | Binary | Corpus | Status | Current evidence / next action |

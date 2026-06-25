@@ -28,6 +28,7 @@ GLIBC_2.17 {
         freeaddrinfo;
         gai_strerror;
         strerror_r;
+        __fpclassifyd;
         getaddrinfo;
         __CFConstantStringClassReference;
         proc_pidpath;

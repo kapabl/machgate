@@ -77,6 +77,32 @@ static void lc_main_return(int status) __attribute__((noreturn));
 static void trace_lc_main_abi(struct load_results* lr);
 void machgate_trace_guest_address(const char* label, uintptr_t address);
 
+typedef void (*shim_note_init_context_fn)(const char*, int, int, uintptr_t);
+typedef void (*shim_clear_init_context_fn)(void);
+
+static void note_init_context(const char* kind, int index, int total,
+                              uintptr_t address)
+{
+	trampoline_note_init_context(kind, index, total, address);
+
+	shim_note_init_context_fn shim_note =
+		(shim_note_init_context_fn)dlsym(RTLD_DEFAULT,
+		                                 "machgate_shim_note_init_context");
+	if (shim_note)
+		shim_note(kind, index, total, address);
+}
+
+static void clear_init_context(void)
+{
+	trampoline_clear_init_context();
+
+	shim_clear_init_context_fn shim_clear =
+		(shim_clear_init_context_fn)dlsym(RTLD_DEFAULT,
+		                                  "machgate_shim_clear_init_context");
+	if (shim_clear)
+		shim_clear();
+}
+
 /* UUID of the main executable */
 uint8_t exe_uuid[16];
 
@@ -1122,7 +1148,9 @@ static void run_init_offsets(struct load_results* lr) {
 						init_func_t func = (init_func_t)func_addr;
 						if (machismo_verbose)
 							fprintf(stderr, "machgate: init[%d/%d] at 0x%lx\n", j, count, func_addr);
+						note_init_context("__init_offsets", j, count, func_addr);
 						func();
+						clear_init_context();
 					}
 					fprintf(stderr, "machgate: static initializers complete\n");
 				}
@@ -1136,7 +1164,9 @@ static void run_init_offsets(struct load_results* lr) {
 					for (int j = 0; j < count; j++) {
 						if (machismo_verbose)
 							fprintf(stderr, "machgate: mod_init[%d/%d] at 0x%lx\n", j, count, funcs[j]);
+						note_init_context("__mod_init_func", j, count, funcs[j]);
 						((init_func_t)funcs[j])();
+						clear_init_context();
 					}
 					fprintf(stderr, "machgate: __mod_init_func constructors complete\n");
 				}

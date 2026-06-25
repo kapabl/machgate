@@ -606,6 +606,27 @@ static int num_guarded_pages = 0;
 static void* signal_diag_mh = NULL;
 static uintptr_t signal_diag_slide = 0;
 static int signal_diag_installed = 0;
+static const char* signal_diag_init_kind = NULL;
+static int signal_diag_init_index = -1;
+static int signal_diag_init_total = 0;
+static uintptr_t signal_diag_init_address = 0;
+
+void trampoline_note_init_context(const char* kind, int index, int total,
+                                  uintptr_t address)
+{
+	signal_diag_init_kind = kind;
+	signal_diag_init_index = index;
+	signal_diag_init_total = total;
+	signal_diag_init_address = address;
+}
+
+void trampoline_clear_init_context(void)
+{
+	signal_diag_init_kind = NULL;
+	signal_diag_init_index = -1;
+	signal_diag_init_total = 0;
+	signal_diag_init_address = 0;
+}
 
 static uintptr_t ucontext_pc(const void* ucontext)
 {
@@ -705,6 +726,43 @@ static void print_signal_macho_context(uintptr_t pc)
 	        (void*)pc);
 }
 
+static void print_signal_init_context(void)
+{
+	if (!signal_diag_init_kind)
+		return;
+
+	fprintf(stderr,
+	        "machgate: current initializer kind=%s index=%d total=%d address=%p\n",
+	        signal_diag_init_kind, signal_diag_init_index,
+	        signal_diag_init_total, (void*)signal_diag_init_address);
+}
+
+static void print_signal_indirect_branch(uintptr_t call_site, const void* ucontext)
+{
+	if (!call_site)
+		return;
+
+	uint32_t insn = *(uint32_t*)call_site;
+	uint32_t masked = insn & 0xfffffc1fu;
+	const char* mnemonic = NULL;
+
+	if (masked == 0xd61f0000u)
+		mnemonic = "br";
+	else if (masked == 0xd63f0000u)
+		mnemonic = "blr";
+	else if (masked == 0xd65f0000u)
+		mnemonic = "ret";
+
+	if (!mnemonic)
+		return;
+
+	int reg = (int)((insn >> 5) & 0x1f);
+	fprintf(stderr,
+	        "machgate: signal callsite %p insn=0x%08x %s x%d target=%p\n",
+	        (void*)call_site, insn, mnemonic, reg,
+	        (void*)ucontext_reg(ucontext, reg));
+}
+
 static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 {
 	(void)sig;
@@ -733,6 +791,9 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		        "machgate: SIGSEGV code=%d addr=%p pc=%p lr=%p sp=%p fp=%p\n",
 		        info->si_code, (void*)fault_addr, (void*)pc,
 		        (void*)lr, (void*)sp, (void*)fp);
+		print_signal_init_context();
+		if (lr >= 4)
+			print_signal_indirect_branch(lr - 4, ucontext);
 		fprintf(stderr,
 		        "machgate: regs x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p\n",
 		        (void*)ucontext_reg(ucontext, 0),

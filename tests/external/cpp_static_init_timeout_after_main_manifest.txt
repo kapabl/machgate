@@ -1,0 +1,10 @@
+# Focused TIMEOUT_AFTER_MAIN bucket from cpp_static_init_manifest.txt.
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+bitcoin-test|https://bitcoincore.org/bin/bitcoin-core-31.0/bitcoin-31.0-arm64-apple-darwin.tar.gz|a2d7a13b4da53d4a3e4c517f3a0269e2429813417bb320d3b268993cfdc545d0|bitcoin-31.0/libexec/test_bitcoin|--help
+bitcoin-30.2-test|https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-arm64-apple-darwin.tar.gz|c2ecab62891de22228043815cb6211549a32272be3d5d052ff19847d3420bd10|bitcoin-30.2/libexec/test_bitcoin|--help
+bitcoin-28.2-test|https://bitcoincore.org/bin/bitcoin-core-28.2/bitcoin-28.2-arm64-apple-darwin.tar.gz|c0270ed50effc174f7ff3332dba5183a8693999dac2ba78b37d8c8797b3ea2b2|bitcoin-28.2/bin/test_bitcoin|--help
+bitcoin-27.2-test|https://bitcoincore.org/bin/bitcoin-core-27.2/bitcoin-27.2-arm64-apple-darwin.tar.gz|8f2247f4786f3559d37189b58452c91623efc5fa6886c975fa9386f9ff3f1001|bitcoin-27.2/bin/test_bitcoin|--help
+bitcoin-25.2-test|https://bitcoincore.org/bin/bitcoin-core-25.2/bitcoin-25.2-arm64-apple-darwin.tar.gz|f55b394eebaa11d4b717d68aad9f75b824aaf3a7841dac7c26b1ef3d6d2915f5|bitcoin-25.2/bin/test_bitcoin|--help
+elements-test|https://github.com/ElementsProject/elements/releases/download/elements-23.3.3/elements-23.3.3-arm64-apple-darwin.tar.gz|b23a495e191936ea50f2b3e78ff3613165dbea718bee68100cf3bb02cd46a1f8|elements-23.3.3/bin/test_bitcoin|--help
+dash-test|https://github.com/dashpay/dash/releases/download/v23.1.4/dashcore-23.1.4-arm64-apple-darwin.tar.gz|ad1e527a2c883b31925ddbc0e88364cd30783a80edeef06ee7b888fbe2d6ceae|dashcore-23.1.4/bin/test_dash|--help
+groestlcoin-test|https://github.com/Groestlcoin/groestlcoin/releases/download/v31.0/groestlcoin-31.0-arm64-apple-darwin-unsigned.tar.gz|438d66162b2848f18b98462a4c4401d93c2de4a3c81a15269453f6e88bccc587|groestlcoin-31.0/libexec/test_groestlcoin|--help

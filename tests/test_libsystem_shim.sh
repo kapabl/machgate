@@ -68,5 +68,22 @@ pattern = (ctypes.c_uint8 * 4)(0xDE, 0xAD, 0xBE, 0xEF)
 lib.memset_pattern4(buf, pattern, 16)
 assert buf.raw == b'\\xDE\\xAD\\xBE\\xEF' * 4, f'memset_pattern4 failed: {buf.raw.hex()}'
 
+# Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates
+# names such as auto_start_dbg through std::isalnum, which reaches ___maskrune.
+lib.__maskrune.argtypes = [ctypes.c_int, ctypes.c_ulong]
+lib.__maskrune.restype = ctypes.c_int
+CTYPE_A = 0x00000100
+CTYPE_D = 0x00000400
+CTYPE_P = 0x00002000
+CTYPE_S = 0x00004000
+CTYPE_U = 0x00008000
+for ch in b'auto_start_dbg':
+    valid = bool(lib.__maskrune(ch, CTYPE_A | CTYPE_D)) or chr(ch) in '+_?'
+    assert valid, f'Boost.Test parameter character {chr(ch)!r} classified invalid'
+assert lib.__maskrune(ord('Z'), CTYPE_A | CTYPE_U), 'uppercase alpha mask failed'
+assert lib.__maskrune(ord('7'), CTYPE_D), 'digit mask failed'
+assert lib.__maskrune(ord('_'), CTYPE_P), 'punctuation mask failed'
+assert lib.__maskrune(ord(' '), CTYPE_S), 'space mask failed'
+
 print('All libsystem_shim symbol tests passed')
 "
