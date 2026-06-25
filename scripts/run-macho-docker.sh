@@ -21,6 +21,7 @@ Optional environment:
                       unpack instead of downloading a release.
   MACHGATE_IMAGE      Docker image to use, default: ubuntu:24.04
   MACHGATE_VERBOSE    Set to 1 to run MachGate with -v.
+  MACHGATE_TIMEOUT    Kill MachGate after this many seconds, default: disabled.
   MACHGATE_TRACE_*    Debug trace flags are passed through to the container.
 EOF
 }
@@ -45,6 +46,7 @@ image="${MACHGATE_IMAGE:-ubuntu:24.04}"
 local_dir="${MACHGATE_LOCAL_DIR:-}"
 tarball="${MACHGATE_TARBALL:-}"
 verbose="${MACHGATE_VERBOSE:-}"
+guest_timeout="${MACHGATE_TIMEOUT:-}"
 
 if [ -n "$local_dir" ] && [ -n "$tarball" ]; then
     echo "Use only one of MACHGATE_LOCAL_DIR or MACHGATE_TARBALL" >&2
@@ -109,7 +111,7 @@ echo "machgate-docker: running ${guest_binary}" >&2
 
 "${docker_args[@]}" \
     "$image" \
-    bash -s -- "$version" "$guest_name" "$local_dir" "$tarball_name" "$verbose" "$@" <<'EOF'
+    bash -s -- "$version" "$guest_name" "$local_dir" "$tarball_name" "$verbose" "$guest_timeout" "$@" <<'EOF'
 set -euo pipefail
 
 requested_version="$1"
@@ -117,7 +119,8 @@ guest_name="$2"
 local_dir="$3"
 tarball_name="$4"
 verbose="$5"
-shift 5
+guest_timeout="$6"
+shift 6
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -206,10 +209,18 @@ fi
 
 echo "machgate-docker: exec ${machgate_bin} ${machgate_args[*]} /input/${guest_name} $*" >&2
 set +e
-"$machgate_bin" "${machgate_args[@]}" "/input/${guest_name}" "$@"
+if [ -n "$guest_timeout" ]; then
+    timeout --preserve-status --kill-after=5s "${guest_timeout}s" \
+        "$machgate_bin" "${machgate_args[@]}" "/input/${guest_name}" "$@"
+else
+    "$machgate_bin" "${machgate_args[@]}" "/input/${guest_name}" "$@"
+fi
 guest_status="$?"
 set -e
 
+if [ -n "$guest_timeout" ] && [ "$guest_status" -eq 143 ]; then
+    echo "machgate-docker: guest timed out after ${guest_timeout}s" >&2
+fi
 echo "machgate-docker: guest exit ${guest_status}" >&2
 exit "$guest_status"
 EOF
