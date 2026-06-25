@@ -20,6 +20,7 @@ Optional environment:
   MACHGATE_TARBALL    Local MachGate linux-arm64 release tarball to mount and
                       unpack instead of downloading a release.
   MACHGATE_IMAGE      Docker image to use, default: ubuntu:24.04
+  MACHGATE_VERBOSE    Set to 1 to run MachGate with -v.
   MACHGATE_TRACE_*    Debug trace flags are passed through to the container.
 EOF
 }
@@ -43,6 +44,7 @@ version="${MACHGATE_VERSION:-latest}"
 image="${MACHGATE_IMAGE:-ubuntu:24.04}"
 local_dir="${MACHGATE_LOCAL_DIR:-}"
 tarball="${MACHGATE_TARBALL:-}"
+verbose="${MACHGATE_VERBOSE:-}"
 
 if [ -n "$local_dir" ] && [ -n "$tarball" ]; then
     echo "Use only one of MACHGATE_LOCAL_DIR or MACHGATE_TARBALL" >&2
@@ -107,14 +109,15 @@ echo "machgate-docker: running ${guest_binary}" >&2
 
 "${docker_args[@]}" \
     "$image" \
-    bash -s -- "$version" "$guest_name" "$local_dir" "$tarball_name" "$@" <<'EOF'
+    bash -s -- "$version" "$guest_name" "$local_dir" "$tarball_name" "$verbose" "$@" <<'EOF'
 set -euo pipefail
 
 requested_version="$1"
 guest_name="$2"
 local_dir="$3"
 tarball_name="$4"
-shift 4
+verbose="$5"
+shift 5
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -196,9 +199,14 @@ sed -i "s#__SHIM_PATH__#${shim_path}#g" /tmp/dylib_map.conf
 
 export LD_LIBRARY_PATH="${machgate_root}/lib:${machgate_root}"
 export MACHISMO_CONFIG=/tmp/machismo.conf
-echo "machgate-docker: exec ${machgate_bin} /input/${guest_name} $*" >&2
+machgate_args=()
+if [ "$verbose" = "1" ]; then
+    machgate_args=(-v)
+fi
+
+echo "machgate-docker: exec ${machgate_bin} ${machgate_args[*]} /input/${guest_name} $*" >&2
 set +e
-"$machgate_bin" "/input/${guest_name}" "$@"
+"$machgate_bin" "${machgate_args[@]}" "/input/${guest_name}" "$@"
 guest_status="$?"
 set -e
 
