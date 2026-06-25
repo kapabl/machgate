@@ -17,6 +17,8 @@ Optional environment:
                       of downloading a release. Supports either release layout
                       with bin/machgate and lib/libsystem_shim.so, or build
                       layout with machgate and libsystem_shim.so.
+  MACHGATE_TARBALL    Local MachGate linux-arm64 release tarball to mount and
+                      unpack instead of downloading a release.
   MACHGATE_IMAGE      Docker image to use, default: ubuntu:24.04
 EOF
 }
@@ -39,6 +41,12 @@ guest_name="$(basename "$guest_binary")"
 version="${MACHGATE_VERSION:-latest}"
 image="${MACHGATE_IMAGE:-ubuntu:24.04}"
 local_dir="${MACHGATE_LOCAL_DIR:-}"
+tarball="${MACHGATE_TARBALL:-}"
+
+if [ -n "$local_dir" ] && [ -n "$tarball" ]; then
+    echo "Use only one of MACHGATE_LOCAL_DIR or MACHGATE_TARBALL" >&2
+    exit 1
+fi
 
 echo "machgate-docker: checking Docker linux/arm64 support with ${image}" >&2
 
@@ -54,6 +62,17 @@ if [ -n "$local_dir" ]; then
     fi
     local_dir="$(cd "$local_dir" && pwd)"
     docker_args+=(-v "$local_dir:/opt/machgate-local:ro")
+fi
+
+tarball_name=""
+if [ -n "$tarball" ]; then
+    if [ ! -f "$tarball" ]; then
+        echo "MACHGATE_TARBALL is not a file: $tarball" >&2
+        exit 1
+    fi
+    tarball_dir="$(cd "$(dirname "$tarball")" && pwd)"
+    tarball_name="$(basename "$tarball")"
+    docker_args+=(-v "$tarball_dir:/machgate-dist:ro")
 fi
 
 if ! docker run --rm --platform linux/arm64 --entrypoint /bin/sh "$image" -c 'test "$(uname -m)" = aarch64' >/dev/null 2>&1; then
@@ -75,18 +94,16 @@ echo "machgate-docker: running ${guest_binary}" >&2
 
 "${docker_args[@]}" \
     "$image" \
-    bash -s -- "$version" "$guest_name" "$local_dir" "$@" <<'EOF'
+    bash -s -- "$version" "$guest_name" "$local_dir" "$tarball_name" "$@" <<'EOF'
 set -euo pipefail
 
 requested_version="$1"
 guest_name="$2"
 local_dir="$3"
-shift 3
+tarball_name="$4"
+shift 4
 
 export DEBIAN_FRONTEND=noninteractive
-echo "machgate-docker: installing container dependencies" >&2
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl tar zlib1g
 
 if [ -n "$local_dir" ]; then
     echo "machgate-docker: using local MachGate directory /opt/machgate-local" >&2
@@ -106,7 +123,17 @@ if [ -n "$local_dir" ]; then
         echo "MACHGATE_LOCAL_DIR is missing libsystem_shim.so next to the selected layout" >&2
         exit 1
     fi
+elif [ -n "$tarball_name" ]; then
+    echo "machgate-docker: unpacking local MachGate tarball /machgate-dist/${tarball_name}" >&2
+    tar -xzf "/machgate-dist/${tarball_name}" -C /opt
+    machgate_root=/opt/machgate
+    machgate_bin=/opt/machgate/bin/machgate
+    shim_path=/opt/machgate/lib/libsystem_shim.so
 else
+    echo "machgate-docker: installing container dependencies" >&2
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates curl tar zlib1g
+
     if [ "$requested_version" = "latest" ]; then
         echo "machgate-docker: resolving latest MachGate release" >&2
         latest_tag="$(curl -fsSL https://api.github.com/repos/kapabl/machgate/releases/latest |

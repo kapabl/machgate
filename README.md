@@ -197,6 +197,12 @@ MACHGATE_LOCAL_DIR=/path/to/machgate-arm64-dir scripts/run-macho-docker.sh /path
 `bin/machgate` and `lib/libsystem_shim.so`, or to a build directory containing
 `machgate` and `libsystem_shim.so`.
 
+To run with a local release tarball instead of downloading from GitHub:
+
+```bash
+MACHGATE_TARBALL=/path/to/machgate-0.3.0-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+```
+
 Pass any guest arguments after the binary path:
 
 ```bash
