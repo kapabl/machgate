@@ -40,6 +40,8 @@ version="${MACHGATE_VERSION:-latest}"
 image="${MACHGATE_IMAGE:-ubuntu:24.04}"
 local_dir="${MACHGATE_LOCAL_DIR:-}"
 
+echo "machgate-docker: checking Docker linux/arm64 support with ${image}" >&2
+
 docker_args=(
     docker run --rm --platform linux/arm64
     -v "$guest_dir:/input:ro"
@@ -69,6 +71,8 @@ EOF
     exit 1
 fi
 
+echo "machgate-docker: running ${guest_binary}" >&2
+
 "${docker_args[@]}" \
     "$image" \
     bash -s -- "$version" "$guest_name" "$local_dir" "$@" <<'EOF'
@@ -80,10 +84,12 @@ local_dir="$3"
 shift 3
 
 export DEBIAN_FRONTEND=noninteractive
+echo "machgate-docker: installing container dependencies" >&2
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl tar zlib1g
 
 if [ -n "$local_dir" ]; then
+    echo "machgate-docker: using local MachGate directory /opt/machgate-local" >&2
     if [ -x /opt/machgate-local/bin/machgate ]; then
         machgate_root=/opt/machgate-local
         machgate_bin=/opt/machgate-local/bin/machgate
@@ -102,6 +108,7 @@ if [ -n "$local_dir" ]; then
     fi
 else
     if [ "$requested_version" = "latest" ]; then
+        echo "machgate-docker: resolving latest MachGate release" >&2
         latest_tag="$(curl -fsSL https://api.github.com/repos/kapabl/machgate/releases/latest |
             sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' |
             head -1)"
@@ -115,8 +122,10 @@ else
         release_url="https://github.com/kapabl/machgate/releases/download/v${version}/machgate-${version}-linux-arm64.tar.gz"
     fi
 
-    curl -L -o /tmp/machgate.tar.gz \
+    echo "machgate-docker: downloading ${release_url}" >&2
+    curl -fL --retry 3 --retry-delay 2 -o /tmp/machgate.tar.gz \
         "$release_url"
+    echo "machgate-docker: unpacking MachGate release" >&2
     tar -xzf /tmp/machgate.tar.gz -C /opt
     machgate_root=/opt/machgate
     machgate_bin=/opt/machgate/bin/machgate
@@ -147,5 +156,6 @@ sed -i "s#__SHIM_PATH__#${shim_path}#g" /tmp/dylib_map.conf
 
 export LD_LIBRARY_PATH="${machgate_root}/lib:${machgate_root}"
 export MACHISMO_CONFIG=/tmp/machismo.conf
+echo "machgate-docker: exec ${machgate_bin} /input/${guest_name} $*" >&2
 exec "$machgate_bin" "/input/${guest_name}" "$@"
 EOF
