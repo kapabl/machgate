@@ -20,6 +20,7 @@ Optional environment:
   MACHGATE_TARBALL    Local MachGate linux-arm64 release tarball to mount and
                       unpack instead of downloading a release.
   MACHGATE_IMAGE      Docker image to use, default: ubuntu:24.04
+  MACHGATE_TRACE_*    Debug trace flags are passed through to the container.
 EOF
 }
 
@@ -54,6 +55,18 @@ docker_args=(
     docker run --rm -i --platform linux/arm64
     -v "$guest_dir:/input:ro"
 )
+
+for env_name in \
+    MACHGATE_TRACE_LCMAIN \
+    MACHGATE_TRACE_SIGNALS \
+    MACHGATE_TRACE_SYSCALLS \
+    MACHGATE_TRACE_MMAP \
+    MACHGATE_EXTERNAL_MAP_LIBCXX
+do
+    if [ -n "${!env_name:-}" ]; then
+        docker_args+=(-e "$env_name=${!env_name}")
+    fi
+done
 
 if [ -n "$local_dir" ]; then
     if [ ! -d "$local_dir" ]; then

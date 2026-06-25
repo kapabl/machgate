@@ -203,6 +203,12 @@ To run with a local release tarball instead of downloading from GitHub:
 MACHGATE_TARBALL=/path/to/machgate-0.3.0-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
+To diagnose startup hangs in static constructors, enable LC_MAIN tracing:
+
+```bash
+MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.0-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+```
+
 Pass any guest arguments after the binary path:
 
 ```bash
