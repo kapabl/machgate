@@ -169,6 +169,10 @@ One-time host setup if your Docker installation does not already support
 docker run --privileged --rm tonistiigi/binfmt --install arm64
 ```
 
+If the container fails with `exec /usr/bin/bash: exec format error`, the host
+does not have ARM64 binfmt/QEMU execution registered yet. Run the same
+`tonistiigi/binfmt` command above once, then retry the MachGate runner.
+
 Run the published release against a local ARM64 macOS CLI binary:
 
 ```bash
@@ -181,6 +185,17 @@ release:
 ```bash
 MACHGATE_VERSION=0.3.0 scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
+
+To run with a local Linux ARM64 MachGate build or unpacked release instead of
+downloading from GitHub:
+
+```bash
+MACHGATE_LOCAL_DIR=/path/to/machgate-arm64-dir scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+```
+
+`MACHGATE_LOCAL_DIR` may point to an unpacked release directory containing
+`bin/machgate` and `lib/libsystem_shim.so`, or to a build directory containing
+`machgate` and `libsystem_shim.so`.
 
 Pass any guest arguments after the binary path:
 
