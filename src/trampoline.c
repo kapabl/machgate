@@ -693,7 +693,7 @@ static void print_signal_macho_context(uintptr_t pc)
 		}
 
 		fprintf(stderr,
-		        "machismo: guest context pc=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
+		        "machgate: guest context pc=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
 		        (void*)pc, (unsigned long)(pc - signal_diag_slide),
 		        16, seg->segname, 16, section_name,
 		        (unsigned long long)section_fileoff,
@@ -701,7 +701,7 @@ static void print_signal_macho_context(uintptr_t pc)
 		return;
 	}
 
-	fprintf(stderr, "machismo: guest context pc=%p outside main Mach-O image\n",
+	fprintf(stderr, "machgate: guest context pc=%p outside main Mach-O image\n",
 	        (void*)pc);
 }
 
@@ -730,11 +730,11 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		uintptr_t sp = ucontext_reg(ucontext, 31);
 		uintptr_t fp = ucontext_reg(ucontext, 29);
 		fprintf(stderr,
-		        "machismo: SIGSEGV code=%d addr=%p pc=%p lr=%p sp=%p fp=%p\n",
+		        "machgate: SIGSEGV code=%d addr=%p pc=%p lr=%p sp=%p fp=%p\n",
 		        info->si_code, (void*)fault_addr, (void*)pc,
 		        (void*)lr, (void*)sp, (void*)fp);
 		fprintf(stderr,
-		        "machismo: regs x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p\n",
+		        "machgate: regs x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p\n",
 		        (void*)ucontext_reg(ucontext, 0),
 		        (void*)ucontext_reg(ucontext, 1),
 		        (void*)ucontext_reg(ucontext, 2),
@@ -745,7 +745,7 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		        (void*)ucontext_reg(ucontext, 7),
 		        (void*)ucontext_reg(ucontext, 8));
 		fprintf(stderr,
-		        "machismo: regs x9=%p x10=%p x11=%p x12=%p x13=%p x14=%p x15=%p x16=%p x17=%p\n",
+		        "machgate: regs x9=%p x10=%p x11=%p x12=%p x13=%p x14=%p x15=%p x16=%p x17=%p\n",
 		        (void*)ucontext_reg(ucontext, 9),
 		        (void*)ucontext_reg(ucontext, 10),
 		        (void*)ucontext_reg(ucontext, 11),
@@ -756,7 +756,7 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		        (void*)ucontext_reg(ucontext, 16),
 		        (void*)ucontext_reg(ucontext, 17));
 		fprintf(stderr,
-		        "machismo: regs x18=%p x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p\n",
+		        "machgate: regs x18=%p x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p\n",
 		        (void*)ucontext_reg(ucontext, 18),
 		        (void*)ucontext_reg(ucontext, 19),
 		        (void*)ucontext_reg(ucontext, 20),

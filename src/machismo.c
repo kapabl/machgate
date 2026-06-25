@@ -163,7 +163,7 @@ static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
 				                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
 				                    -1, 0);
 				if (mapped != MAP_FAILED) {
-					fprintf(stderr, "machismo: LSE island pool at %p (before __TEXT, %zu KB)\n",
+					fprintf(stderr, "machgate: LSE island pool at %p (before __TEXT, %zu KB)\n",
 					        mapped, aligned_size / 1024);
 					return (uint32_t*)mapped;
 				}
@@ -176,7 +176,7 @@ static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
 
 	uint32_t* result = (uint32_t*)machismo_pool_alloc(lr, pool_size);
 	if (result) {
-		fprintf(stderr, "machismo: LSE island pool at %p (adjacent to segments, %zu KB)\n",
+		fprintf(stderr, "machgate: LSE island pool at %p (adjacent to segments, %zu KB)\n",
 		        result, pool_size / 1024);
 	}
 	return result;
@@ -271,7 +271,7 @@ int main(int argc, char** argv, char** envp)
 		}
 
 		if (cfg_loaded) {
-			fprintf(stderr, "machismo: loaded config from %s\n", cfg_path);
+			fprintf(stderr, "machgate: loaded config from %s\n", cfg_path);
 		} else {
 			/* Fallback to env vars for backward compat */
 			const char* map = getenv("MACHISMO_DYLIB_MAP");
@@ -340,7 +340,7 @@ int main(int argc, char** argv, char** envp)
 		                                            lse_pool_size,
 		                                            &machismo_load_results);
 		if (!lse_pool) {
-			fprintf(stderr, "machismo: WARNING: LSE pool alloc failed — LSE atomics will SIGILL\n");
+			fprintf(stderr, "machgate: WARNING: LSE pool alloc failed — LSE atomics will SIGILL\n");
 		}
 
 		lse_pool_cur = lse_pool;
@@ -394,11 +394,11 @@ int main(int argc, char** argv, char** envp)
 		if (lse_pool)
 			__builtin___clear_cache((char*)lse_pool, (char*)lse_pool + lse_pool_size);
 		if (rcpc_fixed > 0)
-			fprintf(stderr, "machismo: downgraded %d ARMv8.3 RCPC instructions to ARMv8.0\n", rcpc_fixed);
+			fprintf(stderr, "machgate: downgraded %d ARMv8.3 RCPC instructions to ARMv8.0\n", rcpc_fixed);
 		if (tpidr_fixed > 0)
-			fprintf(stderr, "machismo: rewrote %d Darwin TPIDRRO reads to Linux TPIDR reads\n", tpidr_fixed);
+			fprintf(stderr, "machgate: rewrote %d Darwin TPIDRRO reads to Linux TPIDR reads\n", tpidr_fixed);
 		if (lse_total > 0)
-			fprintf(stderr, "machismo: patched %d ARMv8.1 LSE atomics with LDXR/STXR islands\n", lse_total);
+			fprintf(stderr, "machgate: patched %d ARMv8.1 LSE atomics with LDXR/STXR islands\n", lse_total);
 	}
 
 	/* Resolve chained fixups — patch GOT with native Linux .so addresses.
@@ -416,7 +416,7 @@ int main(int argc, char** argv, char** envp)
 		 * already loaded — the resolver finds them via MACHO: entries. */
 		for (int i = 0; i < g_num_macho_dylibs; i++) {
 			struct macho_dylib_info *mdi = &g_macho_dylibs[i];
-			fprintf(stderr, "machismo: resolving fixups for Mach-O dylib '%s'\n", mdi->path);
+			fprintf(stderr, "machgate: resolving fixups for Mach-O dylib '%s'\n", mdi->path);
 			resolver_resolve_fixups((void*)mdi->mh, mdi->slide, cfg.dylib_map);
 		}
 
@@ -450,7 +450,7 @@ int main(int argc, char** argv, char** envp)
 						}
 					}
 					if (fixed > 0)
-						fprintf(stderr, "machismo: fixed %d macOS pthread sigs in dylib '%s' segment %s\n",
+						fprintf(stderr, "machgate: fixed %d macOS pthread sigs in dylib '%s' segment %s\n",
 						        fixed, mdi->path, seg->segname);
 				}
 				lp += seg->cmdsize;
@@ -510,13 +510,13 @@ int main(int argc, char** argv, char** envp)
 				__builtin___clear_cache((char*)dylib_lse_pool,
 					(char*)dylib_lse_pool + dylib_pool_size);
 			if (dfix > 0)
-				fprintf(stderr, "machismo: downgraded %d RCPC instructions in dylib '%s'\n",
+				fprintf(stderr, "machgate: downgraded %d RCPC instructions in dylib '%s'\n",
 				        dfix, mdi->path);
 			if (dtpidr > 0)
-				fprintf(stderr, "machismo: rewrote %d Darwin TPIDRRO reads in dylib '%s'\n",
+				fprintf(stderr, "machgate: rewrote %d Darwin TPIDRRO reads in dylib '%s'\n",
 				        dtpidr, mdi->path);
 			if (dln > 0)
-				fprintf(stderr, "machismo: patched %d LSE atomics in dylib '%s' (pool at %p)\n",
+				fprintf(stderr, "machgate: patched %d LSE atomics in dylib '%s' (pool at %p)\n",
 				        dln, mdi->path, dylib_lse_pool);
 		}
 
@@ -556,7 +556,7 @@ int main(int argc, char** argv, char** envp)
 		if (tramp_pool) {
 			trampoline_set_pool(tramp_pool, tramp_pool_size);
 		} else {
-			fprintf(stderr, "machismo: WARNING: no pool space for trampoline islands\n");
+			fprintf(stderr, "machgate: WARNING: no pool space for trampoline islands\n");
 		}
 
 		for (int i = 0; i < cfg.num_trampolines; i++) {
@@ -571,7 +571,7 @@ int main(int argc, char** argv, char** envp)
 						machismo_load_results.slide, oh,
 						tc->match_local);
 				} else {
-					fprintf(stderr, "machismo: warning: cannot load override lib %s: %s\n",
+					fprintf(stderr, "machgate: warning: cannot load override lib %s: %s\n",
 					        tc->override_lib, dlerror());
 				}
 				if (!tc->lib) continue;  /* override-only section, no prefix patching */
@@ -645,7 +645,7 @@ int main(int argc, char** argv, char** envp)
 					overrides = bgfx_ov;
 					num_overrides = 14;
 				} else {
-					fprintf(stderr, "machismo: warning: cannot load %s: %s\n",
+					fprintf(stderr, "machgate: warning: cannot load %s: %s\n",
 					        tc->lib, dlerror());
 				}
 			}
@@ -694,14 +694,14 @@ int main(int argc, char** argv, char** envp)
 		if (patcher_apply(cfg.patches,
 		                  (void*)machismo_load_results.mh,
 		                  machismo_load_results.slide) < 0) {
-			fprintf(stderr, "machismo: patcher failed — aborting\n");
+			fprintf(stderr, "machgate: patcher failed — aborting\n");
 			abort();
 		}
 	}
 
 	if (machismo_load_results.mh) {
 		if (syscall_gate_patch(&machismo_load_results) < 0) {
-			fprintf(stderr, "machismo: syscall gate patching failed — aborting\n");
+			fprintf(stderr, "machgate: syscall gate patching failed — aborting\n");
 			abort();
 		}
 	}
@@ -961,7 +961,7 @@ static void fixup_darwin_pthread_data(struct load_results* lr) {
 	}
 
 	if (fixed > 0)
-		fprintf(stderr, "machismo: fixed %d macOS pthread objects in __DATA\n", fixed);
+		fprintf(stderr, "machgate: fixed %d macOS pthread objects in __DATA\n", fixed);
 }
 
 /*
@@ -1001,7 +1001,7 @@ static void setup_tlv_image(struct load_results* lr)
 	}
 
 	if (tlv_image_size || tlv_bss_size) {
-		fprintf(stderr, "machismo: TLV image at %p, size %zu + %zu bss\n",
+		fprintf(stderr, "machgate: TLV image at %p, size %zu + %zu bss\n",
 		        tlv_image_base, tlv_image_size, tlv_bss_size);
 	}
 
@@ -1025,9 +1025,9 @@ static void setup_tlv_image(struct load_results* lr)
 		if (p_size) *p_size = tlv_image_size;
 		if (p_bss) *p_bss = tlv_bss_size;
 		dlclose(shim);
-		fprintf(stderr, "machismo: TLV info set in shim\n");
+		fprintf(stderr, "machgate: TLV info set in shim\n");
 	} else {
-		fprintf(stderr, "machismo: WARNING: cannot find libsystem_shim.so for TLV (%s)\n",
+		fprintf(stderr, "machgate: WARNING: cannot find libsystem_shim.so for TLV (%s)\n",
 		        dlerror());
 	}
 }
@@ -1055,31 +1055,31 @@ static void run_init_offsets(struct load_results* lr) {
 					/* offsets are at the mapped section address */
 					offsets = (uint32_t*)(sect->addr + lr->slide);
 					int count = sect->size / sizeof(uint32_t);
-					fprintf(stderr, "machismo: running %d C++ static initializers from __init_offsets\n", count);
+					fprintf(stderr, "machgate: running %d C++ static initializers from __init_offsets\n", count);
 					typedef void (*init_func_t)(void);
 					extern int machismo_verbose;
 					for (int j = 0; j < count; j++) {
 						uintptr_t func_addr = lr->mh + offsets[j];
 						init_func_t func = (init_func_t)func_addr;
 						if (machismo_verbose)
-							fprintf(stderr, "machismo: init[%d/%d] at 0x%lx\n", j, count, func_addr);
+							fprintf(stderr, "machgate: init[%d/%d] at 0x%lx\n", j, count, func_addr);
 						func();
 					}
-					fprintf(stderr, "machismo: static initializers complete\n");
+					fprintf(stderr, "machgate: static initializers complete\n");
 				}
 				/* S_MOD_INIT_FUNC_POINTERS = 0x09 */
 				if ((sect->flags & 0xff) == 0x09) {
 					uintptr_t* funcs = (uintptr_t*)(sect->addr + lr->slide);
 					int count = sect->size / sizeof(uintptr_t);
-					fprintf(stderr, "machismo: running %d static constructors from __mod_init_func\n", count);
+					fprintf(stderr, "machgate: running %d static constructors from __mod_init_func\n", count);
 					typedef void (*init_func_t)(void);
 					extern int machismo_verbose;
 					for (int j = 0; j < count; j++) {
 						if (machismo_verbose)
-							fprintf(stderr, "machismo: mod_init[%d/%d] at 0x%lx\n", j, count, funcs[j]);
+							fprintf(stderr, "machgate: mod_init[%d/%d] at 0x%lx\n", j, count, funcs[j]);
 						((init_func_t)funcs[j])();
 					}
-					fprintf(stderr, "machismo: __mod_init_func constructors complete\n");
+					fprintf(stderr, "machgate: __mod_init_func constructors complete\n");
 				}
 			}
 		}
@@ -1121,23 +1121,23 @@ static void trace_lc_main_abi(struct load_results* lr)
 		apple_from_argv++;
 	apple_from_argv++;
 
-	fprintf(stderr, "machismo: lcmain abi stack=%p argc=%zu argv=%p envp=%p applep=%p\n",
+	fprintf(stderr, "machgate: lcmain abi stack=%p argc=%zu argv=%p envp=%p applep=%p\n",
 	        (void*)lr->stack_top, lr->argc, (void*)lr->argv, (void*)lr->envp,
 	        (void*)lr->applep);
-	fprintf(stderr, "machismo: lcmain abi derived envp=%p applep=%p\n",
+	fprintf(stderr, "machgate: lcmain abi derived envp=%p applep=%p\n",
 	        (void*)env_from_argv, (void*)apple_from_argv);
-	fprintf(stderr, "machismo: lcmain abi argv0=%p '%s' argv1=%p '%s'\n",
+	fprintf(stderr, "machgate: lcmain abi argv0=%p '%s' argv1=%p '%s'\n",
 	        lr->argv[0], lr->argv[0] ? lr->argv[0] : "",
 	        lr->argc > 1 ? lr->argv[1] : NULL,
 	        lr->argc > 1 && lr->argv[1] ? lr->argv[1] : "");
-	fprintf(stderr, "machismo: lcmain abi env0=%p '%s' apple0=%p '%s'\n",
+	fprintf(stderr, "machgate: lcmain abi env0=%p '%s' apple0=%p '%s'\n",
 	        lr->envp[0], lr->envp[0] ? lr->envp[0] : "",
 	        lr->applep[0], lr->applep[0] ? lr->applep[0] : "");
-	fprintf(stderr, "machismo: lcmain abi PACKER_WRAP_COOKIE guest=%d host=%d\n",
+	fprintf(stderr, "machgate: lcmain abi PACKER_WRAP_COOKIE guest=%d host=%d\n",
 	        guest_cookie ? 1 : 0, host_cookie ? 1 : 0);
 	if (trace_file) {
 		fprintf(trace_file,
-		        "machismo: lcmain pid=%d argc=%zu argv0='%s' argv1='%s' guest-cookie=%d host-cookie=%d\n",
+		        "machgate: lcmain pid=%d argc=%zu argv0='%s' argv1='%s' guest-cookie=%d host-cookie=%d\n",
 		        (int)getpid(), lr->argc,
 		        lr->argv[0] ? lr->argv[0] : "",
 		        lr->argc > 1 && lr->argv[1] ? lr->argv[1] : "",
@@ -1161,12 +1161,12 @@ static void start_thread(struct load_results* lr) {
 			if (slash) {
 				*slash = '\0';
 				if (chdir(binary_path) == 0)
-					fprintf(stderr, "machismo: chdir to '%s'\n", binary_path);
+					fprintf(stderr, "machgate: chdir to '%s'\n", binary_path);
 			}
 			free(binary_path);
 		}
 
-		fprintf(stderr, "machismo: calling _main at %p (argc=%zu)\n",
+		fprintf(stderr, "machgate: calling _main at %p (argc=%zu)\n",
 				(void*)lr->entry_point, lr->argc);
 		trace_lc_main_abi(lr);
 

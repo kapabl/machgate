@@ -88,7 +88,7 @@ void FUNCTION_NAME(int fd, bool expect_dylinker, struct load_results* lr)
 	/* All macOS arm64 binaries are PIE — Apple has required it since
 	 * OS X 10.7, and ARM Macs (M1+) only exist on macOS 11+. */
 	if (!(header.flags & MH_PIE) && header.filetype != MH_DYLINKER) {
-		fprintf(stderr, "machismo: non-PIE binaries are not supported\n");
+		fprintf(stderr, "machgate: non-PIE binaries are not supported\n");
 		exit(1);
 	}
 
@@ -259,7 +259,7 @@ void FUNCTION_NAME(int fd, bool expect_dylinker, struct load_results* lr)
 				 * Just warn and continue — we'll handle linking ourselves. */
 				struct dylinker_command* dy = (struct dylinker_command*) lc;
 				const char* dylinker_name = ((char*) dy) + dy->name.offset;
-				fprintf(stderr, "machismo: LC_LOAD_DYLINKER found (%s) — ignored in standalone mode\n", dylinker_name);
+				fprintf(stderr, "machgate: LC_LOAD_DYLINKER found (%s) — ignored in standalone mode\n", dylinker_name);
 				break;
 			}
 			case LC_MAIN:
