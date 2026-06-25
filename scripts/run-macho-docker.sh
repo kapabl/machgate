@@ -43,7 +43,7 @@ local_dir="${MACHGATE_LOCAL_DIR:-}"
 echo "machgate-docker: checking Docker linux/arm64 support with ${image}" >&2
 
 docker_args=(
-    docker run --rm --platform linux/arm64
+    docker run --rm -i --platform linux/arm64
     -v "$guest_dir:/input:ro"
 )
 
@@ -157,5 +157,11 @@ sed -i "s#__SHIM_PATH__#${shim_path}#g" /tmp/dylib_map.conf
 export LD_LIBRARY_PATH="${machgate_root}/lib:${machgate_root}"
 export MACHISMO_CONFIG=/tmp/machismo.conf
 echo "machgate-docker: exec ${machgate_bin} /input/${guest_name} $*" >&2
-exec "$machgate_bin" "/input/${guest_name}" "$@"
+set +e
+"$machgate_bin" "/input/${guest_name}" "$@"
+guest_status="$?"
+set -e
+
+echo "machgate-docker: guest exit ${guest_status}" >&2
+exit "$guest_status"
 EOF

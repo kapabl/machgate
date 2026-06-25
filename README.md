@@ -210,6 +210,7 @@ The script:
 3. generates a default `machismo.conf` and `dylib_map.conf`
 4. mounts the binary's directory at `/input`
 5. runs `/opt/machgate/bin/machgate /input/<binary> ...`
+6. streams the guest stdout/stderr and prints the guest exit status
 
 This path is slower than native ARM64 because Docker is emulating the ARM64
 Linux container, but it is useful for testing from an Intel workstation.
