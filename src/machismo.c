@@ -75,6 +75,7 @@ static void start_thread(struct load_results* lr);
 static void setup_stack64(const char* filepath, struct load_results* lr);
 static void lc_main_return(int status) __attribute__((noreturn));
 static void trace_lc_main_abi(struct load_results* lr);
+void machgate_trace_guest_address(const char* label, uintptr_t address);
 
 /* UUID of the main executable */
 uint8_t exe_uuid[16];
@@ -88,6 +89,64 @@ int __machismo_guest_argc = 0;
 char** __machismo_guest_argv = NULL;
 char** __machismo_guest_envp = NULL;
 const char* __machismo_guest_executable_path = NULL;
+
+void machgate_trace_guest_address(const char* label, uintptr_t address)
+{
+	if (!address) {
+		fprintf(stderr, "machgate: guest context %s=(nil)\n",
+		        label ? label : "address");
+		return;
+	}
+
+	struct mach_header_64* header = (struct mach_header_64*)machismo_load_results.mh;
+	if (!header)
+		return;
+
+	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		struct load_command* lc = (struct load_command*)cmd_ptr;
+		if (lc->cmd != LC_SEGMENT_64) {
+			cmd_ptr += lc->cmdsize;
+			continue;
+		}
+
+		struct segment_command_64* seg = (struct segment_command_64*)lc;
+		uintptr_t seg_start = seg->vmaddr + machismo_load_results.slide;
+		uintptr_t seg_end = seg_start + seg->vmsize;
+		if (address < seg_start || address >= seg_end) {
+			cmd_ptr += lc->cmdsize;
+			continue;
+		}
+
+		const char* section_name = "<none>";
+		uint64_t section_fileoff = seg->fileoff + (address - seg_start);
+		struct section_64* sect = (struct section_64*)(seg + 1);
+		for (uint32_t section_index = 0; section_index < seg->nsects; section_index++, sect++) {
+			uintptr_t section_start = sect->addr + machismo_load_results.slide;
+			uintptr_t section_end = section_start + sect->size;
+			if (address >= section_start && address < section_end) {
+				section_name = sect->sectname;
+				section_fileoff = sect->offset + (address - section_start);
+				break;
+			}
+		}
+
+		uint32_t insn = 0;
+		if ((address & 3u) == 0 && address + sizeof(insn) <= seg_end)
+			insn = *(uint32_t*)address;
+
+		fprintf(stderr,
+		        "machgate: guest context %s=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x\n",
+		        label ? label : "address", (void*)address,
+		        (unsigned long)(address - machismo_load_results.slide),
+		        16, seg->segname, 16, section_name,
+		        (unsigned long long)section_fileoff, insn);
+		return;
+	}
+
+	fprintf(stderr, "machgate: guest context %s=%p outside main Mach-O image\n",
+	        label ? label : "address", (void*)address);
+}
 
 static size_t align_page_size(size_t size)
 {

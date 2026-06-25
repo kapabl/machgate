@@ -66,6 +66,7 @@ static const char* shim_trace_path(const char* path);
 static char* getenv_from_guest_envp(const char* name);
 static int shim_errno_from_linux(int linux_errno);
 static int translate_oflags(int darwin_flags);
+static void trace_guest_address_context(const char* label, uintptr_t address);
 static pid_t machgate_shim_process_pid;
 static int shim_last_wait_valid;
 static pid_t shim_last_wait_owner_pid;
@@ -6731,6 +6732,22 @@ static int shim_signal_trace_enabled(void)
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
+static void trace_guest_address_context(const char* label, uintptr_t address)
+{
+	typedef void (*trace_guest_address_fn)(const char*, uintptr_t);
+	static trace_guest_address_fn trace_guest_address;
+	static int looked_up;
+
+	if (!looked_up) {
+		trace_guest_address = (trace_guest_address_fn)dlsym(
+			RTLD_DEFAULT, "machgate_trace_guest_address");
+		looked_up = 1;
+	}
+
+	if (trace_guest_address)
+		trace_guest_address(label, address);
+}
+
 static int shim_wait_trace_enabled(void)
 {
 	const char* value = getenv("MACHGATE_TRACE_WAIT");
@@ -8201,12 +8218,14 @@ static uintptr_t trace_ucontext_reg(void* ucontext, int reg)
 static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 {
 	if (shim_signal_trace_enabled()) {
+		uintptr_t pc = trace_ucontext_pc(ucontext);
+		uintptr_t lr = trace_ucontext_reg(ucontext, 30);
 		fprintf(stderr,
 		        "libsystem_shim: guest signal signum=%d darwin=%d code=%d addr=%p pc=%p lr=%p sp=%p fp=%p\n",
 		        signum, linux_signal_to_darwin(signum), info ? info->si_code : 0,
 		        info ? info->si_addr : NULL,
-		        (void*)trace_ucontext_pc(ucontext),
-		        (void*)trace_ucontext_reg(ucontext, 30),
+		        (void*)pc,
+		        (void*)lr,
 		        (void*)trace_ucontext_sp(ucontext),
 		        (void*)trace_ucontext_reg(ucontext, 29));
 		fprintf(stderr,
@@ -8221,6 +8240,10 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		        (void*)trace_ucontext_reg(ucontext, 7),
 		        (void*)trace_ucontext_reg(ucontext, 8),
 			        (void*)trace_ucontext_reg(ucontext, 16));
+		trace_guest_address_context("signal.pc", pc);
+		trace_guest_address_context("signal.lr", lr);
+		if (lr >= 4)
+			trace_guest_address_context("signal.lr-4", lr - 4);
 	}
 
 	if (signum > 0 && signum < _NSIG) {
