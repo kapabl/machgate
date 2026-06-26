@@ -699,6 +699,25 @@ Diagnostic improvement added after this trace:
 - For `signal.lr-4`, MachGate prints a small instruction window around the
   indirect branch. This should show the load/move/call sequence that produced
   the NULL `x8` target.
+- The decoded sequence for the private trace is:
+
+  ```text
+  0x1008a268c: adrp x8, 0x100d92000
+  0x1008a2694: ldr  x8, [x8, #0x1a8]
+  0x1008a2698: mov  w0, #0x80000
+  0x1008a269c: blr  x8
+  ```
+
+  The indirect target is loaded from slot `0x100d921a8`; at the crash, that
+  slot contains NULL. This is stronger evidence for an unfilled or wrongly
+  filled bind/lazy pointer slot than for the branch patcher randomly clobbering
+  `x8`.
+- A resolver bind-slot registry now records which Mach-O import/bind populated
+  each slot. Signal diagnostics decode the `adrp`/`ldr`/`blr` pattern and print
+  a new `indirect-slot` line with bind symbol, lookup name, dylib, resolver
+  context, resolved address, and source.
+- `MACHGATE_TRACE_BINDINGS=all` prints every resolver bind when a full import
+  dump is needed.
 
 Expected next private run output shape:
 
@@ -706,6 +725,7 @@ Expected next private run output shape:
 machgate: guest context signal.lr-4=0x... vmaddr=0x... symbol=<name>+0x... segment=__TEXT section=__text fileoff=0x... insn=0xd63f0100
 machgate: guest context signal.lr-4 window   0x... vmaddr=0x... fileoff=0x... insn=0x...
 machgate: guest context signal.lr-4 window > 0x... vmaddr=0x... fileoff=0x... insn=0xd63f0100
+machgate: guest context signal.lr-4 indirect-slot x8 slot=0x... value=0x... bind='<symbol>' lookup='<name>' dylib='<dylib>' context='<resolver-path>' resolved=0x... source='<source>' path='<path>'
 ```
 
 Interpretation rule for the next loop:

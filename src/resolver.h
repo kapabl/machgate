@@ -37,4 +37,18 @@ uintptr_t resolver_lookup_symbol(void* mh, uintptr_t slide, const char* name);
 int resolver_symbol_extent(void* mh, uintptr_t slide, const char* name,
                            uintptr_t* out_start, uintptr_t* out_end);
 
+struct resolver_bind_slot_info {
+	uintptr_t slot_addr;
+	uintptr_t resolved;
+	const char* context;
+	const char* sym_name;
+	const char* lookup_name;
+	const char* dylib_name;
+	const char* source_kind;
+	const char* source_path;
+};
+
+int resolver_lookup_bind_slot(uintptr_t slot_addr,
+                              struct resolver_bind_slot_info* out_info);
+
 #endif /* _RESOLVER_H_ */

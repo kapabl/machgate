@@ -406,6 +406,62 @@ struct resolver_state {
 	int rebases_applied;
 };
 
+#define BIND_SLOT_REGISTRY_MAX 32768
+
+static struct resolver_bind_slot_info bind_slot_registry[BIND_SLOT_REGISTRY_MAX];
+static int bind_slot_registry_count;
+
+static void register_bind_slot(const char* context,
+                               const char* sym_name,
+                               const char* lookup_name,
+                               const struct dylib_entry* de,
+                               uintptr_t slot_addr,
+                               uintptr_t resolved,
+                               const char* source_kind,
+                               const char* source_path)
+{
+	if (!slot_addr)
+		return;
+
+	struct resolver_bind_slot_info* info = NULL;
+	for (int i = bind_slot_registry_count - 1; i >= 0; i--) {
+		if (bind_slot_registry[i].slot_addr == slot_addr) {
+			info = &bind_slot_registry[i];
+			break;
+		}
+	}
+
+	if (!info) {
+		if (bind_slot_registry_count >= BIND_SLOT_REGISTRY_MAX)
+			return;
+		info = &bind_slot_registry[bind_slot_registry_count++];
+	}
+
+	info->slot_addr = slot_addr;
+	info->resolved = resolved;
+	info->context = context;
+	info->sym_name = sym_name;
+	info->lookup_name = lookup_name;
+	info->dylib_name = de ? de->name : NULL;
+	info->source_kind = source_kind;
+	info->source_path = source_path;
+}
+
+int resolver_lookup_bind_slot(uintptr_t slot_addr,
+                              struct resolver_bind_slot_info* out_info)
+{
+	if (!slot_addr || !out_info)
+		return -1;
+
+	for (int i = bind_slot_registry_count - 1; i >= 0; i--) {
+		if (bind_slot_registry[i].slot_addr == slot_addr) {
+			*out_info = bind_slot_registry[i];
+			return 0;
+		}
+	}
+	return -1;
+}
+
 static const char* dylib_action_name(enum dylib_action action)
 {
 	switch (action) {
@@ -443,12 +499,16 @@ static int trace_bindings_enabled(void)
 {
 	const char* trace_bindings = getenv("MACHGATE_TRACE_BINDINGS");
 	const char* trace_shim = getenv("MACHGATE_TRACE_SHIM");
-	return (trace_bindings && strcmp(trace_bindings, "1") == 0) ||
+	return (trace_bindings && trace_bindings[0] && strcmp(trace_bindings, "0") != 0) ||
 	       (trace_shim && strcmp(trace_shim, "1") == 0);
 }
 
 static int trace_binding_symbol(const char* lookup_name)
 {
+	const char* trace_bindings = getenv("MACHGATE_TRACE_BINDINGS");
+	if (trace_bindings && strcmp(trace_bindings, "all") == 0)
+		return 1;
+
 	return strcmp(lookup_name, "mmap") == 0 ||
 	       strcmp(lookup_name, "munmap") == 0 ||
 	       strcmp(lookup_name, "readlink") == 0 ||
@@ -469,6 +529,9 @@ static void trace_target_binding(const char* context,
                                  const char* source_kind,
                                  const char* source_path)
 {
+	register_bind_slot(context, sym_name, lookup_name, de, slot_addr, resolved,
+	                   source_kind, source_path);
+
 	if (!trace_bindings_enabled() || !trace_binding_symbol(lookup_name))
 		return;
 

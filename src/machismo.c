@@ -116,6 +116,96 @@ char** __machismo_guest_argv = NULL;
 char** __machismo_guest_envp = NULL;
 const char* __machismo_guest_executable_path = NULL;
 
+static int sign_extend_int(uint32_t value, int bits)
+{
+	uint32_t sign = 1u << (bits - 1);
+	return (int)((value ^ sign) - sign);
+}
+
+static int decode_adrp(uintptr_t pc, uint32_t insn, int* out_reg,
+                       uintptr_t* out_page)
+{
+	if ((insn & 0x9f000000u) != 0x90000000u)
+		return 0;
+
+	uint32_t immlo = (insn >> 29) & 0x3u;
+	uint32_t immhi = (insn >> 5) & 0x7ffffu;
+	int imm_pages = sign_extend_int((immhi << 2) | immlo, 21);
+	*out_reg = (int)(insn & 0x1fu);
+	*out_page = (pc & ~(uintptr_t)0xfffu) + ((intptr_t)imm_pages << 12);
+	return 1;
+}
+
+static int decode_ldr_x_unsigned(uint32_t insn, int* out_rt, int* out_rn,
+                                 uint32_t* out_offset)
+{
+	if ((insn & 0xffc00000u) != 0xf9400000u)
+		return 0;
+
+	*out_rt = (int)(insn & 0x1fu);
+	*out_rn = (int)((insn >> 5) & 0x1fu);
+	*out_offset = ((insn >> 10) & 0xfffu) * 8u;
+	return 1;
+}
+
+static void print_indirect_bind_slot_context(const char* label,
+                                             uintptr_t call_site,
+                                             uintptr_t window_start)
+{
+	uint32_t branch = *(uint32_t*)call_site;
+	if ((branch & 0xfffffc1fu) != 0xd63f0000u)
+		return;
+
+	int branch_reg = (int)((branch >> 5) & 0x1f);
+	uintptr_t slot_addr = 0;
+	uintptr_t slot_value = 0;
+
+	for (uintptr_t ldr_pc = call_site; ldr_pc > window_start; ldr_pc -= 4) {
+		int rt = 0;
+		int rn = 0;
+		uint32_t offset = 0;
+		uint32_t ldr = *(uint32_t*)(ldr_pc - 4);
+		if (!decode_ldr_x_unsigned(ldr, &rt, &rn, &offset) || rt != branch_reg)
+			continue;
+
+		for (uintptr_t adrp_pc = ldr_pc - 4; adrp_pc >= window_start + 4; adrp_pc -= 4) {
+			int adrp_reg = 0;
+			uintptr_t page = 0;
+			uint32_t adrp = *(uint32_t*)(adrp_pc - 4);
+			if (!decode_adrp(adrp_pc - 4, adrp, &adrp_reg, &page) ||
+			    adrp_reg != rn)
+				continue;
+
+			slot_addr = page + offset;
+			slot_value = *(uintptr_t*)slot_addr;
+			goto found_slot;
+		}
+	}
+
+	return;
+
+found_slot:
+	{
+		struct resolver_bind_slot_info info = {0};
+		if (resolver_lookup_bind_slot(slot_addr, &info) == 0) {
+			fprintf(stderr,
+			        "machgate: guest context %s indirect-slot x%d slot=%p value=%p bind='%s' lookup='%s' dylib='%s' context='%s' resolved=%p source='%s' path='%s'\n",
+			        label, branch_reg, (void*)slot_addr, (void*)slot_value,
+			        info.sym_name ? info.sym_name : "(unknown)",
+			        info.lookup_name ? info.lookup_name : "(unknown)",
+			        info.dylib_name ? info.dylib_name : "(none)",
+			        info.context ? info.context : "(unknown)",
+			        (void*)info.resolved,
+			        info.source_kind ? info.source_kind : "(unknown)",
+			        info.source_path ? info.source_path : "(unknown)");
+		} else {
+			fprintf(stderr,
+			        "machgate: guest context %s indirect-slot x%d slot=%p value=%p bind=(unrecorded)\n",
+			        label, branch_reg, (void*)slot_addr, (void*)slot_value);
+		}
+	}
+}
+
 void machgate_trace_guest_address(const char* label, uintptr_t address)
 {
 	if (!address) {
@@ -199,6 +289,7 @@ void machgate_trace_guest_address(const char* label, uintptr_t address)
 				        (unsigned long long)cursor_fileoff,
 				        *(uint32_t*)cursor);
 			}
+			print_indirect_bind_slot_context(label, address, window_start);
 		}
 		return;
 	}
