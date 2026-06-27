@@ -217,6 +217,88 @@ static void print_nearest_section_symbol(const char* label,
 	}
 }
 
+static int trace_cxx_init_enabled(void)
+{
+	const char* value = getenv_compat("MACHGATE_TRACE_CXX_INIT",
+	                                  "MACHISMO_TRACE_CXX_INIT");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static uintptr_t find_main_defined_symbol(const char* name)
+{
+	struct mach_header_64* header = (struct mach_header_64*)machgate_load_results.mh;
+	struct symtab_command* symtab = NULL;
+	struct segment_command_64* linkedit = NULL;
+	uint8_t* cmds;
+	uint32_t offset = 0;
+
+	if (!header || !name)
+		return 0;
+
+	cmds = (uint8_t*)(header + 1);
+	for (uint32_t i = 0; i < header->ncmds && offset < header->sizeofcmds; i++) {
+		struct load_command* lc = (struct load_command*)(cmds + offset);
+		if (lc->cmd == LC_SYMTAB)
+			symtab = (struct symtab_command*)lc;
+		else if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			if (strncmp(seg->segname, "__LINKEDIT", 16) == 0)
+				linkedit = seg;
+		}
+		offset += lc->cmdsize;
+	}
+
+	if (!symtab || !linkedit)
+		return 0;
+
+	uintptr_t linkedit_base = machgate_load_results.slide + linkedit->vmaddr -
+	                          linkedit->fileoff;
+	struct nlist_64* syms = (struct nlist_64*)(linkedit_base + symtab->symoff);
+	const char* strtab = (const char*)(linkedit_base + symtab->stroff);
+
+	for (uint32_t i = 0; i < symtab->nsyms; i++) {
+		struct nlist_64* sym = &syms[i];
+		if ((sym->n_type & N_TYPE) != N_SECT || sym->n_strx >= symtab->strsize)
+			continue;
+		if (strcmp(strtab + sym->n_strx, name) == 0)
+			return (uintptr_t)(sym->n_value + machgate_load_results.slide);
+	}
+
+	return 0;
+}
+
+static void trace_merged_globals_words(const char* phase, const char* kind,
+                                       int index, int total,
+                                       uintptr_t initializer)
+{
+	static int missing_logged;
+	uintptr_t address;
+	uint64_t* words;
+
+	if (!trace_cxx_init_enabled())
+		return;
+
+	address = find_main_defined_symbol("__MergedGlobals");
+	if (!address)
+		address = find_main_defined_symbol("___MergedGlobals");
+	if (!address) {
+		if (!missing_logged) {
+			fprintf(stderr,
+			        "machgate: cxx-init trace: __MergedGlobals symbol not found\n");
+			missing_logged = 1;
+		}
+		return;
+	}
+
+	words = (uint64_t*)address;
+	fprintf(stderr,
+	        "machgate: cxx-init %s kind=%s index=%d/%d initializer=%p __MergedGlobals=%p words=[%#llx %#llx %#llx %#llx %#llx %#llx]\n",
+	        phase, kind, index, total, (void*)initializer, (void*)address,
+	        (unsigned long long)words[0], (unsigned long long)words[1],
+	        (unsigned long long)words[2], (unsigned long long)words[3],
+	        (unsigned long long)words[4], (unsigned long long)words[5]);
+}
+
 static void print_data_address_symbol_context(const char* label,
                                               uintptr_t address)
 {
@@ -1558,8 +1640,10 @@ static void call_dyld_initializer(struct load_results* lr, const char* kind,
 		fprintf(stderr, "machgate: %s[%d/%d] at 0x%lx\n",
 		        log_kind, index, total, func_addr);
 	note_init_context(kind, index, total, func_addr);
+	trace_merged_globals_words("before", kind, index, total, func_addr);
 	machgate_call_guest_initializer(func_addr, (int)lr->argc, lr->argv,
 	                                lr->envp, lr->applep, lr->stack_top);
+	trace_merged_globals_words("after", kind, index, total, func_addr);
 	clear_init_context();
 }
 

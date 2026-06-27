@@ -55,6 +55,7 @@ extern char **environ;
 
 static int shim_hw_ncpu(void);
 static int shim_trace_enabled(void);
+static int shim_cxx_init_trace_enabled(void);
 static int shim_delta_vm_trace_enabled(void);
 static int shim_wait_trace_enabled(void);
 static int shim_host_sigchld_handler_enabled(void);
@@ -5952,18 +5953,33 @@ void __cxa_finalize(void* dso_handle)
 int __cxa_guard_acquire(uint64_t* guard)
 {
 	unsigned char* bytes = (unsigned char*)guard;
+	int initialized;
+	int in_use;
 
 	if (!guard)
 		return 0;
-	if (__atomic_load_n(&bytes[0], __ATOMIC_ACQUIRE))
+	initialized = __atomic_load_n(&bytes[0], __ATOMIC_ACQUIRE);
+	in_use = __atomic_load_n(&bytes[1], __ATOMIC_ACQUIRE);
+	if (shim_cxx_init_trace_enabled()) {
+		fprintf(stderr,
+		        "libsystem_shim: __cxa_guard_acquire guard=%p value=%#llx initialized=%d in_use=%#x caller=%p\n",
+		        guard, (unsigned long long)*guard, initialized, in_use,
+		        __builtin_return_address(0));
+		trace_guest_address_context("__cxa_guard_acquire.caller",
+		                            (uintptr_t)__builtin_return_address(0));
+	}
+	if (initialized)
 		return 0;
-	if (__atomic_load_n(&bytes[1], __ATOMIC_ACQUIRE) & 0x02) {
+	if (in_use & 0x02) {
 		fprintf(stderr, "libsystem_shim: recursive __cxa_guard_acquire(%p)\n",
 		        guard);
 		abort();
 	}
 	bytes[1] = 0x02;
 	__sync_synchronize();
+	if (shim_cxx_init_trace_enabled())
+		fprintf(stderr, "libsystem_shim: __cxa_guard_acquire guard=%p -> run initializer\n",
+		        guard);
 	return 1;
 }
 
@@ -5975,6 +5991,10 @@ void __cxa_guard_release(uint64_t* guard)
 		return;
 	__atomic_store_n(&bytes[0], 0x01, __ATOMIC_RELEASE);
 	__atomic_store_n(&bytes[1], 0x01, __ATOMIC_RELEASE);
+	if (shim_cxx_init_trace_enabled())
+		fprintf(stderr, "libsystem_shim: __cxa_guard_release guard=%p value=%#llx caller=%p\n",
+		        guard, (unsigned long long)*guard,
+		        __builtin_return_address(0));
 }
 
 void __cxa_guard_abort(uint64_t* guard)
@@ -5984,6 +6004,10 @@ void __cxa_guard_abort(uint64_t* guard)
 	if (!guard)
 		return;
 	__atomic_store_n(&bytes[1], 0x00, __ATOMIC_RELEASE);
+	if (shim_cxx_init_trace_enabled())
+		fprintf(stderr, "libsystem_shim: __cxa_guard_abort guard=%p value=%#llx caller=%p\n",
+		        guard, (unsigned long long)*guard,
+		        __builtin_return_address(0));
 }
 
 static void trace_process_exit_code(const char* name, int status, void* caller)
@@ -6795,6 +6819,12 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 static int shim_trace_enabled(void)
 {
 	const char* value = getenv("MACHGATE_TRACE_SHIM");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static int shim_cxx_init_trace_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_CXX_INIT");
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 

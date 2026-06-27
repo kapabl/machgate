@@ -973,3 +973,20 @@ Rejected or not appended:
 | conda-forge `boost-cpp-1.84.0-hf7f88b1_7.conda` | Current package is compatibility metadata/license only; no Boost.Test binary. |
 | conda-forge `llvm-tools-22` `FileCheck`, `split-file`, `llvm-lit` | `llvm-tools-22` contains many versioned LLVM tool binaries, but archive inspection found no `FileCheck`, `split-file`, or `llvm-lit` payload. |
 | GitHub `LLVM-22.1.8-macOS-ARM64.tar.xz` | Release asset exists with attested SHA-256 `f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f`, but the archive is about `1.48 GiB`; bounded stream inspection timed out before confirming `FileCheck`/`split-file` paths, so no row was appended. |
+
+## v0.3.17 C++ Init Diagnostic
+
+`v0.3.16` fixed a real loader-contract issue by running Mach-O initializers on
+the guest stack, but the private Catch2 binary still reports the same
+`__MergedGlobals + 0x10` libc++ tree insert fault. That proves guest-stack
+discipline was not the failing invariant for this specific object.
+
+`v0.3.17` adds opt-in diagnostics behind `MACHGATE_TRACE_CXX_INIT=1`:
+
+- loader-side `__MergedGlobals` word dumps before and after each initializer
+- shim-side `__cxa_guard_acquire`, `__cxa_guard_release`, and
+  `__cxa_guard_abort` logs, including guard value and guest caller context
+
+The next private run should answer whether the storage is never constructed,
+constructed and later zeroed, or guarded as already initialized before its
+constructor runs.

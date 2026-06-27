@@ -27,10 +27,10 @@ for real command-line workloads:
 - loop-engineered external corpus testing against real public macOS ARM64
   binaries
 
-Current release: **v0.3.16**
+Current release: **v0.3.17**
 
-- GitHub release: <https://github.com/kapabl/machgate/releases/tag/v0.3.16>
-- Download: `machgate-0.3.16-linux-arm64.tar.gz`
+- GitHub release: <https://github.com/kapabl/machgate/releases/tag/v0.3.17>
+- Download: `machgate-0.3.17-linux-arm64.tar.gz`
 - Latest validation:
   - 57 / 57 original external ARM64 macOS CLI probes pass
   - 13 / 13 Rust expansion probes pass
@@ -199,7 +199,7 @@ By default the script downloads the latest GitHub release. To pin a specific
 release:
 
 ```bash
-MACHGATE_VERSION=0.3.16 scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_VERSION=0.3.17 scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 To run with a local Linux ARM64 MachGate build or unpacked release instead of
@@ -216,19 +216,26 @@ MACHGATE_LOCAL_DIR=/path/to/machgate-arm64-dir scripts/run-macho-docker.sh /path
 To run with a local release tarball instead of downloading from GitHub:
 
 ```bash
-MACHGATE_TARBALL=/path/to/machgate-0.3.16-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_TARBALL=/path/to/machgate-0.3.17-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 To diagnose startup hangs in static constructors, enable LC_MAIN tracing:
 
 ```bash
-MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.16-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.17-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+```
+
+To diagnose C++ static-initializer ordering or guarded-local-static failures,
+enable the C++ initializer trace:
+
+```bash
+MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TRACE_SIGNALS=1 MACHGATE_TRACE_CXX_INIT=1 MACHGATE_TARBALL=/path/to/machgate-0.3.17-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 To stop a stuck guest after a fixed interval while keeping live logs:
 
 ```bash
-MACHGATE_TIMEOUT=120 MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.16-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_TIMEOUT=120 MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.17-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 Pass any guest arguments after the binary path:
@@ -322,6 +329,7 @@ Carbon = SKIP
 | `MACHGATE_TRACE_SYSCALL` | Trace selected Darwin syscall gateway activity |
 | `MACHGATE_TRACE_WAIT` | Trace wait/exit process status translation |
 | `MACHGATE_TRACE_SIGNALS` | Trace signal shim translation paths |
+| `MACHGATE_TRACE_CXX_INIT` | Trace C++ initializer guards and `__MergedGlobals` state |
 | `MACHGATE_EXTERNAL_MAP_LIBCXX` | Enable external-test libc++ mapping |
 | `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER` | Diagnostic opt-in for installing the host Linux SIGCHLD handler |
 
