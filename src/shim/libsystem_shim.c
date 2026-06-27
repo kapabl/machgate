@@ -5936,6 +5936,56 @@ int atexit(void (*function)(void))
 	return 0;
 }
 
+int __cxa_atexit(void (*function)(void*), void* arg, void* dso_handle)
+{
+	(void)function;
+	(void)arg;
+	(void)dso_handle;
+	return 0;
+}
+
+void __cxa_finalize(void* dso_handle)
+{
+	(void)dso_handle;
+}
+
+int __cxa_guard_acquire(uint64_t* guard)
+{
+	unsigned char* bytes = (unsigned char*)guard;
+
+	if (!guard)
+		return 0;
+	if (__atomic_load_n(&bytes[0], __ATOMIC_ACQUIRE))
+		return 0;
+	if (__atomic_load_n(&bytes[1], __ATOMIC_ACQUIRE) & 0x02) {
+		fprintf(stderr, "libsystem_shim: recursive __cxa_guard_acquire(%p)\n",
+		        guard);
+		abort();
+	}
+	bytes[1] = 0x02;
+	__sync_synchronize();
+	return 1;
+}
+
+void __cxa_guard_release(uint64_t* guard)
+{
+	unsigned char* bytes = (unsigned char*)guard;
+
+	if (!guard)
+		return;
+	__atomic_store_n(&bytes[0], 0x01, __ATOMIC_RELEASE);
+	__atomic_store_n(&bytes[1], 0x01, __ATOMIC_RELEASE);
+}
+
+void __cxa_guard_abort(uint64_t* guard)
+{
+	unsigned char* bytes = (unsigned char*)guard;
+
+	if (!guard)
+		return;
+	__atomic_store_n(&bytes[1], 0x00, __ATOMIC_RELEASE);
+}
+
 static void trace_process_exit_code(const char* name, int status, void* caller)
 {
 	FILE* trace_file = shim_open_trace_file();

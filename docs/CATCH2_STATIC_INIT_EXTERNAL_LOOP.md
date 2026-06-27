@@ -806,6 +806,29 @@ Fix staged after this trace:
 - The verbose log preserves the existing `mod_init[i/N]` / `init[i/N]` labels
   so private traces remain comparable.
 
+`v0.3.9` did not move the private trace; it still faults in the same libc++
+tree insert with `__begin_node_ == NULL`. The remaining high-confidence
+runtime gap for this shape is C++ guarded function-local static initialization:
+
+- A registry implemented as a function-local static `std::set<std::string>` is
+  compiled around `__cxa_guard_acquire`, `__cxa_guard_release`, and
+  `__cxa_guard_abort`.
+- If the guard path incorrectly reports "already initialized" before the
+  constructor runs, the compiler will skip constructing the tree and then use
+  zero-filled storage, matching the observed `__begin_node_ == NULL` crash.
+- MachGate's shim previously did not export this C++ ABI guard surface.
+
+Fix staged after this trace:
+
+- Export single-thread-target `__cxa_guard_acquire`, `__cxa_guard_release`,
+  and `__cxa_guard_abort` from `libsystem_shim`.
+- Export no-op success `__cxa_atexit` and no-op `__cxa_finalize`, because the
+  same static initialization path often registers destructors after successful
+  construction.
+- The guard implementation follows the Itanium/Darwin byte layout: byte `0`
+  is set only after successful release; byte `1` tracks pending/completed
+  initialization for the current single guest thread.
+
 Expected next private run output shape:
 
 ```text
