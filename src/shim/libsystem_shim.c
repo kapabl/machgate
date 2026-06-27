@@ -10679,6 +10679,26 @@ void *shim_realloc(void *ptr, size_t size)
 	return new_ptr;
 }
 
+void* machgate_shim_malloc(size_t size)
+{
+	return shim_malloc(size);
+}
+
+void* machgate_shim_calloc(size_t count, size_t size)
+{
+	return shim_calloc(count, size);
+}
+
+void* machgate_shim_realloc(void* ptr, size_t size)
+{
+	return shim_realloc(ptr, size);
+}
+
+void machgate_shim_free(void* ptr)
+{
+	shim_free(ptr);
+}
+
 void* malloc_zone_malloc(void* zone, size_t size)
 {
 	(void)zone;

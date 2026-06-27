@@ -733,6 +733,43 @@ Diagnostic improvement added after this trace:
 - `MACHGATE_TRACE_BINDINGS=all` prints every resolver bind when a full import
   dump is needed.
 
+`v0.3.7` private trace resolved the slot identity:
+
+```text
+machgate: guest context signal.lr-4 data-symbol slot=0x100d921a8 section-ordinal=30 symbol='_libc_default_malloc'+0x0 symbol-vmaddr=0x100d921a8 next='_libc_default_calloc' next-delta=0x8
+```
+
+Conclusion:
+
+- The NULL `blr x8` target is `_libc_default_malloc`, a statically linked
+  Darwin libc/libmalloc default allocator function-pointer slot in
+  `__DATA,__common`.
+- The crashing constructor path is inside
+  `_ZN11RomemThread6createERS_PFPvS1_ES1_`, which loads
+  `_libc_default_malloc`, moves `0x80000` into `w0`, then calls the function
+  pointer.
+- This is not an instruction-boundary patch bug, not x8 clobbering by the
+  syscall gateway, and not an imported lazy-bind slot. It is guest runtime data
+  that should have been initialized before constructors.
+- On macOS, dyld/libSystem/libmalloc startup initializes this allocator default
+  surface before user `__mod_init_func` entries run. MachGate previously
+  recreated the loader/fixup path but did not initialize the statically linked
+  Darwin libc allocator defaults.
+
+Fix staged after this trace:
+
+- Export explicit shim allocator entry points:
+  `machgate_shim_malloc`, `machgate_shim_calloc`,
+  `machgate_shim_realloc`, and `machgate_shim_free`.
+- Before guest static constructors, look up guest symbols
+  `_libc_default_malloc`, `_libc_default_calloc`,
+  `_libc_default_realloc`, and `_libc_default_free`.
+- If any slot exists and is still NULL, patch it to the corresponding shim
+  allocator function and log the patch.
+- This is intentionally narrower than full libmalloc initialization. It covers
+  the proven Darwin libc default allocator slots while leaving binaries that do
+  not contain those symbols untouched.
+
 Expected next private run output shape:
 
 ```text

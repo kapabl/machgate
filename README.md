@@ -19,14 +19,14 @@ missing production path for CLI tools:
 - host/glibc VM interposition for runtime paths that bypass imported symbols
 - external CLI corpus testing against real public macOS ARM64 binaries
 
-Current release: **v0.3.7**
+Current release: **v0.3.8**
 
-- GitHub release: <https://github.com/kapabl/machgate/releases/tag/v0.3.7>
-- Download: `machgate-0.3.7-linux-arm64.tar.gz`
+- GitHub release: <https://github.com/kapabl/machgate/releases/tag/v0.3.8>
+- Download: `machgate-0.3.8-linux-arm64.tar.gz`
 - Latest validation:
   - 57 / 57 original external ARM64 macOS CLI probes pass
   - 13 / 13 Rust expansion probes pass
-  - 28 / 28 ARM64 unit tests pass
+  - 29 / 29 ARM64 unit tests pass
 
 Based on components from the [Darling](https://github.com/darlinghq/darling)
 project, extracted and adapted for standalone use.
@@ -183,7 +183,7 @@ By default the script downloads the latest GitHub release. To pin a specific
 release:
 
 ```bash
-MACHGATE_VERSION=0.3.7 scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_VERSION=0.3.8 scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 To run with a local Linux ARM64 MachGate build or unpacked release instead of
@@ -200,19 +200,19 @@ MACHGATE_LOCAL_DIR=/path/to/machgate-arm64-dir scripts/run-macho-docker.sh /path
 To run with a local release tarball instead of downloading from GitHub:
 
 ```bash
-MACHGATE_TARBALL=/path/to/machgate-0.3.7-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_TARBALL=/path/to/machgate-0.3.8-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 To diagnose startup hangs in static constructors, enable LC_MAIN tracing:
 
 ```bash
-MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.7-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.8-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 To stop a stuck guest after a fixed interval while keeping live logs:
 
 ```bash
-MACHGATE_TIMEOUT=120 MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.7-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_TIMEOUT=120 MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.8-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 Pass any guest arguments after the binary path:

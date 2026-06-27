@@ -62,6 +62,7 @@ static void load64(int fd, bool expect_dylinker, struct load_results* lr);
 static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
 static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
 static void fixup_darwin_pthread_data(struct load_results* lr);
+static void fixup_darwin_libc_allocator_defaults(struct load_results* lr);
 static void setup_tlv_image(struct load_results* lr);
 static int native_prot(int prot);
 static void setup_space(struct load_results* lr, bool is_64_bit);
@@ -895,6 +896,7 @@ int main(int argc, char** argv, char** envp)
 	 * locks down pages (the pthread scan reads all writable segments). */
 	if (machismo_load_results.mh) {
 		fixup_darwin_pthread_data(&machismo_load_results);
+		fixup_darwin_libc_allocator_defaults(&machismo_load_results);
 		setup_tlv_image(&machismo_load_results);
 	}
 
@@ -1325,6 +1327,72 @@ static void fixup_darwin_pthread_data(struct load_results* lr) {
 
 	if (fixed > 0)
 		fprintf(stderr, "machgate: fixed %d macOS pthread objects in __DATA\n", fixed);
+}
+
+static int write_pointer_slot(uintptr_t slot, uintptr_t value)
+{
+	uintptr_t page = PAGE_ALIGN(slot);
+	if (mprotect((void*)page, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0) {
+		fprintf(stderr, "machgate: WARNING: cannot make slot 0x%lx writable: %s\n",
+		        slot, strerror(errno));
+		return 0;
+	}
+
+	*(uintptr_t*)slot = value;
+	return 1;
+}
+
+static int fixup_darwin_allocator_slot(struct load_results* lr,
+                                       const char* slot_name,
+                                       const char* shim_name)
+{
+	uintptr_t slot = resolver_lookup_symbol((void*)lr->mh, lr->slide, slot_name);
+	if (!slot)
+		return 0;
+
+	void* replacement = dlsym(RTLD_DEFAULT, shim_name);
+	if (!replacement) {
+		fprintf(stderr, "machgate: WARNING: found %s at 0x%lx but cannot resolve %s\n",
+		        slot_name, slot, shim_name);
+		return 0;
+	}
+
+	uintptr_t current = *(uintptr_t*)slot;
+	if (current) {
+		if (machismo_verbose)
+			fprintf(stderr, "machgate: Darwin allocator default %s already 0x%lx\n",
+			        slot_name, current);
+		return 0;
+	}
+
+	if (!write_pointer_slot(slot, (uintptr_t)replacement))
+		return 0;
+
+	fprintf(stderr, "machgate: Darwin allocator default %s -> %p\n",
+	        slot_name, replacement);
+	return 1;
+}
+
+static void fixup_darwin_libc_allocator_defaults(struct load_results* lr)
+{
+	static const struct {
+		const char* slot_name;
+		const char* shim_name;
+	} slots[] = {
+		{ "_libc_default_malloc", "machgate_shim_malloc" },
+		{ "_libc_default_calloc", "machgate_shim_calloc" },
+		{ "_libc_default_realloc", "machgate_shim_realloc" },
+		{ "_libc_default_free", "machgate_shim_free" },
+	};
+	int fixed = 0;
+
+	for (size_t index = 0; index < sizeof(slots) / sizeof(slots[0]); index++)
+		fixed += fixup_darwin_allocator_slot(lr, slots[index].slot_name,
+		                                     slots[index].shim_name);
+
+	if (fixed > 0)
+		fprintf(stderr, "machgate: initialized %d Darwin libc allocator defaults\n",
+		        fixed);
 }
 
 /*

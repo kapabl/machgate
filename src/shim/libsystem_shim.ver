@@ -371,4 +371,8 @@ GLIBC_2.17 {
         sigsetjmp;
         machgate_darwin_fcntl_fixed;
         machgate_darwin_ioctl_fixed;
+        machgate_shim_malloc;
+        machgate_shim_calloc;
+        machgate_shim_realloc;
+        machgate_shim_free;
 };
