@@ -113,6 +113,13 @@ if(BUILD_TESTS)
     target_compile_options(test_necrolevel_rng PRIVATE -Wall -O2 -g)
     target_compile_definitions(test_necrolevel_rng PRIVATE _GNU_SOURCE)
     target_link_libraries(test_necrolevel_rng PRIVATE dl m)
+
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        add_executable(test_libcxx_tree_repair tests/test_libcxx_tree_repair.c)
+        target_compile_options(test_libcxx_tree_repair PRIVATE -Wall -O2 -g)
+        target_compile_definitions(test_libcxx_tree_repair PRIVATE _GNU_SOURCE)
+        target_link_libraries(test_libcxx_tree_repair PRIVATE dl)
+    endif()
 endif()
 
 # --- per-game shim libraries (libgame_patches, libsugar_patches_*, pcm_cache_write) ---

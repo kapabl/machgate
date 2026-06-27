@@ -873,19 +873,47 @@ Fix staged after this trace:
 - Keep the focused memory-word dump for `x0.tree`, `x1.child-slot`, and
   `x2.child-slot`.
 
-Expected next private run output shape:
+`v0.3.12` confirmed the exact object and field state:
 
 ```text
-machgate: guest context signal.lr-4=0x... vmaddr=0x... symbol=<name>+0x... segment=__TEXT section=__text fileoff=0x... insn=0xd63f0100
-machgate: guest context signal.lr-4 window   0x... vmaddr=0x... fileoff=0x... insn=0x...
-machgate: guest context signal.lr-4 window > 0x... vmaddr=0x... fileoff=0x... insn=0xd63f0100
-machgate: guest context signal.lr-4 indirect-slot x8 slot=0x... value=0x... bind='<symbol>' lookup='<name>' dylib='<dylib>' context='<resolver-path>' resolved=0x... source='<source>' path='<path>'
-machgate: guest context signal.lr-4 indirect-slot-section slot=0x... segment=... section=... type=0x... reserved1=... pointer-index=... indirect-index=...
-machgate: guest context signal.lr-4 data-symbol slot=0x... section-ordinal=... symbol='<symbol>'+0x... symbol-vmaddr=0x... next='...' next-delta=0x...
-machgate: guest context signal.lr-4 indirect-symbol indirect-index=... symbol-index=... symbol='<symbol>' n_type=... n_desc=... n_value=...
+machgate: guest context signal.x0=0x100da3320 vmaddr=0x100da3320 segment=__DATA section=__bss fileoff=0x10fa0 insn=0x00000000
+machgate: guest context signal.x0 data-symbol slot=0x100da3320 section-ordinal=31 symbol='__MergedGlobals'+0x10 symbol-vmaddr=0x100da3310 next='_optblocker_u8' next-delta=0x88
+machgate: guest context signal.x1=0x100da3328 vmaddr=0x100da3328 segment=__DATA section=__bss fileoff=0x10fa8 insn=0xdf7f2e50
+machgate: guest context signal.x1 data-symbol slot=0x100da3328 section-ordinal=31 symbol='__MergedGlobals'+0x18 symbol-vmaddr=0x100da3310 next='_optblocker_u8' next-delta=0x80
+libsystem_shim: signal libcxx-tree-insert probe pc=0x1001ba5a4
+libsystem_shim: signal memory x0.tree=0x100da3320 [0]=(nil) [8]=0x7011df7f2e50 [16]=(nil) [24]=(nil)
+libsystem_shim: signal memory x1.child-slot=0x100da3328 [0]=0x7011df7f2e50 [8]=(nil) [16]=(nil) [24]=(nil)
+libsystem_shim: signal memory x3.new-node=0x7011df7f2e50 (not dereferenced)
+machgate: guest context signal.tree data-symbol slot=0x100da3320 section-ordinal=31 symbol='__MergedGlobals'+0x10 symbol-vmaddr=0x100da3310 next='_optblocker_u8' next-delta=0x88
 ```
 
-Interpretation rule for the next loop:
+Interpretation:
+
+- The crashing object is `__MergedGlobals + 0x10`.
+- The object has the libc++ `__tree` shape, but field zero is still NULL.
+- The new node has already been stored through `tree + 8`.
+- The faulting instruction is the second load in libc++'s
+  `__tree::__insert_node_at`: register `x8` already contains `tree[0]`, so the
+  retry needs both memory repair and saved-register repair.
+- A valid empty libc++ tree has `tree[0] == tree + 8`; after the current insert,
+  libc++ will naturally set `tree[0]` to the inserted node.
+
+Fix staged after this trace:
+
+- Add a narrow signal-dispatch repair for this exact libc++ insertion state:
+  `SIGSEGV`, fault address NULL, instruction `0xf9400108` (`ldr x8, [x8]`),
+  `x8 == NULL`, `x1 == x2 == x0 + 8`, `tree[0] == NULL`, and
+  `tree[8] == x3`.
+- The repair writes `tree[0] = tree + 8`, writes saved-context `x8 = tree + 8`,
+  logs `repaired zeroed libcxx tree begin node`, and returns from the signal
+  dispatcher so the original instruction retries.
+- Add `test_libcxx_tree_repair`, an ARM64 host regression that installs the
+  shim signal dispatcher through the Darwin `sigaction` ABI, deliberately
+  executes the same `ldr x8, [x8]` with the same register/object state, and
+  verifies the retried instruction loads the expected new-node pointer.
+- Full unit suite after the patch: `30/30 passed, 0 failed`.
+
+Remaining interpretation rule for future similar traces:
 
 - If the instruction window shows `ldr x8, [...]` from a Mach-O bind/lazy-bind
   slot that is zero, investigate resolver binding or missing shim export.

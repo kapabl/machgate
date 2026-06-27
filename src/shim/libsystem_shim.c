@@ -8403,6 +8403,52 @@ static uintptr_t trace_ucontext_reg(void* ucontext, int reg)
 #endif
 }
 
+static void trace_set_ucontext_reg(void* ucontext, int reg, uintptr_t value)
+{
+#if defined(__aarch64__)
+	if (reg >= 0 && reg < 31)
+		((ucontext_t*)ucontext)->uc_mcontext.regs[reg] = value;
+#else
+	(void)ucontext;
+	(void)reg;
+	(void)value;
+#endif
+}
+
+static int repair_libcxx_tree_insert_context(int signum, siginfo_t* info,
+                                             uintptr_t pc, void* ucontext)
+{
+	uint32_t insn = 0;
+	uintptr_t tree = trace_ucontext_reg(ucontext, 0);
+	uintptr_t child_slot = trace_ucontext_reg(ucontext, 1);
+	uintptr_t child_slot2 = trace_ucontext_reg(ucontext, 2);
+	uintptr_t new_node = trace_ucontext_reg(ucontext, 3);
+	uintptr_t begin_reg = trace_ucontext_reg(ucontext, 8);
+	uint64_t begin_node = 0;
+	uint64_t root_node = 0;
+
+	if (signum != SIGSEGV || !info || info->si_addr != NULL || !pc)
+		return 0;
+	memcpy(&insn, (void*)pc, sizeof(insn));
+	if (insn != 0xf9400108u)
+		return 0;
+	if (!tree || !new_node || begin_reg || child_slot != tree + 8 ||
+	    child_slot2 != child_slot)
+		return 0;
+	memcpy(&begin_node, (void*)tree, sizeof(begin_node));
+	memcpy(&root_node, (void*)child_slot, sizeof(root_node));
+	if (begin_node || root_node != new_node)
+		return 0;
+
+	*(uint64_t*)tree = child_slot;
+	trace_set_ucontext_reg(ucontext, 8, child_slot);
+	if (shim_signal_trace_enabled())
+		fprintf(stderr,
+		        "libsystem_shim: repaired zeroed libcxx tree begin node tree=%p begin=%p new-node=%p pc=%p\n",
+		        (void*)tree, (void*)child_slot, (void*)new_node, (void*)pc);
+	return 1;
+}
+
 static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 {
 	if (shim_signal_trace_enabled()) {
@@ -8438,6 +8484,10 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		trace_signal_register_context(ucontext);
 		trace_signal_tree_insert_context(pc, ucontext);
 	}
+
+	if (repair_libcxx_tree_insert_context(signum, info, trace_ucontext_pc(ucontext),
+	                                      ucontext))
+		return;
 
 	if (signum > 0 && signum < _NSIG) {
 		if (trace_signal_uses_siginfo[signum] && trace_signal_actions[signum]) {
