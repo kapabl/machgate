@@ -53,3 +53,9 @@ removed. New files should use MachGate naming and GPLv3-or-later licensing.
 
 MachGate is distributed under the GNU General Public License version 3 or later.
 See [LICENSE](LICENSE).
+
+Release tarballs may also include an Apple-ABI-compatible build of LLVM
+`libc++` and `libc++abi` for C++ Mach-O compatibility. Those libraries are
+distributed under the Apache License v2.0 with LLVM exceptions; see
+`share/doc/machgate/LICENSE.libcxx.txt` and
+`share/doc/machgate/LICENSE.libcxxabi.txt` in the release package.

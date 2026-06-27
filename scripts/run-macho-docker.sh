@@ -202,12 +202,10 @@ if [ -n "$libcxx_name" ]; then
         echo "Mounted MACHGATE_LIBCXX is missing inside the container: $libcxx_path" >&2
         exit 1
     fi
+elif [ -f "${machgate_root}/lib/libc++.so.1" ]; then
+    libcxx_path="${machgate_root}/lib/libc++.so.1"
 elif [ "${MACHGATE_EXTERNAL_MAP_LIBCXX:-0}" = "1" ]; then
-    if [ -f "${machgate_root}/lib/libc++.so.1" ]; then
-        libcxx_path="${machgate_root}/lib/libc++.so.1"
-    else
-        echo "machgate-docker: MACHGATE_EXTERNAL_MAP_LIBCXX=1 requested, but ${machgate_root}/lib/libc++.so.1 is not present" >&2
-    fi
+    echo "machgate-docker: MACHGATE_EXTERNAL_MAP_LIBCXX=1 requested, but ${machgate_root}/lib/libc++.so.1 is not present" >&2
 fi
 
 cat > /tmp/machgate.conf <<'CONFIG_EOF'
