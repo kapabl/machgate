@@ -160,6 +160,7 @@ GLIBC_2.17 {
         mach_vm_map;
         malloc_good_size;
         malloc_logger;
+        posix_memalign;
         malloc_zone_memalign;
         malloc_zone_pressure_relief;
         malloc_zone_register;

@@ -68,6 +68,14 @@ pattern = (ctypes.c_uint8 * 4)(0xDE, 0xAD, 0xBE, 0xEF)
 lib.memset_pattern4(buf, pattern, 16)
 assert buf.raw == b'\\xDE\\xAD\\xBE\\xEF' * 4, f'memset_pattern4 failed: {buf.raw.hex()}'
 
+lib.posix_memalign.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t]
+lib.posix_memalign.restype = ctypes.c_int
+lib.free.argtypes = [ctypes.c_void_p]
+aligned = ctypes.c_void_p()
+assert lib.posix_memalign(ctypes.byref(aligned), 64, 129) == 0, 'posix_memalign failed'
+assert aligned.value and aligned.value % 64 == 0, f'posix_memalign returned unaligned pointer {aligned.value:#x}'
+lib.free(aligned)
+
 # Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates
 # names such as auto_start_dbg through std::isalnum, which reaches ___maskrune.
 lib.__maskrune.argtypes = [ctypes.c_int, ctypes.c_ulong]

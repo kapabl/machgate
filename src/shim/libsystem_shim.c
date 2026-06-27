@@ -8486,6 +8486,18 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		        (void*)trace_ucontext_reg(ucontext, 7),
 		        (void*)trace_ucontext_reg(ucontext, 8),
 			        (void*)trace_ucontext_reg(ucontext, 16));
+		fprintf(stderr,
+		        "libsystem_shim: guest regs x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p\n",
+		        (void*)trace_ucontext_reg(ucontext, 19),
+		        (void*)trace_ucontext_reg(ucontext, 20),
+		        (void*)trace_ucontext_reg(ucontext, 21),
+		        (void*)trace_ucontext_reg(ucontext, 22),
+		        (void*)trace_ucontext_reg(ucontext, 23),
+		        (void*)trace_ucontext_reg(ucontext, 24),
+		        (void*)trace_ucontext_reg(ucontext, 25),
+		        (void*)trace_ucontext_reg(ucontext, 26),
+		        (void*)trace_ucontext_reg(ucontext, 27),
+		        (void*)trace_ucontext_reg(ucontext, 28));
 		trace_guest_address_context("signal.pc", pc);
 		trace_guest_address_context("signal.lr", lr);
 		if (lr >= 4)
@@ -10659,11 +10671,30 @@ static void* translate_dlsym_handle(void* handle)
 	return handle;
 }
 
+static void* (*resolve_real_dlsym(void))(void*, const char*)
+{
+	static const char* versions[] = {
+		"GLIBC_2.17",
+		"GLIBC_2.34",
+		"GLIBC_2.2.5"
+	};
+
+	for (size_t index = 0; index < sizeof(versions) / sizeof(versions[0]);
+	     index++) {
+		void* result = dlvsym(RTLD_NEXT, "dlsym", versions[index]);
+		if (result)
+			return (void* (*)(void*, const char*))result;
+	}
+	return NULL;
+}
+
 void* dlsym(void* handle, const char* symbol)
 {
 	if (!real_dlsym)
-		real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.17");
+		real_dlsym = resolve_real_dlsym();
 
+	if (!real_dlsym)
+		return NULL;
 	return real_dlsym(translate_dlsym_handle(handle), symbol);
 }
 
@@ -10764,11 +10795,13 @@ typedef void *(*real_malloc_fn)(size_t);
 typedef void  (*real_free_fn)(void *);
 typedef void *(*real_calloc_fn)(size_t, size_t);
 typedef void *(*real_realloc_fn)(void *, size_t);
+typedef int   (*real_posix_memalign_fn)(void **, size_t, size_t);
 
 static real_malloc_fn  real_malloc  = NULL;
 static real_free_fn    real_free    = NULL;
 static real_calloc_fn  real_calloc  = NULL;
 static real_realloc_fn real_realloc = NULL;
+static real_posix_memalign_fn real_posix_memalign = NULL;
 
 /* Bootstrap: dlsym itself may call malloc, so we need a tiny fallback
  * allocator for the very first calls before dlsym resolves. */
@@ -10782,6 +10815,8 @@ static void resolve_real_funcs(void)
 	real_free    = (real_free_fn)dlsym(RTLD_NEXT, "free");
 	real_calloc  = (real_calloc_fn)dlsym(RTLD_NEXT, "calloc");
 	real_realloc = (real_realloc_fn)dlsym(RTLD_NEXT, "realloc");
+	real_posix_memalign = (real_posix_memalign_fn)dlsym(RTLD_NEXT,
+	                                                    "posix_memalign");
 }
 
 void *shim_malloc(size_t size) __asm__("malloc");
@@ -10848,6 +10883,20 @@ void *shim_realloc(void *ptr, size_t size)
 	if (!real_realloc) return NULL;
 	void *new_ptr = real_realloc(ptr, size);
 	return new_ptr;
+}
+
+int shim_posix_memalign(void **memptr, size_t alignment, size_t size) __asm__("posix_memalign");
+int shim_posix_memalign(void **memptr, size_t alignment, size_t size)
+{
+	if (!memptr)
+		return EINVAL;
+	if (alignment < sizeof(void*) || (alignment & (alignment - 1)) != 0)
+		return EINVAL;
+	if (!real_posix_memalign)
+		resolve_real_funcs();
+	if (!real_posix_memalign)
+		return ENOMEM;
+	return real_posix_memalign(memptr, alignment, size);
 }
 
 void* machgate_shim_malloc(size_t size)
