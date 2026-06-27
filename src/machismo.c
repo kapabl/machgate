@@ -148,6 +148,95 @@ static int decode_ldr_x_unsigned(uint32_t insn, int* out_rt, int* out_rn,
 	return 1;
 }
 
+static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr)
+{
+	struct mach_header_64* header = (struct mach_header_64*)machismo_load_results.mh;
+	if (!header)
+		return;
+
+	struct symtab_command* symtab = NULL;
+	struct dysymtab_command* dysymtab = NULL;
+	struct segment_command_64* linkedit = NULL;
+	struct section_64* owner = NULL;
+	struct segment_command_64* owner_segment = NULL;
+
+	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		struct load_command* lc = (struct load_command*)cmd_ptr;
+		if (lc->cmd == LC_SYMTAB)
+			symtab = (struct symtab_command*)lc;
+		else if (lc->cmd == LC_DYSYMTAB)
+			dysymtab = (struct dysymtab_command*)lc;
+		else if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			if (strncmp(seg->segname, "__LINKEDIT", 16) == 0)
+				linkedit = seg;
+			uintptr_t seg_start = seg->vmaddr + machismo_load_results.slide;
+			uintptr_t seg_end = seg_start + seg->vmsize;
+			if (slot_addr >= seg_start && slot_addr < seg_end) {
+				struct section_64* sect = (struct section_64*)(seg + 1);
+				for (uint32_t section_index = 0; section_index < seg->nsects; section_index++, sect++) {
+					uintptr_t section_start = sect->addr + machismo_load_results.slide;
+					uintptr_t section_end = section_start + sect->size;
+					if (slot_addr >= section_start && slot_addr < section_end) {
+						owner = sect;
+						owner_segment = seg;
+						break;
+					}
+				}
+			}
+		}
+		cmd_ptr += lc->cmdsize;
+	}
+
+	if (!owner || !owner_segment) {
+		fprintf(stderr,
+		        "machgate: guest context %s indirect-slot-section slot=%p section=(unknown)\n",
+		        label, (void*)slot_addr);
+		return;
+	}
+
+	uint32_t section_type = owner->flags & SECTION_TYPE;
+	uint64_t slot_offset = slot_addr - (owner->addr + machismo_load_results.slide);
+	uint32_t pointer_index = (uint32_t)(slot_offset / sizeof(uint64_t));
+	uint32_t indirect_index = owner->reserved1 + pointer_index;
+
+	fprintf(stderr,
+	        "machgate: guest context %s indirect-slot-section slot=%p segment=%.*s section=%.*s type=0x%x reserved1=%u pointer-index=%u indirect-index=%u\n",
+	        label, (void*)slot_addr, 16, owner_segment->segname, 16,
+	        owner->sectname, section_type, owner->reserved1,
+	        pointer_index, indirect_index);
+
+	if (!symtab || !dysymtab || !linkedit ||
+	    indirect_index >= dysymtab->nindirectsyms)
+		return;
+
+	uintptr_t linkedit_base = machismo_load_results.slide + linkedit->vmaddr - linkedit->fileoff;
+	uint32_t* indirect_symbols = (uint32_t*)(linkedit_base + dysymtab->indirectsymoff);
+	struct nlist_64* syms = (struct nlist_64*)(linkedit_base + symtab->symoff);
+	const char* strtab = (const char*)(linkedit_base + symtab->stroff);
+	uint32_t symbol_index = indirect_symbols[indirect_index];
+
+	if (symbol_index == INDIRECT_SYMBOL_LOCAL ||
+	    symbol_index == INDIRECT_SYMBOL_ABS ||
+	    symbol_index >= symtab->nsyms) {
+		fprintf(stderr,
+		        "machgate: guest context %s indirect-symbol indirect-index=%u symbol-index=0x%x special-or-out-of-range\n",
+		        label, indirect_index, symbol_index);
+		return;
+	}
+
+	struct nlist_64* sym = &syms[symbol_index];
+	const char* sym_name = "(bad-strx)";
+	if (sym->n_strx < symtab->strsize)
+		sym_name = strtab + sym->n_strx;
+
+	fprintf(stderr,
+	        "machgate: guest context %s indirect-symbol indirect-index=%u symbol-index=%u symbol='%s' n_type=0x%x n_desc=0x%x n_value=0x%llx\n",
+	        label, indirect_index, symbol_index, sym_name, sym->n_type,
+	        sym->n_desc, (unsigned long long)sym->n_value);
+}
+
 static void print_indirect_bind_slot_context(const char* label,
                                              uintptr_t call_site,
                                              uintptr_t window_start)
@@ -203,6 +292,7 @@ found_slot:
 			        "machgate: guest context %s indirect-slot x%d slot=%p value=%p bind=(unrecorded)\n",
 			        label, branch_reg, (void*)slot_addr, (void*)slot_value);
 		}
+		print_indirect_symbol_context(label, slot_addr);
 	}
 }
 

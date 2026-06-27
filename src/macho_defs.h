@@ -197,8 +197,40 @@ struct section_64 {
 };
 
 /* Section attribute flags (from section_64.flags) */
+#define SECTION_TYPE                0x000000ff
+#define S_NON_LAZY_SYMBOL_POINTERS  0x6
+#define S_LAZY_SYMBOL_POINTERS      0x7
+#define S_SYMBOL_STUBS              0x8
 #define S_ATTR_PURE_INSTRUCTIONS  0x80000000
 #define S_ATTR_SOME_INSTRUCTIONS  0x00000400
+
+/* --- Dynamic symbol table --- */
+
+struct dysymtab_command {
+	uint32_t cmd;
+	uint32_t cmdsize;
+	uint32_t ilocalsym;
+	uint32_t nlocalsym;
+	uint32_t iextdefsym;
+	uint32_t nextdefsym;
+	uint32_t iundefsym;
+	uint32_t nundefsym;
+	uint32_t tocoff;
+	uint32_t ntoc;
+	uint32_t modtaboff;
+	uint32_t nmodtab;
+	uint32_t extrefsymoff;
+	uint32_t nextrefsyms;
+	uint32_t indirectsymoff;
+	uint32_t nindirectsyms;
+	uint32_t extreloff;
+	uint32_t nextrel;
+	uint32_t locreloff;
+	uint32_t nlocrel;
+};
+
+#define INDIRECT_SYMBOL_LOCAL 0x80000000u
+#define INDIRECT_SYMBOL_ABS   0x40000000u
 
 /* --- Dylib command --- */
 

@@ -716,6 +716,10 @@ Diagnostic improvement added after this trace:
   each slot. Signal diagnostics decode the `adrp`/`ldr`/`blr` pattern and print
   a new `indirect-slot` line with bind symbol, lookup name, dylib, resolver
   context, resolved address, and source.
+- If the resolver registry reports `bind=(unrecorded)`, signal diagnostics now
+  also inspect the slot's Mach-O section and LC_DYSYMTAB indirect symbol table.
+  The next run should print `indirect-slot-section` and, when available,
+  `indirect-symbol` with the symbol-table name for the pointer slot.
 - `MACHGATE_TRACE_BINDINGS=all` prints every resolver bind when a full import
   dump is needed.
 
@@ -726,6 +730,8 @@ machgate: guest context signal.lr-4=0x... vmaddr=0x... symbol=<name>+0x... segme
 machgate: guest context signal.lr-4 window   0x... vmaddr=0x... fileoff=0x... insn=0x...
 machgate: guest context signal.lr-4 window > 0x... vmaddr=0x... fileoff=0x... insn=0xd63f0100
 machgate: guest context signal.lr-4 indirect-slot x8 slot=0x... value=0x... bind='<symbol>' lookup='<name>' dylib='<dylib>' context='<resolver-path>' resolved=0x... source='<source>' path='<path>'
+machgate: guest context signal.lr-4 indirect-slot-section slot=0x... segment=... section=... type=0x... reserved1=... pointer-index=... indirect-index=...
+machgate: guest context signal.lr-4 indirect-symbol indirect-index=... symbol-index=... symbol='<symbol>' n_type=... n_desc=... n_value=...
 ```
 
 Interpretation rule for the next loop:
