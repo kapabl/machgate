@@ -58,6 +58,14 @@ Current constraints:
 
 ## How It Works
 
+The syscall interception path is documented with instruction-level diagrams in
+[docs/SYSCALL_PATCHING.md](docs/SYSCALL_PATCHING.md). The short version: MachGate
+finds each ARM64 Darwin `svc #0x80` instruction, replaces that single four-byte
+instruction with `b <nearby island>`, saves guest registers and flags in the
+island, translates the Darwin syscall ABI to Linux behavior in C, restores the
+Darwin-visible result, then branches back to the instruction after the original
+`svc`.
+
 ```
 ┌─────────────────────────────────────────────────┐
 │ Mach-O CLI Binary (arm64 native code)           │
