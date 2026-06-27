@@ -1,13 +1,13 @@
 #!/bin/bash
 # Test: commpage is mapped at expected arm64 address
-# The commpage should be at 0xfffffc000 after machismo sets it up.
+# The commpage should be at 0xfffffc000 after machgate sets it up.
 # We check /proc/self/maps by running a binary that sleeps briefly.
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
-# Use the exit42 fixture — machismo sets up commpage before jumping to it
+# Use the exit42 fixture — machgate sets up commpage before jumping to it
 # We can check by examining our own maps since mldr forks/execs the binary
 # Actually, mldr doesn't fork — it jumps directly. So we just verify the
 # mldr binary itself can run successfully (commpage setup is verified

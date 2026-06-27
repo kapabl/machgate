@@ -28,7 +28,7 @@ static uint64_t ret0(void) { return 0; }
 
 /*
  * Check if goggame-<product_id>.info exists.
- * CWD is gamedata/NecroDancerMP.app/Contents/MacOS/ (machismo chdir).
+ * CWD is gamedata/NecroDancerMP.app/Contents/MacOS/ (machgate chdir).
  * ../../../ = gamedata/
  * Info files at gamedata/Contents/Resources/goggame-<id>.info
  */

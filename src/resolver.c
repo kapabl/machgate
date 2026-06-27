@@ -57,8 +57,8 @@ static void zeroing_operator_delete(void *ptr)
 
 /* ---- LuaJIT profiler hooks ----
  *
- * When MACHISMO_LUA_PROFILE is set, hook luaopen_jit/lua_close to inject
- * LuaJIT's built-in profiler (jit.p).  Also supports MACHISMO_LUA_JITV for
+ * When MACHGATE_LUA_PROFILE is set, hook luaopen_jit/lua_close to inject
+ * LuaJIT's built-in profiler (jit.p).  Also supports MACHGATE_LUA_JITV for
  * JIT verbose logging (shows which traces compile/abort).
  *
  * We hook luaopen_jit rather than luaL_openlibs because the game (via sol2)
@@ -114,7 +114,7 @@ static int wrapped_luaopen_jit(void *L)
 	if (profiled_lua_state)
 		return result;
 
-	const char *profile_path = getenv("MACHISMO_LUA_PROFILE");
+	const char *profile_path = getenv("MACHGATE_LUA_PROFILE");
 	if (profile_path) {
 		char lua_cmd[512];
 		snprintf(lua_cmd, sizeof(lua_cmd),
@@ -125,14 +125,14 @@ static int wrapped_luaopen_jit(void *L)
 		}
 	}
 
-	if (getenv("MACHISMO_LUA_JITV")) {
+	if (getenv("MACHGATE_LUA_JITV")) {
 		if (lua_dostring(L, "require('jit.v').start()") == 0)
 			fprintf(stderr, "resolver: LuaJIT verbose JIT logging enabled\n");
 	}
 
 
 	/* Run an arbitrary Lua script file for debugging/introspection */
-	const char *inject_path = getenv("MACHISMO_LUA_INJECT");
+	const char *inject_path = getenv("MACHGATE_LUA_INJECT");
 	if (inject_path) {
 		int (*loadfile)(void *, const char *) = dlsym(RTLD_DEFAULT, "luaL_loadfile");
 		int (*pcall)(void *, int, int, int) = dlsym(RTLD_DEFAULT, "lua_pcall");
@@ -154,7 +154,7 @@ static void wrapped_lua_close(void *L)
 	if (L == profiled_lua_state) {
 		lua_dostring(L, "require('jit.p').stop()");
 		fprintf(stderr, "resolver: LuaJIT profiler stopped, output at %s\n",
-				getenv("MACHISMO_LUA_PROFILE"));
+				getenv("MACHGATE_LUA_PROFILE"));
 		profiled_lua_state = NULL;
 	}
 
@@ -560,12 +560,9 @@ static uintptr_t resolve_non_gui_framework_data(const struct dylib_entry* de,
 
 static int is_darwin_runtime_symbol(const char* lookup_name)
 {
-	return strcmp(lookup_name, "pthread_key_create") == 0 ||
-	       strcmp(lookup_name, "pthread_setspecific") == 0 ||
-	       strcmp(lookup_name, "pthread_getspecific") == 0 ||
-	       strcmp(lookup_name, "pthread_kill") == 0 ||
-	       strcmp(lookup_name, "pthread_sigmask") == 0 ||
-	       strcmp(lookup_name, "mmap") == 0 ||
+	if (strncmp(lookup_name, "pthread_", 8) == 0)
+		return 1;
+	return strcmp(lookup_name, "mmap") == 0 ||
 	       strcmp(lookup_name, "munmap") == 0 ||
 	       strcmp(lookup_name, "mprotect") == 0 ||
 	       strcmp(lookup_name, "sigaction") == 0 ||
@@ -658,24 +655,24 @@ static void resolver_complete_deferred(void);
 /* SDL_video.h constants for GL attribute overrides.
  * SDL3 removed SDL_GL_CONTEXT_EGL (was enum 19), shifting PROFILE_MASK
  * from 21 (SDL2) to 20 (SDL3).  Handle both so gl4es works with either. */
-#define MACHISMO_SDL_GL_CONTEXT_MAJOR_VERSION      17
-#define MACHISMO_SDL_GL_CONTEXT_MINOR_VERSION      18
-#define MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK_SDL2   21
-#define MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK_SDL3   20
-#define MACHISMO_SDL_GL_CONTEXT_PROFILE_ES    0x0004
+#define MACHGATE_SDL_GL_CONTEXT_MAJOR_VERSION      17
+#define MACHGATE_SDL_GL_CONTEXT_MINOR_VERSION      18
+#define MACHGATE_SDL_GL_CONTEXT_PROFILE_MASK_SDL2   21
+#define MACHGATE_SDL_GL_CONTEXT_PROFILE_MASK_SDL3   20
+#define MACHGATE_SDL_GL_CONTEXT_PROFILE_ES    0x0004
 
 /* Force GLES 2.0 profile when using gl4es on GLES-only hardware. */
 static int wrapped_SDL_GL_SetAttribute(int attr, int value)
 {
 	switch (attr) {
-	case MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK_SDL2:
-	case MACHISMO_SDL_GL_CONTEXT_PROFILE_MASK_SDL3:
-		value = MACHISMO_SDL_GL_CONTEXT_PROFILE_ES;
+	case MACHGATE_SDL_GL_CONTEXT_PROFILE_MASK_SDL2:
+	case MACHGATE_SDL_GL_CONTEXT_PROFILE_MASK_SDL3:
+		value = MACHGATE_SDL_GL_CONTEXT_PROFILE_ES;
 		break;
-	case MACHISMO_SDL_GL_CONTEXT_MAJOR_VERSION:
+	case MACHGATE_SDL_GL_CONTEXT_MAJOR_VERSION:
 		value = 2;
 		break;
-	case MACHISMO_SDL_GL_CONTEXT_MINOR_VERSION:
+	case MACHGATE_SDL_GL_CONTEXT_MINOR_VERSION:
 		value = 0;
 		break;
 	}
@@ -2132,12 +2129,12 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 			/* Wrap C++ ctors/dtors for Apple ARM64 ABI compatibility:
 			 * Apple ABI returns `this` in x0, Linux ABI returns void */
 			if (is_ctor_or_dtor(sym_name)) {
-				extern int machismo_verbose;
+				extern int machgate_verbose;
 				if (ctor_has_stack_params(sym_name)) {
-					if (machismo_verbose)
+					if (machgate_verbose)
 						fprintf(stderr, "resolver: ctor/dtor SKIP adapter (stack params): %s\n", sym_name);
 				} else {
-					if (machismo_verbose)
+					if (machgate_verbose)
 						fprintf(stderr, "resolver: ctor/dtor ABI wrap: %s\n", sym_name);
 					result = wrap_ctor_for_apple_abi(result);
 				}
@@ -2275,7 +2272,7 @@ static int walk_chain(struct resolver_state* rs, uint64_t* chain_start, uint16_t
 
 			uintptr_t resolved = resolve_import(rs, ordinal, header, chain_data, addend,
 			                                    (uintptr_t)loc);
-			if (resolved == 0 && getenv("MACHISMO_VERBOSE_BINDS")) {
+			if (resolved == 0 && getenv("MACHGATE_VERBOSE_BINDS")) {
 				/* Log unresolved binds for debugging */
 				const char* symbols_base = chain_data + header->symbols_offset;
 				const char* imports_base = chain_data + header->imports_offset;
@@ -2464,8 +2461,8 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 
 	/* Normal library ordinal (1-based) */
 	if (lib_ordinal < 1 || lib_ordinal > rs->ndylibs) {
-		extern int machismo_verbose;
-		if (machismo_verbose)
+		extern int machgate_verbose;
+		if (machgate_verbose)
 			fprintf(stderr, "resolver: dyld_info bind '%s' lib_ordinal %d out of range\n",
 					sym_name, lib_ordinal);
 		log_failed_bind(rs, "dyld-info-out-of-range", sym_name, lookup_name,
@@ -2649,7 +2646,7 @@ static void do_bind_one(struct resolver_state* rs, int seg_index,
 
 static int process_dyld_info(struct resolver_state* rs)
 {
-	extern int machismo_verbose;
+	extern int machgate_verbose;
 
 	/* Make writable segments temporarily writable for patching */
 	for (int i = 0; i < rs->nsegments; i++) {

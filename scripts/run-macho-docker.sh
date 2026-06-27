@@ -201,7 +201,7 @@ MAP_EOF
 sed -i "s#__SHIM_PATH__#${shim_path}#g" /tmp/dylib_map.conf
 
 export LD_LIBRARY_PATH="${machgate_root}/lib:${machgate_root}"
-export MACHISMO_CONFIG=/tmp/machgate.conf
+export MACHGATE_CONFIG=/tmp/machgate.conf
 machgate_args=()
 if [ "$verbose" = "1" ]; then
     machgate_args=(-v)

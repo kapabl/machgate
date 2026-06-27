@@ -1,5 +1,5 @@
 /*
- * INI-style config file parser for machismo.
+ * INI-style config file parser for machgate.
  *
  * Format:
  *   [general]
@@ -33,19 +33,19 @@ typedef struct {
 	char* renderer;                          /* force renderer type */
 	char* override_lib;                      /* .so with exact-symbol replacements */
 	int match_local;                         /* override pass also matches LOCAL (non-N_EXT) defined symbols */
-} machismo_trampoline_config_t;
+} machgate_trampoline_config_t;
 
 typedef struct {
 	char* dylib_map;
 	char* patches;
-	machismo_trampoline_config_t trampolines[CONFIG_MAX_TRAMPOLINES];
+	machgate_trampoline_config_t trampolines[CONFIG_MAX_TRAMPOLINES];
 	int num_trampolines;
-} machismo_config_t;
+} machgate_config_t;
 
 /* Load config from file. Returns 0 on success, -1 if file not found (not an error). */
-int config_load(const char* path, machismo_config_t* cfg);
+int config_load(const char* path, machgate_config_t* cfg);
 
 /* Free all allocated strings in config. */
-void config_free(machismo_config_t* cfg);
+void config_free(machgate_config_t* cfg);
 
 #endif /* CONFIG_H */

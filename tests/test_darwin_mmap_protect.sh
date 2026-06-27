@@ -5,8 +5,8 @@
 # - apple-oss-distributions/xnu/bsd/sys/mman.h: Darwin PROT_* and MAP_* values
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 [ -f tests/fixtures/darwin_mmap_protect ] || bash tests/fixtures/build_fixtures.sh
 output="$("$BUILD_DIR/machgate" tests/fixtures/darwin_mmap_protect 2>/dev/null)"
 [ "$output" = "MMAP" ]

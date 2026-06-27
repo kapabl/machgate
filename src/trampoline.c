@@ -470,8 +470,8 @@ int trampoline_patch_lib(void* mh, uintptr_t slide,
 			 * if Mach-O code tries to call it. */
 			uintptr_t abort_island = make_abort_island(name);
 			if (abort_island) {
-				extern int machismo_verbose;
-				if (machismo_verbose)
+				extern int machgate_verbose;
+				if (machgate_verbose)
 					fprintf(stderr, "trampoline: TRAPPED (no native match): %s\n", name);
 				if (write_trampoline(func_addr, abort_island) == 0) {
 					trapped++;
@@ -578,8 +578,8 @@ int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle,
 /* Legacy env-var based API */
 int trampoline_patch(void* mh, uintptr_t slide)
 {
-	const char* lib_path = getenv("MACHISMO_TRAMPOLINE_LIB");
-	const char* prefix = getenv("MACHISMO_TRAMPOLINE_PREFIX");
+	const char* lib_path = getenv("MACHGATE_TRAMPOLINE_LIB");
+	const char* prefix = getenv("MACHGATE_TRAMPOLINE_PREFIX");
 
 	if (!lib_path) lib_path = "libSDL2-2.0.so.0";
 	if (!prefix) prefix = "_SDL_";
@@ -944,8 +944,8 @@ void trampoline_guard_stale_data(void* mh, uintptr_t slide,
 		if (matches_prefix(name, prefixes, num_prefixes)) {
 			has_library[page_idx] = 1;
 			lib_data_syms++;
-			extern int machismo_verbose;
-			if (machismo_verbose)
+			extern int machgate_verbose;
+			if (machgate_verbose)
 				fprintf(stderr, "trampoline: stale data symbol: %s at %p\n",
 				        name, (void*)addr);
 		} else {

@@ -9,12 +9,12 @@ if [ "${MACHGATE_RUN_EXTERNAL:-0}" != "1" ]; then
     exit 0
 fi
 
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
-MANIFEST="${MACHGATE_EXTERNAL_MANIFEST:-$MACHISMO_ROOT/tests/external/arm64_macho_cli_manifest.txt}"
-CACHE_DIR="${MACHGATE_EXTERNAL_CACHE:-$MACHISMO_ROOT/tests/external/cache}"
-WORK_DIR="${MACHGATE_EXTERNAL_WORK:-$MACHISMO_ROOT/tests/external/work}"
-LOG_DIR="${MACHGATE_EXTERNAL_LOGS:-$MACHISMO_ROOT/tests/external/logs}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
+MANIFEST="${MACHGATE_EXTERNAL_MANIFEST:-$MACHGATE_ROOT/tests/external/arm64_macho_cli_manifest.txt}"
+CACHE_DIR="${MACHGATE_EXTERNAL_CACHE:-$MACHGATE_ROOT/tests/external/cache}"
+WORK_DIR="${MACHGATE_EXTERNAL_WORK:-$MACHGATE_ROOT/tests/external/work}"
+LOG_DIR="${MACHGATE_EXTERNAL_LOGS:-$MACHGATE_ROOT/tests/external/logs}"
 TIMEOUT="${MACHGATE_EXTERNAL_TIMEOUT:-10}"
 CONFIG_DIR="$WORK_DIR/config"
 LIBCXX_DYLIB="${MACHGATE_EXTERNAL_LIBCXX:-}"
@@ -25,7 +25,7 @@ if [ "${MACHGATE_EXTERNAL_VERBOSE:-0}" = "1" ]; then
 fi
 
 if [ -z "$LIBCXX_DYLIB" ] && [ "${MACHGATE_EXTERNAL_MAP_LIBCXX:-0}" = "1" ]; then
-    LIBCXX_DYLIB="$MACHISMO_ROOT/build-libcxx/lib/libc++.so.1"
+    LIBCXX_DYLIB="$MACHGATE_ROOT/build-libcxx/lib/libc++.so.1"
 fi
 
 mkdir -p "$CACHE_DIR" "$WORK_DIR" "$LOG_DIR" "$CONFIG_DIR"
@@ -61,7 +61,7 @@ CoreServices = $BUILD_DIR/libsystem_shim.so
 OpenDirectory = SKIP
 EOF
 
-cat > "$CONFIG_DIR/machismo.conf" <<EOF
+cat > "$CONFIG_DIR/machgate.conf" <<EOF
 [general]
 dylib_map = $CONFIG_DIR/dylib_map.conf
 EOF
@@ -138,7 +138,7 @@ run_with_diagnostics()
 		timeout_cmd=()
 	fi
 
-    MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
+    MACHGATE_CONFIG="$CONFIG_DIR/machgate.conf" \
         "${timeout_cmd[@]}" "$BUILD_DIR/machgate" "${MACHGATE_ARGS[@]}" "$binary" $args >"$out_log" 2>"$err_log"
     local status=$?
     if [ "$status" -eq 0 ]; then
@@ -151,12 +151,12 @@ run_with_diagnostics()
     echo "  stderr: $err_log"
 
 	if command -v strace >/dev/null 2>&1; then
-		MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
+		MACHGATE_CONFIG="$CONFIG_DIR/machgate.conf" \
 			"${timeout_cmd[@]}" strace -f -o "$strace_log" "$BUILD_DIR/machgate" "${MACHGATE_ARGS[@]}" "$binary" $args >"$out_log.strace-run" 2>"$err_log.strace-run" || true
 		echo "  strace: $strace_log"
 	fi
 
-	QEMU_STRACE=1 MACHISMO_CONFIG="$CONFIG_DIR/machismo.conf" \
+	QEMU_STRACE=1 MACHGATE_CONFIG="$CONFIG_DIR/machgate.conf" \
 		"${timeout_cmd[@]}" "$BUILD_DIR/machgate" "${MACHGATE_ARGS[@]}" "$binary" $args >"$out_log.qemu-strace-run" 2>"$qemu_strace_log" || true
 	echo "  qemu-strace: $qemu_strace_log"
 

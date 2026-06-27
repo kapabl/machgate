@@ -2,8 +2,8 @@
 # Test: resolver reads dylib_map.conf and maps libraries correctly
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
 NECRO_BIN="../necrodancer/depot_247086/NecroDancerSP.app/Contents/MacOS/NecroDancer"
 
@@ -15,12 +15,12 @@ fi
 # Build a temp config with absolute paths so dylib_map.conf resolves correctly
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
-cat > "$TMPDIR/machismo.conf" <<EOF
+cat > "$TMPDIR/machgate.conf" <<EOF
 [general]
-dylib_map = $MACHISMO_ROOT/examples/necrodancer/dylib_map.conf
+dylib_map = $MACHGATE_ROOT/examples/necrodancer/dylib_map.conf
 EOF
 
-output=$(MACHISMO_CONFIG="$TMPDIR/machismo.conf" \
+output=$(MACHGATE_CONFIG="$TMPDIR/machgate.conf" \
     SDL_VIDEODRIVER=dummy \
     LD_LIBRARY_PATH="$BUILD_DIR" \
     "$BUILD_DIR/machgate" "$NECRO_BIN" 2>&1 || true)

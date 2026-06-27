@@ -3,9 +3,9 @@
 set -e
 cd "$(dirname "$0")/.."
 
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
-FIXTURE_DIR="$MACHISMO_ROOT/tests/fixtures"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
+FIXTURE_DIR="$MACHGATE_ROOT/tests/fixtures"
 FIXTURE="$FIXTURE_DIR/darwin_range_100_199"
 SOURCE="$FIXTURE_DIR/darwin_range_100_199.s"
 

@@ -1,5 +1,5 @@
 /*
- * Machismo — Mach-O Loader for aarch64 Linux.
+ * MachGate — Mach-O Loader for aarch64 Linux.
  *
  * Based on Darling's mldr, stripped of darlingserver dependencies,
  * adapted for aarch64, with simplified library handling.
@@ -108,14 +108,14 @@ static void clear_init_context(void)
 uint8_t exe_uuid[16];
 
 __attribute__((used))
-struct load_results machismo_load_results = {0};
+struct load_results machgate_load_results = {0};
 
-void* __machismo_main_stack_top = NULL;
-size_t __machismo_main_stack_size = 0;
-int __machismo_guest_argc = 0;
-char** __machismo_guest_argv = NULL;
-char** __machismo_guest_envp = NULL;
-const char* __machismo_guest_executable_path = NULL;
+void* __machgate_main_stack_top = NULL;
+size_t __machgate_main_stack_size = 0;
+int __machgate_guest_argc = 0;
+char** __machgate_guest_argv = NULL;
+char** __machgate_guest_envp = NULL;
+const char* __machgate_guest_executable_path = NULL;
 
 static int sign_extend_int(uint32_t value, int bits)
 {
@@ -158,10 +158,10 @@ static void print_nearest_section_symbol(const char* label,
 	if (!symtab || !linkedit || !section_ordinal)
 		return;
 
-	uintptr_t linkedit_base = machismo_load_results.slide + linkedit->vmaddr - linkedit->fileoff;
+	uintptr_t linkedit_base = machgate_load_results.slide + linkedit->vmaddr - linkedit->fileoff;
 	struct nlist_64* syms = (struct nlist_64*)(linkedit_base + symtab->symoff);
 	const char* strtab = (const char*)(linkedit_base + symtab->stroff);
-	uint64_t unslid_slot = slot_addr - machismo_load_results.slide;
+	uint64_t unslid_slot = slot_addr - machgate_load_results.slide;
 	struct nlist_64* best = NULL;
 	struct nlist_64* next = NULL;
 
@@ -209,7 +209,7 @@ static void print_nearest_section_symbol(const char* label,
 static void print_data_address_symbol_context(const char* label,
                                               uintptr_t address)
 {
-	struct mach_header_64* header = (struct mach_header_64*)machismo_load_results.mh;
+	struct mach_header_64* header = (struct mach_header_64*)machgate_load_results.mh;
 	struct symtab_command* symtab = NULL;
 	struct segment_command_64* linkedit = NULL;
 	uint8_t section_ordinal = 1;
@@ -237,7 +237,7 @@ static void print_data_address_symbol_context(const char* label,
 			struct segment_command_64* seg = (struct segment_command_64*)lc;
 			struct section_64* sect = (struct section_64*)(seg + 1);
 			for (uint32_t section_index = 0; section_index < seg->nsects; section_index++, sect++) {
-				uintptr_t section_start = sect->addr + machismo_load_results.slide;
+				uintptr_t section_start = sect->addr + machgate_load_results.slide;
 				uintptr_t section_end = section_start + sect->size;
 				if (address >= section_start && address < section_end) {
 					print_nearest_section_symbol(label, address, symtab, linkedit,
@@ -253,7 +253,7 @@ static void print_data_address_symbol_context(const char* label,
 
 static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr)
 {
-	struct mach_header_64* header = (struct mach_header_64*)machismo_load_results.mh;
+	struct mach_header_64* header = (struct mach_header_64*)machgate_load_results.mh;
 	if (!header)
 		return;
 
@@ -276,12 +276,12 @@ static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr
 			struct segment_command_64* seg = (struct segment_command_64*)lc;
 			if (strncmp(seg->segname, "__LINKEDIT", 16) == 0)
 				linkedit = seg;
-			uintptr_t seg_start = seg->vmaddr + machismo_load_results.slide;
+			uintptr_t seg_start = seg->vmaddr + machgate_load_results.slide;
 			uintptr_t seg_end = seg_start + seg->vmsize;
 			if (slot_addr >= seg_start && slot_addr < seg_end) {
 				struct section_64* sect = (struct section_64*)(seg + 1);
 				for (uint32_t section_index = 0; section_index < seg->nsects; section_index++, sect++) {
-					uintptr_t section_start = sect->addr + machismo_load_results.slide;
+					uintptr_t section_start = sect->addr + machgate_load_results.slide;
 					uintptr_t section_end = section_start + sect->size;
 					if (slot_addr >= section_start && slot_addr < section_end) {
 						owner = sect;
@@ -304,7 +304,7 @@ static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr
 	}
 
 	uint32_t section_type = owner->flags & SECTION_TYPE;
-	uint64_t slot_offset = slot_addr - (owner->addr + machismo_load_results.slide);
+	uint64_t slot_offset = slot_addr - (owner->addr + machgate_load_results.slide);
 	uint32_t pointer_index = (uint32_t)(slot_offset / sizeof(uint64_t));
 	uint32_t indirect_index = owner->reserved1 + pointer_index;
 
@@ -321,7 +321,7 @@ static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr
 	    indirect_index >= dysymtab->nindirectsyms)
 		return;
 
-	uintptr_t linkedit_base = machismo_load_results.slide + linkedit->vmaddr - linkedit->fileoff;
+	uintptr_t linkedit_base = machgate_load_results.slide + linkedit->vmaddr - linkedit->fileoff;
 	uint32_t* indirect_symbols = (uint32_t*)(linkedit_base + dysymtab->indirectsymoff);
 	struct nlist_64* syms = (struct nlist_64*)(linkedit_base + symtab->symoff);
 	const char* strtab = (const char*)(linkedit_base + symtab->stroff);
@@ -414,7 +414,7 @@ void machgate_trace_guest_address(const char* label, uintptr_t address)
 		return;
 	}
 
-	struct mach_header_64* header = (struct mach_header_64*)machismo_load_results.mh;
+	struct mach_header_64* header = (struct mach_header_64*)machgate_load_results.mh;
 	if (!header)
 		return;
 
@@ -427,7 +427,7 @@ void machgate_trace_guest_address(const char* label, uintptr_t address)
 		}
 
 		struct segment_command_64* seg = (struct segment_command_64*)lc;
-		uintptr_t seg_start = seg->vmaddr + machismo_load_results.slide;
+		uintptr_t seg_start = seg->vmaddr + machgate_load_results.slide;
 		uintptr_t seg_end = seg_start + seg->vmsize;
 		if (address < seg_start || address >= seg_end) {
 			cmd_ptr += lc->cmdsize;
@@ -438,7 +438,7 @@ void machgate_trace_guest_address(const char* label, uintptr_t address)
 		uint64_t section_fileoff = seg->fileoff + (address - seg_start);
 		struct section_64* sect = (struct section_64*)(seg + 1);
 		for (uint32_t section_index = 0; section_index < seg->nsects; section_index++, sect++) {
-			uintptr_t section_start = sect->addr + machismo_load_results.slide;
+			uintptr_t section_start = sect->addr + machgate_load_results.slide;
 			uintptr_t section_end = section_start + sect->size;
 			if (address >= section_start && address < section_end) {
 				section_name = sect->sectname;
@@ -458,14 +458,14 @@ void machgate_trace_guest_address(const char* label, uintptr_t address)
 			fprintf(stderr,
 			        "machgate: guest context %s=%p vmaddr=0x%lx symbol=%s+0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x\n",
 			        label ? label : "address", (void*)address,
-			        (unsigned long)(address - machismo_load_results.slide),
+			        (unsigned long)(address - machgate_load_results.slide),
 			        symbol, symbol_offset, 16, seg->segname, 16, section_name,
 			        (unsigned long long)section_fileoff, insn);
 		} else {
 			fprintf(stderr,
 			        "machgate: guest context %s=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x\n",
 			        label ? label : "address", (void*)address,
-			        (unsigned long)(address - machismo_load_results.slide),
+			        (unsigned long)(address - machgate_load_results.slide),
 			        16, seg->segname, 16, section_name,
 			        (unsigned long long)section_fileoff, insn);
 		}
@@ -488,7 +488,7 @@ void machgate_trace_guest_address(const char* label, uintptr_t address)
 				        "machgate: guest context %s window %c %p vmaddr=0x%lx fileoff=0x%llx insn=0x%08x\n",
 				        label, cursor == address ? '>' : ' ',
 				        (void*)cursor,
-				        (unsigned long)(cursor - machismo_load_results.slide),
+				        (unsigned long)(cursor - machgate_load_results.slide),
 				        (unsigned long long)cursor_fileoff,
 				        *(uint32_t*)cursor);
 			}
@@ -586,7 +586,7 @@ static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
 #endif
 	}
 
-	uint32_t* result = (uint32_t*)machismo_pool_alloc(lr, pool_size);
+	uint32_t* result = (uint32_t*)machgate_pool_alloc(lr, pool_size);
 	if (result) {
 		fprintf(stderr, "machgate: LSE island pool at %p (adjacent to segments, %zu KB)\n",
 		        result, pool_size / 1024);
@@ -594,7 +594,7 @@ static uint32_t* allocate_main_lse_pool(uintptr_t text_begin,
 	return result;
 }
 
-int machismo_verbose = 0;
+int machgate_verbose = 0;
 
 int main(int argc, char** argv, char** envp)
 {
@@ -604,20 +604,20 @@ int main(int argc, char** argv, char** envp)
 
 	machgate_ensure_vm_interpose(argv, envp);
 
-	machismo_load_results.kernfd = -1;
-	machismo_load_results.argc = argc;
-	machismo_load_results.argv = argv;
+	machgate_load_results.kernfd = -1;
+	machgate_load_results.argc = argc;
+	machgate_load_results.argv = argv;
 
-	while (envp[machismo_load_results.envc] != NULL) {
-		++machismo_load_results.envc;
+	while (envp[machgate_load_results.envc] != NULL) {
+		++machgate_load_results.envc;
 	}
-	machismo_load_results.envp = envp;
+	machgate_load_results.envp = envp;
 
-	/* Parse machismo flags before the binary path */
+	/* Parse machgate flags before the binary path */
 	int arg_idx = 1;
 	while (arg_idx < argc && argv[arg_idx][0] == '-') {
 		if (strcmp(argv[arg_idx], "-v") == 0 || strcmp(argv[arg_idx], "--verbose") == 0) {
-			machismo_verbose = 1;
+			machgate_verbose = 1;
 		} else if (strcmp(argv[arg_idx], "--") == 0) {
 			arg_idx++;
 			break;
@@ -638,43 +638,43 @@ int main(int argc, char** argv, char** envp)
 	filename = argv[arg_idx];
 
 	/* Load the Mach-O binary */
-	load(filename, 0, false, argv, &machismo_load_results);
+	load(filename, 0, false, argv, &machgate_load_results);
 
-	/* Adjust argv: remove machismo args so the loaded binary sees its path as argv[0] */
-	machismo_load_results.argc = argc - arg_idx;
-	machismo_load_results.argv = argv + arg_idx;
-	__machismo_guest_argc = (int)machismo_load_results.argc;
-	__machismo_guest_argv = machismo_load_results.argv;
-	__machismo_guest_envp = machismo_load_results.envp;
-	__machismo_guest_executable_path = filename;
+	/* Adjust argv: remove machgate args so the loaded binary sees its path as argv[0] */
+	machgate_load_results.argc = argc - arg_idx;
+	machgate_load_results.argv = argv + arg_idx;
+	__machgate_guest_argc = (int)machgate_load_results.argc;
+	__machgate_guest_argv = machgate_load_results.argv;
+	__machgate_guest_envp = machgate_load_results.envp;
+	__machgate_guest_executable_path = filename;
 
-	/* Load config file — look next to the binary, or use MACHISMO_CONFIG */
-	machismo_config_t cfg = {0};
+	/* Load config file — look next to the binary, or use MACHGATE_CONFIG */
+	machgate_config_t cfg = {0};
 	{
-		const char* cfg_path = getenv("MACHISMO_CONFIG");
+		const char* cfg_path = getenv("MACHGATE_CONFIG");
 		int cfg_loaded = 0;
 
 		if (cfg_path) {
-			/* MACHISMO_CONFIG=none disables config loading (for tests) */
+			/* MACHGATE_CONFIG=none disables config loading (for tests) */
 			if (strcmp(cfg_path, "none") != 0)
 				cfg_loaded = (config_load(cfg_path, &cfg) == 0);
 		} else {
 			char conf_buf[4096];
 
-			/* 1. Look for machismo.conf in the current working directory */
-			cfg_loaded = (config_load("machismo.conf", &cfg) == 0);
-			if (cfg_loaded) cfg_path = "machismo.conf";
+			/* 1. Look for machgate.conf in the current working directory */
+			cfg_loaded = (config_load("machgate.conf", &cfg) == 0);
+			if (cfg_loaded) cfg_path = "machgate.conf";
 
-			/* 2. Look for machismo.conf next to the game binary */
+			/* 2. Look for machgate.conf next to the game binary */
 			if (!cfg_loaded) {
-				const char* binary = machismo_load_results.argv[0];
+				const char* binary = machgate_load_results.argv[0];
 				const char* slash = strrchr(binary, '/');
 				if (slash) {
 					size_t dirlen = slash - binary;
-					snprintf(conf_buf, sizeof(conf_buf), "%.*s/machismo.conf",
+					snprintf(conf_buf, sizeof(conf_buf), "%.*s/machgate.conf",
 					         (int)dirlen, binary);
 				} else {
-					snprintf(conf_buf, sizeof(conf_buf), "machismo.conf");
+					snprintf(conf_buf, sizeof(conf_buf), "machgate.conf");
 				}
 				cfg_loaded = (config_load(conf_buf, &cfg) == 0);
 				if (cfg_loaded)
@@ -686,15 +686,15 @@ int main(int argc, char** argv, char** envp)
 			fprintf(stderr, "machgate: loaded config from %s\n", cfg_path);
 		} else {
 			/* Fallback to env vars for backward compat */
-			const char* map = getenv("MACHISMO_DYLIB_MAP");
+			const char* map = getenv("MACHGATE_DYLIB_MAP");
 			if (map) cfg.dylib_map = strdup(map);
-			const char* pat = getenv("MACHISMO_PATCHES");
+			const char* pat = getenv("MACHGATE_PATCHES");
 			if (pat) cfg.patches = strdup(pat);
 			/* Legacy single trampoline from env */
-			const char* tlib = getenv("MACHISMO_TRAMPOLINE_LIB");
+			const char* tlib = getenv("MACHGATE_TRAMPOLINE_LIB");
 			if (tlib) {
 				cfg.trampolines[0].lib = strdup(tlib);
-				const char* tpfx = getenv("MACHISMO_TRAMPOLINE_PREFIX");
+				const char* tpfx = getenv("MACHGATE_TRAMPOLINE_PREFIX");
 				cfg.trampolines[0].prefixes[0] = strdup(tpfx ? tpfx : "_SDL_");
 				cfg.trampolines[0].num_prefixes = 1;
 				cfg.num_trampolines = 1;
@@ -715,8 +715,8 @@ int main(int argc, char** argv, char** envp)
 	 * LSE: replaced with B to islands containing LDXR/STXR loops.
 	 *
 	 * Must run before any Mach-O code executes. */
-	if (machismo_load_results.mh) {
-		struct mach_header_64* mh = (struct mach_header_64*)machismo_load_results.mh;
+	if (machgate_load_results.mh) {
+		struct mach_header_64* mh = (struct mach_header_64*)machgate_load_results.mh;
 		uint8_t* cmds = (uint8_t*)(mh + 1);
 		uint32_t p = 0;
 		int rcpc_fixed = 0;
@@ -736,7 +736,7 @@ int main(int argc, char** argv, char** envp)
 						if (!(lsect->flags & S_ATTR_SOME_INSTRUCTIONS) &&
 						    !(lsect->flags & S_ATTR_PURE_INSTRUCTIONS))
 							continue;
-						uintptr_t sect_start = lsect->addr + machismo_load_results.slide;
+						uintptr_t sect_start = lsect->addr + machgate_load_results.slide;
 						uintptr_t sect_end = sect_start + lsect->size;
 						if (!text_begin || sect_start < text_begin)
 							text_begin = sect_start;
@@ -747,10 +747,10 @@ int main(int argc, char** argv, char** envp)
 			}
 			lp += llc->cmdsize;
 		}
-		size_t lse_pool_size = estimate_main_lse_pool_size(&machismo_load_results);
+		size_t lse_pool_size = estimate_main_lse_pool_size(&machgate_load_results);
 		uint32_t* lse_pool = allocate_main_lse_pool(text_begin, text_end,
 		                                            lse_pool_size,
-		                                            &machismo_load_results);
+		                                            &machgate_load_results);
 		if (!lse_pool) {
 			fprintf(stderr, "machgate: WARNING: LSE pool alloc failed — LSE atomics will SIGILL\n");
 		}
@@ -762,7 +762,7 @@ int main(int argc, char** argv, char** envp)
 			if (lc->cmd == LC_SEGMENT_64) {
 				struct segment_command_64* seg = (struct segment_command_64*)lc;
 				if (seg->maxprot & VM_PROT_EXECUTE) {
-					uint32_t* code = (uint32_t*)(seg->vmaddr + machismo_load_results.slide);
+					uint32_t* code = (uint32_t*)(seg->vmaddr + machgate_load_results.slide);
 					/* Make writable for patching */
 					mprotect(code, seg->vmsize, PROT_READ | PROT_WRITE | PROT_EXEC);
 
@@ -775,7 +775,7 @@ int main(int argc, char** argv, char** envp)
 						if (!(sect->flags & S_ATTR_SOME_INSTRUCTIONS) &&
 						    !(sect->flags & S_ATTR_PURE_INSTRUCTIONS))
 							continue;
-						uint32_t* scode = (uint32_t*)(sect->addr + machismo_load_results.slide);
+						uint32_t* scode = (uint32_t*)(sect->addr + machgate_load_results.slide);
 						size_t scount = sect->size / 4;
 
 						/* RCPC: in-place downgrade */
@@ -818,9 +818,9 @@ int main(int argc, char** argv, char** envp)
 	 * Mach-O dylibs and looking up symbols in their LC_SYMTAB.
 	 * Order: resolve main exe first (which triggers dylib loading),
 	 * then resolve each loaded dylib's own fixups. */
-	if (machismo_load_results.mh && cfg.dylib_map) {
-		resolver_resolve_fixups((void*)machismo_load_results.mh,
-		                        machismo_load_results.slide, cfg.dylib_map);
+	if (machgate_load_results.mh && cfg.dylib_map) {
+		resolver_resolve_fixups((void*)machgate_load_results.mh,
+		                        machgate_load_results.slide, cfg.dylib_map);
 
 		/* Resolve chained fixups for loaded Mach-O dylibs.
 		 * Each dylib has its own LC_DYLD_CHAINED_FIXUPS that need patching.
@@ -942,18 +942,18 @@ int main(int argc, char** argv, char** envp)
 
 	/* Fix macOS pthread objects and set up TLV before the __DATA guard
 	 * locks down pages (the pthread scan reads all writable segments). */
-	if (machismo_load_results.mh) {
-		fixup_darwin_pthread_data(&machismo_load_results);
-		fixup_darwin_libc_allocator_defaults(&machismo_load_results);
-		setup_tlv_image(&machismo_load_results);
+	if (machgate_load_results.mh) {
+		fixup_darwin_pthread_data(&machgate_load_results);
+		fixup_darwin_libc_allocator_defaults(&machgate_load_results);
+		setup_tlv_image(&machgate_load_results);
 	}
 
 	/* Register Mach-O exception handling frames with system unwinder.
 	 * Must be after resolver (GOT entries for personality functions must be patched)
 	 * but before any Mach-O code runs (__init_offsets, trampolines, _main). */
-	if (machismo_load_results.mh) {
-		eh_frame_register_macho((void*)machismo_load_results.mh,
-		                        machismo_load_results.slide);
+	if (machgate_load_results.mh) {
+		eh_frame_register_macho((void*)machgate_load_results.mh,
+		                        machgate_load_results.slide);
 		/* NOTE: Do NOT register eh_frame for loaded Mach-O dylibs yet.
 		 * The _dl_find_object interposition uses a single text range —
 		 * registering dylibs would overwrite the main exe's range and
@@ -961,11 +961,11 @@ int main(int argc, char** argv, char** envp)
 	}
 
 	/* Apply trampolines from config */
-	if (machismo_load_results.mh) {
+	if (machgate_load_results.mh) {
 		/* Give the trampoline system its share of the adjacent pool (1MB) */
 		size_t tramp_pool_size = 1024 * 1024;
-		void* tramp_pool = machismo_pool_alloc(
-			&machismo_load_results, tramp_pool_size);
+		void* tramp_pool = machgate_pool_alloc(
+			&machgate_load_results, tramp_pool_size);
 		if (tramp_pool) {
 			trampoline_set_pool(tramp_pool, tramp_pool_size);
 		} else {
@@ -973,15 +973,15 @@ int main(int argc, char** argv, char** envp)
 		}
 
 		for (int i = 0; i < cfg.num_trampolines; i++) {
-			machismo_trampoline_config_t* tc = &cfg.trampolines[i];
+			machgate_trampoline_config_t* tc = &cfg.trampolines[i];
 
 			/* Override mode: exact-symbol matching from an override .so */
 			if (tc->override_lib) {
 				void* oh = dlopen(tc->override_lib, RTLD_LAZY);
 				if (oh) {
 					trampoline_patch_overrides(
-						(void*)machismo_load_results.mh,
-						machismo_load_results.slide, oh,
+						(void*)machgate_load_results.mh,
+						machgate_load_results.slide, oh,
 						tc->match_local);
 				} else {
 					fprintf(stderr, "machgate: warning: cannot load override lib %s: %s\n",
@@ -1063,8 +1063,8 @@ int main(int argc, char** argv, char** envp)
 				}
 			}
 
-			trampoline_patch_lib((void*)machismo_load_results.mh,
-			                     machismo_load_results.slide,
+			trampoline_patch_lib((void*)machgate_load_results.mh,
+			                     machgate_load_results.slide,
 			                     tc->lib,
 			                     (const char**)tc->prefixes,
 			                     tc->num_prefixes,
@@ -1076,7 +1076,7 @@ int main(int argc, char** argv, char** envp)
 		const char* guard_prefixes[64];
 		int num_guard_prefixes = 0;
 		for (int i = 0; i < cfg.num_trampolines; i++) {
-			machismo_trampoline_config_t* tc2 = &cfg.trampolines[i];
+			machgate_trampoline_config_t* tc2 = &cfg.trampolines[i];
 			if (!tc2->lib || strcmp(tc2->lib, "STUB") == 0) continue;
 			for (int j = 0; j < tc2->num_prefixes; j++) {
 				if (num_guard_prefixes < 64)
@@ -1084,16 +1084,16 @@ int main(int argc, char** argv, char** envp)
 			}
 		}
 		if (num_guard_prefixes > 0) {
-			trampoline_guard_stale_data((void*)machismo_load_results.mh,
-			                            machismo_load_results.slide,
+			trampoline_guard_stale_data((void*)machgate_load_results.mh,
+			                            machgate_load_results.slide,
 			                            guard_prefixes, num_guard_prefixes);
 		}
 	}
 
 	/* Register Mach-O symbols with GDB for backtraces */
-	if (machismo_load_results.mh) {
-		gdb_jit_register_macho((void*)machismo_load_results.mh,
-		                       machismo_load_results.slide);
+	if (machgate_load_results.mh) {
+		gdb_jit_register_macho((void*)machgate_load_results.mh,
+		                       machgate_load_results.slide);
 	}
 	for (int i = 0; i < g_num_macho_dylibs; i++) {
 		gdb_jit_register_macho((void*)g_macho_dylibs[i].mh,
@@ -1105,29 +1105,29 @@ int main(int argc, char** argv, char** envp)
 	 * at startup than to run the game with random memory corruption. */
 	if (cfg.patches) {
 		if (patcher_apply(cfg.patches,
-		                  (void*)machismo_load_results.mh,
-		                  machismo_load_results.slide) < 0) {
+		                  (void*)machgate_load_results.mh,
+		                  machgate_load_results.slide) < 0) {
 			fprintf(stderr, "machgate: patcher failed — aborting\n");
 			abort();
 		}
 	}
 
-	if (machismo_load_results.mh) {
-		if (syscall_gate_patch(&machismo_load_results) < 0) {
+	if (machgate_load_results.mh) {
+		if (syscall_gate_patch(&machgate_load_results) < 0) {
 			fprintf(stderr, "machgate: syscall gate patching failed — aborting\n");
 			abort();
 		}
 	}
 
-	if (machismo_load_results.mh && getenv("MACHGATE_TRACE_SIGNALS")) {
-		trampoline_install_signal_diagnostics((void*)machismo_load_results.mh,
-		                                      machismo_load_results.slide);
+	if (machgate_load_results.mh && getenv("MACHGATE_TRACE_SIGNALS")) {
+		trampoline_install_signal_diagnostics((void*)machgate_load_results.mh,
+		                                      machgate_load_results.slide);
 	}
 
 	/* Set up the Mach-O stack layout */
-	setup_stack64(filename, &machismo_load_results);
+	setup_stack64(filename, &machgate_load_results);
 
-	start_thread(&machismo_load_results);
+	start_thread(&machgate_load_results);
 
 	__builtin_unreachable();
 }
@@ -1284,8 +1284,8 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 		exit(1);
 	}
 
-	__machismo_main_stack_top = (void*)lr->stack_top;
-	__machismo_main_stack_size = size;
+	__machgate_main_stack_top = (void*)lr->stack_top;
+	__machgate_main_stack_size = size;
 
 	lr->kernfd = -1;
 }
@@ -1407,7 +1407,7 @@ static int fixup_darwin_allocator_slot(struct load_results* lr,
 
 	uintptr_t current = *(uintptr_t*)slot;
 	if (current) {
-		if (machismo_verbose)
+		if (machgate_verbose)
 			fprintf(stderr, "machgate: Darwin allocator default %s already 0x%lx\n",
 			        slot_name, current);
 		return 0;
@@ -1522,7 +1522,7 @@ static void call_dyld_initializer(struct load_results* lr, const char* kind,
 	else if (strcmp(kind, "__init_offsets") == 0)
 		log_kind = "init";
 
-	if (machismo_verbose)
+	if (machgate_verbose)
 		fprintf(stderr, "machgate: %s[%d/%d] at 0x%lx\n",
 		        log_kind, index, total, func_addr);
 	note_init_context(kind, index, total, func_addr);

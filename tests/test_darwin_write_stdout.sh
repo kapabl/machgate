@@ -5,8 +5,8 @@
 # - apple-oss-distributions/xnu/libsyscall/custom/SYS.h: ARM64 wrappers use x16 and svc #0x80
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 [ -f tests/fixtures/darwin_write_stdout ] || bash tests/fixtures/build_fixtures.sh
 output="$("$BUILD_DIR/machgate" tests/fixtures/darwin_write_stdout 2>/dev/null)"
 [ "$output" = "darwin write" ]

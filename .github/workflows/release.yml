@@ -69,6 +69,7 @@ jobs:
               DESTDIR=/work/package cmake --install build-arm64-release
               mkdir -p /work/package/opt/machgate/share/doc/machgate
               cp README.md /work/package/opt/machgate/share/doc/machgate/
+              cp ATTRIBUTION.md /work/package/opt/machgate/share/doc/machgate/
               cp docs/*.md /work/package/opt/machgate/share/doc/machgate/
             '
           version="${RELEASE_TAG#v}"

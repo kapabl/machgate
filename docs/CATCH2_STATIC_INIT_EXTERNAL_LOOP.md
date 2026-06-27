@@ -898,20 +898,36 @@ Interpretation:
 - A valid empty libc++ tree has `tree[0] == tree + 8`; after the current insert,
   libc++ will naturally set `tree[0]` to the inserted node.
 
-Fix staged after this trace:
+Rejected local experiment after this trace:
 
-- Add a narrow signal-dispatch repair for this exact libc++ insertion state:
-  `SIGSEGV`, fault address NULL, instruction `0xf9400108` (`ldr x8, [x8]`),
-  `x8 == NULL`, `x1 == x2 == x0 + 8`, `tree[0] == NULL`, and
-  `tree[8] == x3`.
-- The repair writes `tree[0] = tree + 8`, writes saved-context `x8 = tree + 8`,
-  logs `repaired zeroed libcxx tree begin node`, and returns from the signal
-  dispatcher so the original instruction retries.
-- Add `test_libcxx_tree_repair`, an ARM64 host regression that installs the
-  shim signal dispatcher through the Darwin `sigaction` ABI, deliberately
-  executes the same `ldr x8, [x8]` with the same register/object state, and
-  verifies the retried instruction loads the expected new-node pointer.
-- Full unit suite after the patch: `30/30 passed, 0 failed`.
+- `v0.3.13` added a narrow signal-dispatch repair for this exact libc++ tree
+  insertion state. It repaired `tree[0]` and the saved `x8`, then retried the
+  original instruction.
+- The private binary moved past the tree insert, but immediately faulted later
+  in the same Catch2 `TestCaseInfo` constructor while copying another
+  C++/Catch2 object. That proves the tree repair was only masking the first
+  visible broken invariant.
+- The local branch has backed out this repair. The next accepted fix must
+  target the systemic runtime issue: C++ static/local-static initialization,
+  Darwin libc++ ABI setup, or initializer ordering for the Catch2 registration
+  path.
+
+Accepted fix direction after the rejection:
+
+- The current fix targets the Darwin pthread/C++ runtime surface instead of the
+  crashed tree object.
+- `libsystem_shim` implements Darwin-compatible `pthread_once` for the Darwin
+  once signature state `0x30B1BCBA`, so C++/libc++ one-time initialization does
+  not fall through to glibc's incompatible `pthread_once` state machine.
+- `libsystem_shim.ver` exports the broader pthread surface used by Darwin C++
+  runtimes, including `pthread_once`, `pthread_mach_thread_np`, and
+  `pthread_threadid_np`.
+- The resolver routes `pthread_*` imports through the Darwin runtime shim before
+  host libraries, avoiding return-zero stubs or host glibc semantics for Darwin
+  pthread ABI calls.
+- `tests/test_libsystem_shim.sh` now directly verifies that a Darwin
+  `pthread_once_t` signature state runs the initializer exactly once and reaches
+  done state.
 
 Remaining interpretation rule for future similar traces:
 

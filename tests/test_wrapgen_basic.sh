@@ -2,8 +2,8 @@
 # Test: wrapgen parses aarch64 ELF and emits valid C
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
 tmpdir=$(mktemp -d)
 trap "rm -rf $tmpdir" EXIT

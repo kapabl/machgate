@@ -24,13 +24,13 @@ extern char** environ;
 
 static pid_t machgate_execve_process_pid;
 static char machgate_execve_loader_path[MACHGATE_EXECVE_PATH_MAX];
-static char machgate_execve_machismo_config_env[MACHGATE_EXECVE_PATH_MAX];
+static char machgate_execve_machgate_config_env[MACHGATE_EXECVE_PATH_MAX];
 static char machgate_execve_ld_library_path_env[MACHGATE_EXECVE_PATH_MAX];
 static char machgate_execve_ld_preload_env[MACHGATE_EXECVE_PATH_MAX];
 static char machgate_execve_trace_file[MACHGATE_EXECVE_PATH_MAX];
 static int machgate_execve_trace_enabled_snapshot;
 
-extern const char* __machismo_guest_executable_path __attribute__((weak));
+extern const char* __machgate_guest_executable_path __attribute__((weak));
 
 static int read_loader_path(char* loader_path, size_t loader_path_size);
 static int env_name_matches(const char* env_value, const char* name);
@@ -45,11 +45,11 @@ static void init_execve_process_pid(void)
 	                 sizeof(machgate_execve_loader_path));
 
 	for (size_t index = 0; environ && environ[index]; index++) {
-		if (env_name_matches(environ[index], "MACHISMO_CONFIG")) {
-			strncpy(machgate_execve_machismo_config_env, environ[index],
-			        sizeof(machgate_execve_machismo_config_env) - 1);
-			machgate_execve_machismo_config_env[
-				sizeof(machgate_execve_machismo_config_env) - 1] = '\0';
+		if (env_name_matches(environ[index], "MACHGATE_CONFIG")) {
+			strncpy(machgate_execve_machgate_config_env, environ[index],
+			        sizeof(machgate_execve_machgate_config_env) - 1);
+			machgate_execve_machgate_config_env[
+				sizeof(machgate_execve_machgate_config_env) - 1] = '\0';
 		} else if (env_name_matches(environ[index], "LD_LIBRARY_PATH")) {
 			strncpy(machgate_execve_ld_library_path_env, environ[index],
 			        sizeof(machgate_execve_ld_library_path_env) - 1);
@@ -260,9 +260,9 @@ static int read_loader_path(char* loader_path, size_t loader_path_size)
 
 static const char* machgate_guest_executable_path(void)
 {
-	if (&__machismo_guest_executable_path &&
-	    __machismo_guest_executable_path && *__machismo_guest_executable_path)
-		return __machismo_guest_executable_path;
+	if (&__machgate_guest_executable_path &&
+	    __machgate_guest_executable_path && *__machgate_guest_executable_path)
+		return __machgate_guest_executable_path;
 	return NULL;
 }
 
@@ -351,9 +351,9 @@ static int build_loader_envp_forksafe(char* const guest_envp[],
 	}
 
 	loader_envp[loader_envc] = NULL;
-	if (!env_has_name(loader_envp, "MACHISMO_CONFIG")) {
+	if (!env_has_name(loader_envp, "MACHGATE_CONFIG")) {
 		result = append_env_snapshot(loader_envp, &loader_envc,
-		                             machgate_execve_machismo_config_env);
+		                             machgate_execve_machgate_config_env);
 		if (result)
 			return result;
 	}
@@ -415,7 +415,7 @@ static int append_env_value(char* loader_envp[], size_t* loader_envc,
 }
 
 static int build_loader_envp(char* const guest_envp[], char* loader_envp[],
-                             char* machismo_config_env,
+                             char* machgate_config_env,
                              char* ld_library_path_env,
                              char* ld_preload_env)
 {
@@ -433,9 +433,9 @@ static int build_loader_envp(char* const guest_envp[], char* loader_envp[],
 	}
 	loader_envp[loader_envc] = NULL;
 
-	if (!env_has_name(loader_envp, "MACHISMO_CONFIG")) {
-		result = append_env_value(loader_envp, &loader_envc, "MACHISMO_CONFIG",
-		                          machismo_config_env,
+	if (!env_has_name(loader_envp, "MACHGATE_CONFIG")) {
+		result = append_env_value(loader_envp, &loader_envc, "MACHGATE_CONFIG",
+		                          machgate_config_env,
 		                          MACHGATE_EXECVE_PATH_MAX);
 		if (result)
 			return result;
@@ -466,7 +466,7 @@ int machgate_execve_macho_guest(const char* path, char* const guest_argv[],
 {
 	const char* guest_path;
 	char loader_path[MACHGATE_EXECVE_PATH_MAX];
-	char machismo_config_env[MACHGATE_EXECVE_PATH_MAX];
+	char machgate_config_env[MACHGATE_EXECVE_PATH_MAX];
 	char ld_library_path_env[MACHGATE_EXECVE_PATH_MAX];
 	char ld_preload_env[MACHGATE_EXECVE_PATH_MAX];
 	char* loader_argv[MACHGATE_EXECVE_MAX_ARGS + 3];
@@ -493,7 +493,7 @@ int machgate_execve_macho_guest(const char* path, char* const guest_argv[],
 	if (result)
 		return result;
 
-	result = build_loader_envp(guest_envp, loader_envp, machismo_config_env,
+	result = build_loader_envp(guest_envp, loader_envp, machgate_config_env,
 	                           ld_library_path_env, ld_preload_env);
 	if (result)
 		return result;
@@ -565,8 +565,8 @@ int machgate_execve_macho_guest_forksafe(const char* path,
 	                             env_has_name(loader_envp, "LD_PRELOAD"));
 	trace_execve_forksafe_number("env-ld-library-path",
 	                             env_has_name(loader_envp, "LD_LIBRARY_PATH"));
-	trace_execve_forksafe_number("env-machismo-config",
-	                             env_has_name(loader_envp, "MACHISMO_CONFIG"));
+	trace_execve_forksafe_number("env-machgate-config",
+	                             env_has_name(loader_envp, "MACHGATE_CONFIG"));
 	trace_execve_forksafe("exec", loader_path, guest_path);
 	syscall(SYS_execve, loader_path, loader_argv, loader_envp);
 	trace_execve_forksafe_number("linux-execve-errno", errno);

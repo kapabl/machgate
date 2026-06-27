@@ -3,7 +3,7 @@
  *
  * These types match the in-memory layout of Apple's C++ standard library
  * on aarch64. Use them in replacement functions that operate on Mach-O
- * objects loaded by machismo.
+ * objects loaded by machgate.
  */
 
 #ifndef APPLE_ABI_H
@@ -53,7 +53,7 @@ static inline uint64_t apple_string_len(const apple_string_t *s)
  *   }
  *
  * The function is exported from the .so with the mangled name (minus
- * one leading underscore from the Mach-O convention). The machismo
+ * one leading underscore from the Mach-O convention). The machgate
  * override trampoline discovers it via dlsym.
  */
 #define MACHO_FUNC(mangled_name, ret_type, ...) \

@@ -1,9 +1,9 @@
 #!/bin/bash
-# Test runner for machismo and wrapgen
+# Test runner for machgate and wrapgen
 cd "$(dirname "$0")/.."
 
-export MACHISMO_ROOT="$(pwd)"
-export BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+export MACHGATE_ROOT="$(pwd)"
+export BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
 PASS=0
 FAIL=0

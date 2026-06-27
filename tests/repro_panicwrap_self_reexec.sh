@@ -3,8 +3,8 @@
 set -e
 cd "$(dirname "$0")/.."
 
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 export BUILD_DIR
 
 if [ ! -f tests/fixtures/darwin_panicwrap_self_reexec ] || \

@@ -2,8 +2,8 @@
 # Test: libsystem_shim.so can be loaded and key Apple-specific symbols resolve
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
 [ -f "$BUILD_DIR/libsystem_shim.so" ] || { echo "libsystem_shim.so not built"; exit 1; }
 
@@ -84,6 +84,24 @@ assert lib.__maskrune(ord('Z'), CTYPE_A | CTYPE_U), 'uppercase alpha mask failed
 assert lib.__maskrune(ord('7'), CTYPE_D), 'digit mask failed'
 assert lib.__maskrune(ord('_'), CTYPE_P), 'punctuation mask failed'
 assert lib.__maskrune(ord(' '), CTYPE_S), 'space mask failed'
+
+# Darwin pthread_once_t starts with a signature value that glibc's pthread_once
+# does not understand. The shim must consume that state itself so C++/libc++
+# one-time initialization does not fall through to host pthread semantics.
+CALLBACK = ctypes.CFUNCTYPE(None)
+once_state = ctypes.c_int(0x30B1BCBA)
+once_calls = ctypes.c_int(0)
+
+@CALLBACK
+def once_init():
+    once_calls.value += 1
+
+lib.pthread_once.argtypes = [ctypes.c_void_p, CALLBACK]
+lib.pthread_once.restype = ctypes.c_int
+assert lib.pthread_once(ctypes.byref(once_state), once_init) == 0, 'pthread_once first call failed'
+assert lib.pthread_once(ctypes.byref(once_state), once_init) == 0, 'pthread_once second call failed'
+assert once_calls.value == 1, f'pthread_once init count={once_calls.value}, expected 1'
+assert once_state.value == 2, f'pthread_once state={once_state.value:#x}, expected done state 2'
 
 print('All libsystem_shim symbol tests passed')
 "

@@ -209,11 +209,11 @@ int try_install_entity_opt(void *L)
 	fprintf(stderr, "resolver: entity_opt: ECS found, installing C metamethods\n");
 
 	/* Register closure factories via rawset to bypass _G strict mode */
-	api_pushstring(L, "_machismo_make_index_closure");
+	api_pushstring(L, "_machgate_make_index_closure");
 	api_pushcclosure(L, (void *)make_index_closure, 0);
 	api_rawset(L, LUA_GLOBALSINDEX);
 
-	api_pushstring(L, "_machismo_make_newindex_closure");
+	api_pushstring(L, "_machgate_make_newindex_closure");
 	api_pushcclosure(L, (void *)make_newindex_closure, 0);
 	api_rawset(L, LUA_GLOBALSINDEX);
 
@@ -268,14 +268,14 @@ int try_install_entity_opt(void *L)
 		"    error('entity_opt: no invalidWriteError upvalue')\n"
 		"end\n"
 		"\n"
-		"local mkIdx = rawget(_G, '_machismo_make_index_closure')\n"
-		"local mkNew = rawget(_G, '_machismo_make_newindex_closure')\n"
+		"local mkIdx = rawget(_G, '_machgate_make_index_closure')\n"
+		"local mkNew = rawget(_G, '_machgate_make_newindex_closure')\n"
 		"cmt.__index = mkIdx(defaultValue)\n"
 		"cmt.__newindex = mkNew(invalidWriteError)\n"
 		"\n"
 		"ECS.despawn(entity.id)\n"
-		"rawset(_G, '_machismo_make_index_closure', nil)\n"
-		"rawset(_G, '_machismo_make_newindex_closure', nil)\n"
+		"rawset(_G, '_machgate_make_index_closure', nil)\n"
+		"rawset(_G, '_machgate_make_newindex_closure', nil)\n"
 	);
 
 	err = do_lua_string(L, install);

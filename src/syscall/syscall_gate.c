@@ -612,7 +612,7 @@ int syscall_gate_patch(struct load_results* lr)
 
 	gate_pool_count = 0;
 
-	void* pool = machismo_pool_alloc(lr, SYSCALL_GATE_POOL_SIZE);
+	void* pool = machgate_pool_alloc(lr, SYSCALL_GATE_POOL_SIZE);
 	if (!pool) {
 		fprintf(stderr, "syscall_gate: no adjacent pool space for syscall islands\n");
 	} else if (!register_gate_pool(pool, SYSCALL_GATE_POOL_SIZE)) {

@@ -6,9 +6,9 @@
 /*
  * Renderer-neutral SDL window glue.
  *
- * machismo installs sdl_create_window_wrapper / sdl_set_window_fullscreen_wrapper
+ * machgate installs sdl_create_window_wrapper / sdl_set_window_fullscreen_wrapper
  * as trampoline overrides for ANY game whose SDL2 is trampolined (the `_SDL_`
- * prefix; see machismo.c). That's every SDL port regardless of renderer:
+ * prefix; see machgate.c). That's every SDL port regardless of renderer:
  * NecroDancer (bgfx), Shotgun King / Wratch's Den / Scavenger (Sugar), and
  * Mina (the Gothic GLES backend). None of this is bgfx-specific — it used to
  * live in bgfx_shim.c only by accident of history.
@@ -38,7 +38,7 @@ typedef struct {
 	char          rest[256];
 } sdl_wminfo_t;
 
-/* Trampoline override targets (installed by machismo for every `_SDL_` prefix).
+/* Trampoline override targets (installed by machgate for every `_SDL_` prefix).
  *
  * sdl_create_window_wrapper strips SDL_WINDOW_METAL (Apple-Silicon Mac builds
  * request a Metal window; native Linux SDL has no Metal backend, so the call

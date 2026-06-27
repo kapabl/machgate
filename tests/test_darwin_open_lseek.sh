@@ -5,8 +5,8 @@
 # - apple-oss-distributions/xnu/bsd/sys/fcntl.h: Darwin O_RDONLY is 0
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 [ -f tests/fixtures/darwin_open_lseek ] || bash tests/fixtures/build_fixtures.sh
 output="$("$BUILD_DIR/machgate" tests/fixtures/darwin_open_lseek 2>/dev/null)"
 [ "$output" = "seek-ok" ]

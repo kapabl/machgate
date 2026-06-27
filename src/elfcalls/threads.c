@@ -239,9 +239,9 @@ int __darling_thread_terminate(void* stackaddr,
 	__builtin_unreachable();
 }
 
-extern void* __machismo_main_stack_top;
+extern void* __machgate_main_stack_top;
 
 void* __darling_thread_get_stack(void)
 {
-	return __machismo_main_stack_top;
+	return __machgate_main_stack_top;
 }

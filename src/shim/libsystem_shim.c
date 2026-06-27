@@ -666,29 +666,29 @@ void dyld_stub_binder(void)
 int* _NSGetArgc(void)
 {
 	static int argc = 0;
-	int* machismo_argc = dlsym(RTLD_DEFAULT, "__machismo_guest_argc");
+	int* machgate_argc = dlsym(RTLD_DEFAULT, "__machgate_guest_argc");
 
-	if (machismo_argc)
-		return machismo_argc;
+	if (machgate_argc)
+		return machgate_argc;
 	return &argc;
 }
 
 char*** _NSGetArgv(void)
 {
 	static char** argv = NULL;
-	char*** machismo_argv = dlsym(RTLD_DEFAULT, "__machismo_guest_argv");
+	char*** machgate_argv = dlsym(RTLD_DEFAULT, "__machgate_guest_argv");
 
-	if (machismo_argv)
-		return machismo_argv;
+	if (machgate_argv)
+		return machgate_argv;
 	return &argv;
 }
 
 char*** _NSGetEnviron(void)
 {
-	char*** machismo_envp = dlsym(RTLD_DEFAULT, "__machismo_guest_envp");
+	char*** machgate_envp = dlsym(RTLD_DEFAULT, "__machgate_guest_envp");
 
-	if (machismo_envp && *machismo_envp)
-		return machismo_envp;
+	if (machgate_envp && *machgate_envp)
+		return machgate_envp;
 	return &environ;
 }
 
@@ -6123,7 +6123,7 @@ float __exp10f(float x)
  * directory structures.
  *
  * The game calls getenv("HOME") and appends "/Library/Preferences/...".
- * By returning "./userdata" (relative to CWD, which machismo sets to the
+ * By returning "./userdata" (relative to CWD, which machgate sets to the
  * binary's directory), saves go to <game_dir>/userdata/Library/Preferences/.
  */
 static char fake_home[4096] = {0};
@@ -6131,12 +6131,12 @@ static pthread_once_t fake_home_once = PTHREAD_ONCE_INIT;
 
 static void init_fake_home(void)
 {
-	/* MACHISMO_HOME overrides the default userdata location */
-	const char *override = getenv("MACHISMO_HOME");
+	/* MACHGATE_HOME overrides the default userdata location */
+	const char *override = getenv("MACHGATE_HOME");
 	if (override && override[0]) {
 		snprintf(fake_home, sizeof(fake_home), "%.4095s", override);
 	} else {
-		/* Build path: <directory of machismo binary>/userdata */
+		/* Build path: <directory of machgate binary>/userdata */
 		char exe[4096];
 		ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
 		if (len > 0) {
@@ -6165,15 +6165,15 @@ static const char* get_fake_home(void)
 
 static char* getenv_from_guest_envp(const char* name)
 {
-	char*** machismo_envp = dlsym(RTLD_DEFAULT, "__machismo_guest_envp");
+	char*** machgate_envp = dlsym(RTLD_DEFAULT, "__machgate_guest_envp");
 	size_t name_len;
 
-	if (!name || !machismo_envp || !*machismo_envp)
+	if (!name || !machgate_envp || !*machgate_envp)
 		return NULL;
 
 	name_len = strlen(name);
-	for (size_t env_index = 0; (*machismo_envp)[env_index]; env_index++) {
-		char* entry = (*machismo_envp)[env_index];
+	for (size_t env_index = 0; (*machgate_envp)[env_index]; env_index++) {
+		char* entry = (*machgate_envp)[env_index];
 		if (strncmp(entry, name, name_len) == 0 && entry[name_len] == '=')
 			return entry + name_len + 1;
 	}
@@ -6215,7 +6215,7 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize)
 	if (!buf || !bufsize) return -1;
 
 	const char** guest_executable_path =
-		dlsym(RTLD_DEFAULT, "__machismo_guest_executable_path");
+		dlsym(RTLD_DEFAULT, "__machgate_guest_executable_path");
 	const char* path = (guest_executable_path && *guest_executable_path)
 		? *guest_executable_path
 		: NULL;
@@ -6249,7 +6249,7 @@ int proc_pidpath(int pid, void* buffer, uint32_t buffersize)
 	}
 
 	const char** guest_executable_path =
-		dlsym(RTLD_DEFAULT, "__machismo_guest_executable_path");
+		dlsym(RTLD_DEFAULT, "__machgate_guest_executable_path");
 	const char* path = (pid == getpid() && guest_executable_path &&
 	                    *guest_executable_path)
 		? *guest_executable_path
@@ -6296,7 +6296,7 @@ int __pthread_fchdir(int fd)
 const char* getprogname(void)
 {
 	const char** guest_executable_path =
-		dlsym(RTLD_DEFAULT, "__machismo_guest_executable_path");
+		dlsym(RTLD_DEFAULT, "__machgate_guest_executable_path");
 	const char* path = (guest_executable_path && *guest_executable_path)
 		? *guest_executable_path
 		: "machgate";
@@ -6350,7 +6350,7 @@ void* getsectiondata(const void* header, const char* segment_name,
  *
  * Apple's API for enumerating well-known user directories. Sugar's
  * sugar::file::desktop_path uses it to locate ~/Library/Application Support.
- * We redirect to the rewritten HOME so saves land under MACHISMO_HOME.
+ * We redirect to the rewritten HOME so saves land under MACHGATE_HOME.
  *
  * Real semantics:
  *   state = NSStartSearchPathEnumeration(key, domainMask);
@@ -6766,6 +6766,31 @@ void *pthread_getspecific(pthread_key_t key)
 		        (unsigned int)key, darwin_tsd_values[index]);
 	return darwin_tsd_values[index];
 }
+
+int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
+{
+	int *sig = (int *)once_control;
+	int val = *sig;
+
+	if (val == 2 || val == ~0) {
+		return 0;
+	}
+
+	if (val == 0 || val == (int)0x30B1BCBA) {
+		if (__sync_bool_compare_and_swap(sig, val, 1)) {
+			init_routine();
+			__sync_synchronize();
+			*sig = 2;
+			return 0;
+		}
+	}
+
+	while (*sig == 1) {
+		sched_yield();
+	}
+	return 0;
+}
+
 
 static int shim_trace_enabled(void)
 {
@@ -7189,16 +7214,16 @@ void* pthread_get_stackaddr_np(pthread_t thread)
 	pthread_attr_t attr;
 	void* stack_addr = NULL;
 	size_t stack_size = 0;
-	void** machismo_stack_top;
+	void** machgate_stack_top;
 
-	machismo_stack_top = dlsym(RTLD_DEFAULT, "__machismo_main_stack_top");
-	if (machismo_stack_top && *machismo_stack_top &&
+	machgate_stack_top = dlsym(RTLD_DEFAULT, "__machgate_main_stack_top");
+	if (machgate_stack_top && *machgate_stack_top &&
 	    machgate_main_pthread_set &&
 	    pthread_equal(thread, pthread_self()) &&
 	    pthread_equal(thread, machgate_main_pthread)) {
 		if (shim_trace_enabled())
-			fprintf(stderr, "libsystem_shim: pthread_get_stackaddr_np main -> %p\n", *machismo_stack_top);
-		return *machismo_stack_top;
+			fprintf(stderr, "libsystem_shim: pthread_get_stackaddr_np main -> %p\n", *machgate_stack_top);
+		return *machgate_stack_top;
 	}
 	if (pthread_getattr_np(thread, &attr) != 0)
 		return NULL;
@@ -7214,16 +7239,16 @@ size_t pthread_get_stacksize_np(pthread_t thread)
 	pthread_attr_t attr;
 	void* stack_addr = NULL;
 	size_t stack_size = 0;
-	size_t* machismo_stack_size;
+	size_t* machgate_stack_size;
 
-	machismo_stack_size = dlsym(RTLD_DEFAULT, "__machismo_main_stack_size");
-	if (machismo_stack_size && *machismo_stack_size &&
+	machgate_stack_size = dlsym(RTLD_DEFAULT, "__machgate_main_stack_size");
+	if (machgate_stack_size && *machgate_stack_size &&
 	    machgate_main_pthread_set &&
 	    pthread_equal(thread, pthread_self()) &&
 	    pthread_equal(thread, machgate_main_pthread)) {
 		if (shim_trace_enabled())
-			fprintf(stderr, "libsystem_shim: pthread_get_stacksize_np main -> %zu\n", *machismo_stack_size);
-		return *machismo_stack_size;
+			fprintf(stderr, "libsystem_shim: pthread_get_stacksize_np main -> %zu\n", *machgate_stack_size);
+		return *machgate_stack_size;
 	}
 	if (pthread_getattr_np(thread, &attr) != 0)
 		return 0;
@@ -8403,52 +8428,6 @@ static uintptr_t trace_ucontext_reg(void* ucontext, int reg)
 #endif
 }
 
-static void trace_set_ucontext_reg(void* ucontext, int reg, uintptr_t value)
-{
-#if defined(__aarch64__)
-	if (reg >= 0 && reg < 31)
-		((ucontext_t*)ucontext)->uc_mcontext.regs[reg] = value;
-#else
-	(void)ucontext;
-	(void)reg;
-	(void)value;
-#endif
-}
-
-static int repair_libcxx_tree_insert_context(int signum, siginfo_t* info,
-                                             uintptr_t pc, void* ucontext)
-{
-	uint32_t insn = 0;
-	uintptr_t tree = trace_ucontext_reg(ucontext, 0);
-	uintptr_t child_slot = trace_ucontext_reg(ucontext, 1);
-	uintptr_t child_slot2 = trace_ucontext_reg(ucontext, 2);
-	uintptr_t new_node = trace_ucontext_reg(ucontext, 3);
-	uintptr_t begin_reg = trace_ucontext_reg(ucontext, 8);
-	uint64_t begin_node = 0;
-	uint64_t root_node = 0;
-
-	if (signum != SIGSEGV || !info || info->si_addr != NULL || !pc)
-		return 0;
-	memcpy(&insn, (void*)pc, sizeof(insn));
-	if (insn != 0xf9400108u)
-		return 0;
-	if (!tree || !new_node || begin_reg || child_slot != tree + 8 ||
-	    child_slot2 != child_slot)
-		return 0;
-	memcpy(&begin_node, (void*)tree, sizeof(begin_node));
-	memcpy(&root_node, (void*)child_slot, sizeof(root_node));
-	if (begin_node || root_node != new_node)
-		return 0;
-
-	*(uint64_t*)tree = child_slot;
-	trace_set_ucontext_reg(ucontext, 8, child_slot);
-	if (shim_signal_trace_enabled())
-		fprintf(stderr,
-		        "libsystem_shim: repaired zeroed libcxx tree begin node tree=%p begin=%p new-node=%p pc=%p\n",
-		        (void*)tree, (void*)child_slot, (void*)new_node, (void*)pc);
-	return 1;
-}
-
 static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 {
 	if (shim_signal_trace_enabled()) {
@@ -8484,10 +8463,6 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		trace_signal_register_context(ucontext);
 		trace_signal_tree_insert_context(pc, ucontext);
 	}
-
-	if (repair_libcxx_tree_insert_context(signum, info, trace_ucontext_pc(ucontext),
-	                                      ucontext))
-		return;
 
 	if (signum > 0 && signum < _NSIG) {
 		if (trace_signal_uses_siginfo[signum] && trace_signal_actions[signum]) {
@@ -9486,7 +9461,7 @@ void* dispatch_data_create(const void *buffer, size_t size,
 
 /* Recover the bytes from a dispatch_data created above; NULL if `dd` is not one
  * of ours. Exported (loader is -rdynamic) for the Gothic shim to dlsym. */
-const void *machismo_dispatch_data_bytes(void *dd, size_t *out_size)
+const void *machgate_dispatch_data_bytes(void *dd, size_t *out_size)
 {
 	if (!dd) return NULL;
 	struct dispatch_data_obj *o = (struct dispatch_data_obj *)dd;
@@ -9542,7 +9517,7 @@ void _tlv_atexit(void (*func)(void *), void *arg)
  * initial TLV image from __thread_data on first use.
  */
 
-/* TLV image info — set by machismo before execution */
+/* TLV image info — set by machgate before execution */
 void* __tlv_image_base = NULL;   /* base of __DATA,__thread_data */
 size_t __tlv_image_size = 0;     /* size of __thread_data */
 size_t __tlv_bss_size = 0;       /* size of __thread_bss (after thread_data) */
@@ -10220,8 +10195,8 @@ static void linux_to_darwin_stat(const struct stat *ls, struct darwin_stat *ds)
 /*
  * Hide files that must not exist from the Mach-O binary's point of view.
  *
- * A macOS libsteam_api.dylib can never function under machismo on Linux (it
- * talks to the macOS Steam client, which isn't here), and machismo already
+ * A macOS libsteam_api.dylib can never function under machgate on Linux (it
+ * talks to the macOS Steam client, which isn't here), and machgate already
  * STUBs the Steamworks API to return 0. Games decide "am I a Steam build?" by
  * stat()'ing the dylib — e.g. Mina the Hollower (_global.c) does
  * `s_isSteamBuild = stat("libsteam_api.dylib")==0`, then refuses to boot

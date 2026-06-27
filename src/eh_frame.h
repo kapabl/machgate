@@ -7,8 +7,8 @@
  * code to be caught by try/catch handlers.
  */
 
-#ifndef _MACHISMO_EH_FRAME_H_
-#define _MACHISMO_EH_FRAME_H_
+#ifndef _MACHGATE_EH_FRAME_H_
+#define _MACHGATE_EH_FRAME_H_
 
 #include <stdint.h>
 
@@ -26,4 +26,4 @@
  */
 int eh_frame_register_macho(void* mh, uintptr_t slide);
 
-#endif /* _MACHISMO_EH_FRAME_H_ */
+#endif /* _MACHGATE_EH_FRAME_H_ */

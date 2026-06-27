@@ -2,8 +2,8 @@
 # Test: resolver can parse NecroDancer's chained fixups and report stats
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
 NECRO_BIN="../necrodancer/depot_247086/NecroDancerSP.app/Contents/MacOS/NecroDancer"
 
@@ -12,7 +12,7 @@ if [ ! -f "$NECRO_BIN" ]; then
     exit 0
 fi
 
-output=$(MACHISMO_DYLIB_MAP=dylib_map.conf LD_LIBRARY_PATH="$BUILD_DIR" "$BUILD_DIR/machgate" "$NECRO_BIN" 2>&1 || true)
+output=$(MACHGATE_DYLIB_MAP=dylib_map.conf LD_LIBRARY_PATH="$BUILD_DIR" "$BUILD_DIR/machgate" "$NECRO_BIN" 2>&1 || true)
 
 # Resolver should have found dylibs and chained fixups
 echo "$output" | grep -q "found 38 dylibs"

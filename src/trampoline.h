@@ -51,7 +51,7 @@ int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle,
                                int match_local);
 
 /*
- * Legacy API — reads MACHISMO_TRAMPOLINE_LIB and MACHISMO_TRAMPOLINE_PREFIX env vars.
+ * Legacy API — reads MACHGATE_TRAMPOLINE_LIB and MACHGATE_TRAMPOLINE_PREFIX env vars.
  * Kept for backward compatibility with tests.
  */
 int trampoline_patch(void* mh, uintptr_t slide);

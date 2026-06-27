@@ -19,7 +19,7 @@ the port tree. Re-run when new music tracks are added.
 Usage:
     scripts/gen_pcm_cache_manifest.py \\
         --music-dir ~/darling/shotgun_king/extracted/assets/music \\
-        --cache-dir ~/darling/shotgun_king/shotgun_king.app/Contents/MacOS/.machismo-pcm-cache \\
+        --cache-dir ~/darling/shotgun_king/shotgun_king.app/Contents/MacOS/.machgate-pcm-cache \\
         --freq 48000 \\
         --out port/shotgunking/patch/cache_meta.txt
 """
@@ -77,7 +77,7 @@ def main() -> int:
     ap.add_argument("--music-dir", required=True, type=Path,
                     help="directory containing .ogg files (e.g. assets/music/ from a data.sgr extract)")
     ap.add_argument("--cache-dir", required=True, type=Path,
-                    help="host .machismo-pcm-cache dir warmed by a prior run")
+                    help="host .machgate-pcm-cache dir warmed by a prior run")
     ap.add_argument("--freq", required=True, type=int,
                     help="use_freq value (typically 48000)")
     ap.add_argument("--out", required=True, type=Path,

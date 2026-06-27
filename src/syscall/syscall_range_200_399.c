@@ -28,7 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
-extern const char* __machismo_guest_executable_path;
+extern const char* __machgate_guest_executable_path;
 
 #define DARWIN_SYS_truncate 200
 #define DARWIN_SYS_ftruncate 201
@@ -1705,9 +1705,9 @@ static void handle_proc_pidinfo(struct syscall_gate_state* state, pid_t pid,
 		char path[DARWIN_MAXPATHLEN];
 		memset(path, 0, sizeof(path));
 		if (pid == (pid_t)syscall(SYS_getpid) &&
-		    __machismo_guest_executable_path &&
-		    *__machismo_guest_executable_path) {
-			strncpy(path, __machismo_guest_executable_path,
+		    __machgate_guest_executable_path &&
+		    *__machgate_guest_executable_path) {
+			strncpy(path, __machgate_guest_executable_path,
 			        sizeof(path) - 1);
 		} else {
 			ssize_t result = (ssize_t)syscall(SYS_readlinkat, AT_FDCWD,

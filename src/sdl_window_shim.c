@@ -2,7 +2,7 @@
  * sdl_window_shim.c — renderer-neutral SDL window glue.
  *
  * Window creation/capture + native-handle plumbing shared by every SDL-based
- * machismo port (bgfx, Sugar, Gothic). See sdl_window_shim.h for the rationale;
+ * machgate port (bgfx, Sugar, Gothic). See sdl_window_shim.h for the rationale;
  * this code was previously embedded in bgfx_shim.c and is otherwise unchanged.
  */
 #include "sdl_window_shim.h"

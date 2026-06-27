@@ -43,7 +43,7 @@ void bgfx_reset_wrapper(uint32_t width, uint32_t height, uint32_t flags, uint8_t
 /* NOTE: the SDL window wrappers (sdl_create_window_wrapper,
  * sdl_set_window_fullscreen_wrapper) and the captured-window accessor now live
  * in sdl_window_shim.h — they are renderer-neutral and shared with the Sugar
- * and Gothic ports. machismo installs them for every `_SDL_` trampoline. */
+ * and Gothic ports. machgate installs them for every `_SDL_` trampoline. */
 
 /* --- Diagnostic wrappers for camera/rendering offset investigation --- */
 

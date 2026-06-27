@@ -3,9 +3,9 @@
 set -e
 cd "$(dirname "$0")/.."
 
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
-FIXTURE_DIR="$MACHISMO_ROOT/tests/fixtures"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
+FIXTURE_DIR="$MACHGATE_ROOT/tests/fixtures"
 LLVM_MC="${LLVM_MC:-$(command -v llvm-mc || command -v llvm-mc-18 || true)}"
 LD64_LLD="${LD64_LLD:-$(command -v ld64.lld || command -v ld64.lld-18 || true)}"
 CC="${CC:-cc}"

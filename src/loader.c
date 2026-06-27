@@ -118,7 +118,7 @@ void FUNCTION_NAME(int fd, bool expect_dylinker, struct load_results* lr)
 		 * mapped so it is guaranteed adjacent to __TEXT. */
 		uintptr_t page_sz = sysconf(_SC_PAGESIZE);
 		size_t mmapAligned = (mmapSize + page_sz - 1) & ~(page_sz - 1);
-		size_t totalSize = mmapAligned + MACHISMO_POOL_PADDING;
+		size_t totalSize = mmapAligned + MACHGATE_POOL_PADDING;
 		slide = (uintptr_t) mmap((void*) base, totalSize, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_EXTRA, -1, 0);
 		if (slide == (uintptr_t)MAP_FAILED)
 		{
@@ -133,10 +133,10 @@ void FUNCTION_NAME(int fd, bool expect_dylinker, struct load_results* lr)
 
 		/* Make the pool tail RWX for branch islands */
 		void* pool_base = (void*)(slide + mmapAligned);
-		mprotect(pool_base, MACHISMO_POOL_PADDING,
+		mprotect(pool_base, MACHGATE_POOL_PADDING,
 		         PROT_READ | PROT_WRITE | PROT_EXEC);
 		lr->pool_base = pool_base;
-		lr->pool_size = MACHISMO_POOL_PADDING;
+		lr->pool_size = MACHGATE_POOL_PADDING;
 		lr->pool_used = 0;
 
 		if (slide + totalSize > lr->vm_addr_max)

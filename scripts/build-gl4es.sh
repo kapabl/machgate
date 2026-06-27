@@ -14,8 +14,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MACHISMO_DIR="$(dirname "$SCRIPT_DIR")"
-BUILD_DIR="$MACHISMO_DIR/build-gl4es"
+MACHGATE_DIR="$(dirname "$SCRIPT_DIR")"
+BUILD_DIR="$MACHGATE_DIR/build-gl4es"
 GL4ES_SRC="$BUILD_DIR/gl4es"
 
 echo "Building gl4es in $BUILD_DIR..."
@@ -29,7 +29,7 @@ if [ ! -d "$GL4ES_SRC" ]; then
     # Teach pixel_convert's color map about GL_RED_INTEGER / GL_RG_INTEGER so
     # Sugar-engine palette-indexed framebuffer uploads (usampler2D textures)
     # don't bail in swizzle_texture with "pixel conversion, anticipated abort".
-    (cd "$GL4ES_SRC" && patch -p1 < "$MACHISMO_DIR/patches/gl4es-red-integer.patch")
+    (cd "$GL4ES_SRC" && patch -p1 < "$MACHGATE_DIR/patches/gl4es-red-integer.patch")
 fi
 
 # Build

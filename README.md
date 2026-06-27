@@ -3,26 +3,34 @@
 MachGate runs **Apple Silicon ARM64 Mach-O command-line binaries** inside
 **ARM64 Linux containers**.
 
-It is a fork of Machismo. Machismo proved the core idea: Apple Silicon Mach-O
-binaries already contain native ARM64 instructions, so on ARM64 Linux the hard
-part is not CPU emulation. The hard part is loading Mach-O correctly and
-translating the Darwin ABI surface those binaries expect.
+MachGate is a GPLv3-or-later fork of Machismo, which itself builds on Darling's
+Mach-O loader work. Machismo proved the core idea: Apple Silicon Mach-O binaries
+already contain native ARM64 instructions, so on ARM64 Linux the hard part is
+not CPU emulation. The hard part is loading Mach-O correctly and translating the
+Darwin ABI surface those binaries expect.
 
-MachGate keeps Machismo's loader, fixup resolver, dylib loader, trampoline
-machinery, commpage setup, and ARM instruction patching work, then adds the
-missing production path for CLI tools:
+MachGate preserves the inherited Machismo/Darling loader foundation: Mach-O
+parsing, fat-binary ARM64 selection, segment mapping, chained fixups, dylib
+loading, trampolines, commpage setup, stack setup, and ARM instruction patching.
+On top of that foundation, MachGate adds a large Linux-container runtime layer
+for real command-line workloads:
 
 - Darwin-to-Linux syscall translation for statically linked Darwin libc /
   libSystem code that executes `svc #0x80` directly
 - a broad `libSystem.B.dylib` shim for imported libc/libSystem calls
+- Darwin errno, signal, file, process, VM, pthread, and time compatibility paths
 - Mach-O guest re-exec support for Go/Rust process wrappers
 - host/glibc VM interposition for runtime paths that bypass imported symbols
-- external CLI corpus testing against real public macOS ARM64 binaries
+- Apple/Darwin C++ ABI adapters and libc++ compatibility work
+- TLV, initializer, exception-frame, atomics, and ARM feature compatibility
+- Docker/QEMU runner scripts, GitHub release packaging, and CI workflows
+- loop-engineered external corpus testing against real public macOS ARM64
+  binaries
 
-Current release: **v0.3.13**
+Current release: **v0.3.14**
 
-- GitHub release: <https://github.com/kapabl/machgate/releases/tag/v0.3.13>
-- Download: `machgate-0.3.13-linux-arm64.tar.gz`
+- GitHub release: <https://github.com/kapabl/machgate/releases/tag/v0.3.14>
+- Download: `machgate-0.3.14-linux-arm64.tar.gz`
 - Latest validation:
   - 57 / 57 original external ARM64 macOS CLI probes pass
   - 13 / 13 Rust expansion probes pass
@@ -200,19 +208,19 @@ MACHGATE_LOCAL_DIR=/path/to/machgate-arm64-dir scripts/run-macho-docker.sh /path
 To run with a local release tarball instead of downloading from GitHub:
 
 ```bash
-MACHGATE_TARBALL=/path/to/machgate-0.3.13-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_TARBALL=/path/to/machgate-0.3.14-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 To diagnose startup hangs in static constructors, enable LC_MAIN tracing:
 
 ```bash
-MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.13-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.14-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 To stop a stuck guest after a fixed interval while keeping live logs:
 
 ```bash
-MACHGATE_TIMEOUT=120 MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.13-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+MACHGATE_TIMEOUT=120 MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.14-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
 Pass any guest arguments after the binary path:
@@ -225,7 +233,7 @@ The script:
 
 1. starts `ubuntu:24.04` as `linux/arm64`
 2. downloads the published MachGate release
-3. generates a default `machismo.conf` and `dylib_map.conf`
+3. generates a default `machgate.conf` and `dylib_map.conf`
 4. mounts the binary's directory at `/input`
 5. runs `/opt/machgate/bin/machgate /input/<binary> ...`
 6. streams the guest stdout/stderr and prints the guest exit status
@@ -237,15 +245,15 @@ Some C++ Mach-O binaries also need an Apple-ABI-compatible `libc++.so.1` and a
 `libc++.1 = /path/to/libc++.so.1` entry in `dylib_map.conf`. Most Go/Rust/static
 CLI probes in the current corpus do not need that extra mapping.
 
-MachGate still honors Machismo-compatible config discovery:
+MachGate config discovery:
 
-1. `$MACHISMO_CONFIG` environment variable
-2. `machismo.conf` in the current directory
-3. `machismo.conf` next to the binary
+1. `$MACHGATE_CONFIG` environment variable
+2. `machgate.conf` in the current directory
+3. `machgate.conf` next to the binary
 
 ### Configuration
 
-MachGate uses the existing Machismo-compatible INI-style config file:
+MachGate uses an INI-style config file:
 
 ```ini
 [general]
@@ -294,15 +302,15 @@ Carbon = SKIP
 
 | Variable | Purpose |
 |----------|---------|
-| `MACHISMO_CONFIG` | Path to config file (set to `none` to disable) |
-| `MACHISMO_HOME` | Override game userdata/save location |
-| `MACHISMO_DYLIB_MAP` | Path to dylib mapping file |
-| `MACHISMO_PATCHES` | Path to binary patches file |
-| `MACHISMO_TRAMPOLINE_LIB` | Native .so for symbol trampolining |
-| `MACHISMO_TRAMPOLINE_PREFIX` | Symbol prefix for trampolining |
-| `MACHISMO_VERBOSE_BINDS` | Log all bind resolutions |
-| `MACHISMO_LUA_PROFILE` | Enable LuaJIT `jit.p` profiler, write output to given path |
-| `MACHISMO_LUA_JITV` | Enable JIT verbose logging (trace compile/abort) |
+| `MACHGATE_CONFIG` | Path to config file (set to `none` to disable) |
+| `MACHGATE_HOME` | Override game userdata/save location |
+| `MACHGATE_DYLIB_MAP` | Path to dylib mapping file |
+| `MACHGATE_PATCHES` | Path to binary patches file |
+| `MACHGATE_TRAMPOLINE_LIB` | Native .so for symbol trampolining |
+| `MACHGATE_TRAMPOLINE_PREFIX` | Symbol prefix for trampolining |
+| `MACHGATE_VERBOSE_BINDS` | Log all bind resolutions |
+| `MACHGATE_LUA_PROFILE` | Enable LuaJIT `jit.p` profiler, write output to given path |
+| `MACHGATE_LUA_JITV` | Enable JIT verbose logging (trace compile/abort) |
 | `MACHGATE_TRACE_SYSCALL` | Trace selected Darwin syscall gateway activity |
 | `MACHGATE_TRACE_WAIT` | Trace wait/exit process status translation |
 | `MACHGATE_TRACE_SIGNALS` | Trace signal shim translation paths |
@@ -339,7 +347,7 @@ Current documented validation is tracked in:
 ```
 machgate/
 ├── src/                    Core loader source
-│   ├── machismo.c          Main entry point
+│   ├── machgate.c          Main entry point
 │   ├── loader.c/h          Mach-O parsing and segment mapping
 │   ├── stack.c             Mach-O stack layout setup
 │   ├── commpage.c/h        macOS commpage emulation
@@ -389,7 +397,11 @@ machgate/
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 — see [LICENSE](LICENSE).
+This project is licensed under the GNU General Public License v3.0 or later; see
+[LICENSE](LICENSE).
 
-Based on [Darling](https://github.com/darlinghq/darling) by Lubos Dolezel and
-contributors, and on the original Machismo loader work.
+MachGate is a substantially modified fork of Machismo. It keeps attribution to
+the original Machismo/Darling loader work while making MachGate the user-facing
+runtime, executable, package, Docker, release, and documentation name. See
+[ATTRIBUTION.md](ATTRIBUTION.md) for the project lineage and modification
+summary.

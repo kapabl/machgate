@@ -1,5 +1,5 @@
 /*
- * INI-style config file parser for machismo.
+ * INI-style config file parser for machgate.
  * Minimal implementation — no external dependencies.
  */
 
@@ -18,7 +18,7 @@ static char* strip(char* s)
 	return s;
 }
 
-int config_load(const char* path, machismo_config_t* cfg)
+int config_load(const char* path, machgate_config_t* cfg)
 {
 	FILE* f = fopen(path, "r");
 	if (!f) return -1;
@@ -26,7 +26,7 @@ int config_load(const char* path, machismo_config_t* cfg)
 	memset(cfg, 0, sizeof(*cfg));
 
 	char line[512];
-	machismo_trampoline_config_t* cur_tramp = NULL;
+	machgate_trampoline_config_t* cur_tramp = NULL;
 
 	while (fgets(line, sizeof(line), f)) {
 		char* s = strip(line);
@@ -98,7 +98,7 @@ int config_load(const char* path, machismo_config_t* cfg)
 	return 0;
 }
 
-void config_free(machismo_config_t* cfg)
+void config_free(machgate_config_t* cfg)
 {
 	free(cfg->dylib_map);
 	free(cfg->patches);

@@ -1,5 +1,5 @@
-#ifndef _MACHISMO_LOADER_H_
-#define _MACHISMO_LOADER_H_
+#ifndef _MACHGATE_LOADER_H_
+#define _MACHGATE_LOADER_H_
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -7,8 +7,8 @@
 
 /* Pool space reserved adjacent to the Mach-O segments for branch islands.
  * Guaranteed within ±128MB of __TEXT. Carved out by the LSE and trampoline
- * code via machismo_pool_alloc(). */
-#define MACHISMO_POOL_PADDING (4 * 1024 * 1024)  /* 4MB */
+ * code via machgate_pool_alloc(). */
+#define MACHGATE_POOL_PADDING (4 * 1024 * 1024)  /* 4MB */
 
 struct load_results {
 	unsigned long mh;
@@ -42,7 +42,7 @@ struct load_results {
 };
 
 /* Allocate a chunk from the adjacent pool. Returns NULL if exhausted. */
-static inline void* machismo_pool_alloc(struct load_results* lr, size_t size)
+static inline void* machgate_pool_alloc(struct load_results* lr, size_t size)
 {
 	size_t page = 4096;
 	size_t aligned_off = (lr->pool_used + page - 1) & ~(page - 1);
@@ -53,4 +53,4 @@ static inline void* machismo_pool_alloc(struct load_results* lr, size_t size)
 	return ptr;
 }
 
-#endif // _MACHISMO_LOADER_H_
+#endif // _MACHGATE_LOADER_H_

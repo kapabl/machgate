@@ -2,8 +2,8 @@
 # Test: NecroDancer loads with both libSystem shim and SDL2 trampoline active
 set -e
 cd "$(dirname "$0")/.."
-MACHISMO_ROOT="${MACHISMO_ROOT:-$(pwd)}"
-BUILD_DIR="${BUILD_DIR:-$MACHISMO_ROOT/build}"
+MACHGATE_ROOT="${MACHGATE_ROOT:-$(pwd)}"
+BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
 BINARY=../necrodancer/depot_247086/NecroDancerSP.app/Contents/MacOS/NecroDancer
 [ -f "$BINARY" ] || { echo "SKIP: NecroDancer binary not found"; exit 0; }
@@ -16,9 +16,9 @@ trap "rm -rf $TMPDIR" EXIT
 
 # Adapt the example dylib_map with absolute shim path
 sed "s|./libsystem_shim.so|$BUILD_DIR/libsystem_shim.so|" \
-    "$MACHISMO_ROOT/examples/necrodancer/dylib_map.conf" > "$TMPDIR/dylib_map.conf"
+    "$MACHGATE_ROOT/examples/necrodancer/dylib_map.conf" > "$TMPDIR/dylib_map.conf"
 
-cat > "$TMPDIR/machismo.conf" <<EOF
+cat > "$TMPDIR/machgate.conf" <<EOF
 [general]
 dylib_map = $TMPDIR/dylib_map.conf
 
@@ -36,7 +36,7 @@ EOF
 # Timeout after 10s in case game reaches interactive state.
 # Use SIGKILL directly — game threads can survive SIGTERM.
 output=$(timeout -s KILL 10 env \
-    MACHISMO_CONFIG="$TMPDIR/machismo.conf" \
+    MACHGATE_CONFIG="$TMPDIR/machgate.conf" \
     SDL_VIDEODRIVER=dummy \
     LD_LIBRARY_PATH="$BUILD_DIR" \
     "$BUILD_DIR/machgate" "$BINARY" 2>&1 || true)
