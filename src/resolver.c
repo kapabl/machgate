@@ -69,6 +69,14 @@ static void zeroing_operator_delete(void *ptr)
 static int (*real_luaopen_jit)(void *L) = NULL;
 static void (*real_lua_close)(void *L) = NULL;
 
+static const char* getenv_compat(const char* name, const char* legacy_name)
+{
+	const char* value = getenv(name);
+	if (value)
+		return value;
+	return getenv(legacy_name);
+}
+
 /* Execute a Lua string via luaL_loadstring + lua_pcall (luaL_dostring is a macro).
  * Returns 0 on success, non-zero on error (logs error to stderr). */
 static int lua_dostring(void *L, const char *s)
@@ -114,7 +122,8 @@ static int wrapped_luaopen_jit(void *L)
 	if (profiled_lua_state)
 		return result;
 
-	const char *profile_path = getenv("MACHGATE_LUA_PROFILE");
+	const char *profile_path = getenv_compat("MACHGATE_LUA_PROFILE",
+	                                         "MACHISMO_LUA_PROFILE");
 	if (profile_path) {
 		char lua_cmd[512];
 		snprintf(lua_cmd, sizeof(lua_cmd),
@@ -125,14 +134,15 @@ static int wrapped_luaopen_jit(void *L)
 		}
 	}
 
-	if (getenv("MACHGATE_LUA_JITV")) {
+	if (getenv_compat("MACHGATE_LUA_JITV", "MACHISMO_LUA_JITV")) {
 		if (lua_dostring(L, "require('jit.v').start()") == 0)
 			fprintf(stderr, "resolver: LuaJIT verbose JIT logging enabled\n");
 	}
 
 
 	/* Run an arbitrary Lua script file for debugging/introspection */
-	const char *inject_path = getenv("MACHGATE_LUA_INJECT");
+	const char *inject_path = getenv_compat("MACHGATE_LUA_INJECT",
+	                                        "MACHISMO_LUA_INJECT");
 	if (inject_path) {
 		int (*loadfile)(void *, const char *) = dlsym(RTLD_DEFAULT, "luaL_loadfile");
 		int (*pcall)(void *, int, int, int) = dlsym(RTLD_DEFAULT, "lua_pcall");
@@ -154,7 +164,8 @@ static void wrapped_lua_close(void *L)
 	if (L == profiled_lua_state) {
 		lua_dostring(L, "require('jit.p').stop()");
 		fprintf(stderr, "resolver: LuaJIT profiler stopped, output at %s\n",
-				getenv("MACHGATE_LUA_PROFILE"));
+				getenv_compat("MACHGATE_LUA_PROFILE",
+				              "MACHISMO_LUA_PROFILE"));
 		profiled_lua_state = NULL;
 	}
 
@@ -497,15 +508,18 @@ static void log_failed_bind(struct resolver_state* rs, const char* context,
 
 static int trace_bindings_enabled(void)
 {
-	const char* trace_bindings = getenv("MACHGATE_TRACE_BINDINGS");
-	const char* trace_shim = getenv("MACHGATE_TRACE_SHIM");
+	const char* trace_bindings = getenv_compat("MACHGATE_TRACE_BINDINGS",
+	                                           "MACHISMO_TRACE_BINDINGS");
+	const char* trace_shim = getenv_compat("MACHGATE_TRACE_SHIM",
+	                                       "MACHISMO_TRACE_SHIM");
 	return (trace_bindings && trace_bindings[0] && strcmp(trace_bindings, "0") != 0) ||
 	       (trace_shim && strcmp(trace_shim, "1") == 0);
 }
 
 static int trace_binding_symbol(const char* lookup_name)
 {
-	const char* trace_bindings = getenv("MACHGATE_TRACE_BINDINGS");
+	const char* trace_bindings = getenv_compat("MACHGATE_TRACE_BINDINGS",
+	                                           "MACHISMO_TRACE_BINDINGS");
 	if (trace_bindings && strcmp(trace_bindings, "all") == 0)
 		return 1;
 
@@ -2272,7 +2286,9 @@ static int walk_chain(struct resolver_state* rs, uint64_t* chain_start, uint16_t
 
 			uintptr_t resolved = resolve_import(rs, ordinal, header, chain_data, addend,
 			                                    (uintptr_t)loc);
-			if (resolved == 0 && getenv("MACHGATE_VERBOSE_BINDS")) {
+			if (resolved == 0 &&
+			    getenv_compat("MACHGATE_VERBOSE_BINDS",
+			                  "MACHISMO_VERBOSE_BINDS")) {
 				/* Log unresolved binds for debugging */
 				const char* symbols_base = chain_data + header->symbols_offset;
 				const char* imports_base = chain_data + header->imports_offset;

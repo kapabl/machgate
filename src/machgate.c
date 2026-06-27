@@ -117,6 +117,14 @@ char** __machgate_guest_argv = NULL;
 char** __machgate_guest_envp = NULL;
 const char* __machgate_guest_executable_path = NULL;
 
+static const char* getenv_compat(const char* name, const char* legacy_name)
+{
+	const char* value = getenv(name);
+	if (value)
+		return value;
+	return getenv(legacy_name);
+}
+
 static int sign_extend_int(uint32_t value, int bits)
 {
 	uint32_t sign = 1u << (bits - 1);
@@ -651,7 +659,7 @@ int main(int argc, char** argv, char** envp)
 	/* Load config file — look next to the binary, or use MACHGATE_CONFIG */
 	machgate_config_t cfg = {0};
 	{
-		const char* cfg_path = getenv("MACHGATE_CONFIG");
+		const char* cfg_path = getenv_compat("MACHGATE_CONFIG", "MACHISMO_CONFIG");
 		int cfg_loaded = 0;
 
 		if (cfg_path) {
@@ -664,6 +672,10 @@ int main(int argc, char** argv, char** envp)
 			/* 1. Look for machgate.conf in the current working directory */
 			cfg_loaded = (config_load("machgate.conf", &cfg) == 0);
 			if (cfg_loaded) cfg_path = "machgate.conf";
+			if (!cfg_loaded) {
+				cfg_loaded = (config_load("machismo.conf", &cfg) == 0);
+				if (cfg_loaded) cfg_path = "machismo.conf";
+			}
 
 			/* 2. Look for machgate.conf next to the game binary */
 			if (!cfg_loaded) {
@@ -680,21 +692,36 @@ int main(int argc, char** argv, char** envp)
 				if (cfg_loaded)
 					cfg_path = conf_buf;
 			}
+			if (!cfg_loaded) {
+				const char* binary = machgate_load_results.argv[0];
+				const char* slash = strrchr(binary, '/');
+				if (slash) {
+					size_t dirlen = slash - binary;
+					snprintf(conf_buf, sizeof(conf_buf), "%.*s/machismo.conf",
+					         (int)dirlen, binary);
+				} else {
+					snprintf(conf_buf, sizeof(conf_buf), "machismo.conf");
+				}
+				cfg_loaded = (config_load(conf_buf, &cfg) == 0);
+				if (cfg_loaded)
+					cfg_path = conf_buf;
+			}
 		}
 
 		if (cfg_loaded) {
 			fprintf(stderr, "machgate: loaded config from %s\n", cfg_path);
 		} else {
 			/* Fallback to env vars for backward compat */
-			const char* map = getenv("MACHGATE_DYLIB_MAP");
+			const char* map = getenv_compat("MACHGATE_DYLIB_MAP", "MACHISMO_DYLIB_MAP");
 			if (map) cfg.dylib_map = strdup(map);
-			const char* pat = getenv("MACHGATE_PATCHES");
+			const char* pat = getenv_compat("MACHGATE_PATCHES", "MACHISMO_PATCHES");
 			if (pat) cfg.patches = strdup(pat);
 			/* Legacy single trampoline from env */
-			const char* tlib = getenv("MACHGATE_TRAMPOLINE_LIB");
+			const char* tlib = getenv_compat("MACHGATE_TRAMPOLINE_LIB", "MACHISMO_TRAMPOLINE_LIB");
 			if (tlib) {
 				cfg.trampolines[0].lib = strdup(tlib);
-				const char* tpfx = getenv("MACHGATE_TRAMPOLINE_PREFIX");
+				const char* tpfx = getenv_compat("MACHGATE_TRAMPOLINE_PREFIX",
+				                                 "MACHISMO_TRAMPOLINE_PREFIX");
 				cfg.trampolines[0].prefixes[0] = strdup(tpfx ? tpfx : "_SDL_");
 				cfg.trampolines[0].num_prefixes = 1;
 				cfg.num_trampolines = 1;
@@ -932,6 +959,17 @@ int main(int argc, char** argv, char** envp)
 				        dln, mdi->path, dylib_lse_pool);
 		}
 
+		/* Runtime bootstrap must be complete before any image initializer runs.
+		 * C++ constructors can immediately touch pthread objects, allocator
+		 * globals, TLV, and exception metadata. */
+		if (machgate_load_results.mh) {
+			fixup_darwin_pthread_data(&machgate_load_results);
+			fixup_darwin_libc_allocator_defaults(&machgate_load_results);
+			setup_tlv_image(&machgate_load_results);
+			eh_frame_register_macho((void*)machgate_load_results.mh,
+			                        machgate_load_results.slide);
+		}
+
 		/* Run static initializers for loaded Mach-O dylibs.
 		 * Must be after fixup resolution (function pointers in
 		 * __mod_init_func need to be rebased). */
@@ -940,24 +978,12 @@ int main(int argc, char** argv, char** envp)
 		}
 	}
 
-	/* Fix macOS pthread objects and set up TLV before the __DATA guard
-	 * locks down pages (the pthread scan reads all writable segments). */
-	if (machgate_load_results.mh) {
+	if (machgate_load_results.mh && !cfg.dylib_map) {
 		fixup_darwin_pthread_data(&machgate_load_results);
 		fixup_darwin_libc_allocator_defaults(&machgate_load_results);
 		setup_tlv_image(&machgate_load_results);
-	}
-
-	/* Register Mach-O exception handling frames with system unwinder.
-	 * Must be after resolver (GOT entries for personality functions must be patched)
-	 * but before any Mach-O code runs (__init_offsets, trampolines, _main). */
-	if (machgate_load_results.mh) {
 		eh_frame_register_macho((void*)machgate_load_results.mh,
 		                        machgate_load_results.slide);
-		/* NOTE: Do NOT register eh_frame for loaded Mach-O dylibs yet.
-		 * The _dl_find_object interposition uses a single text range —
-		 * registering dylibs would overwrite the main exe's range and
-		 * break C++ exception handling for the main binary. */
 	}
 
 	/* Apply trampolines from config */
@@ -1119,7 +1145,8 @@ int main(int argc, char** argv, char** envp)
 		}
 	}
 
-	if (machgate_load_results.mh && getenv("MACHGATE_TRACE_SIGNALS")) {
+	if (machgate_load_results.mh &&
+	    getenv_compat("MACHGATE_TRACE_SIGNALS", "MACHISMO_TRACE_SIGNALS")) {
 		trampoline_install_signal_diagnostics((void*)machgate_load_results.mh,
 		                                      machgate_load_results.slide);
 	}
@@ -1623,7 +1650,8 @@ static void lc_main_return(int status)
 
 static FILE* open_trace_file(void)
 {
-	const char* trace_file = getenv("MACHGATE_EXECVE_TRACE_FILE");
+	const char* trace_file = getenv_compat("MACHGATE_EXECVE_TRACE_FILE",
+	                                       "MACHISMO_EXECVE_TRACE_FILE");
 
 	if (!trace_file || !*trace_file)
 		return NULL;
@@ -1632,7 +1660,7 @@ static FILE* open_trace_file(void)
 
 static void trace_lc_main_abi(struct load_results* lr)
 {
-	if (!getenv("MACHGATE_TRACE_LCMAIN"))
+	if (!getenv_compat("MACHGATE_TRACE_LCMAIN", "MACHISMO_TRACE_LCMAIN"))
 		return;
 
 	FILE* trace_file = open_trace_file();

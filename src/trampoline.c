@@ -54,6 +54,14 @@ static uint8_t* island_pool = NULL;
 static size_t island_pool_size = 0;
 static size_t island_pool_used = 0;
 
+static const char* getenv_compat(const char* name, const char* legacy_name)
+{
+	const char* value = getenv(name);
+	if (value)
+		return value;
+	return getenv(legacy_name);
+}
+
 void trampoline_set_pool(void* base, size_t size)
 {
 	island_pool = (uint8_t*)base;
@@ -578,8 +586,10 @@ int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle,
 /* Legacy env-var based API */
 int trampoline_patch(void* mh, uintptr_t slide)
 {
-	const char* lib_path = getenv("MACHGATE_TRAMPOLINE_LIB");
-	const char* prefix = getenv("MACHGATE_TRAMPOLINE_PREFIX");
+	const char* lib_path = getenv_compat("MACHGATE_TRAMPOLINE_LIB",
+	                                     "MACHISMO_TRAMPOLINE_LIB");
+	const char* prefix = getenv_compat("MACHGATE_TRAMPOLINE_PREFIX",
+	                                   "MACHISMO_TRAMPOLINE_PREFIX");
 
 	if (!lib_path) lib_path = "libSDL2-2.0.so.0";
 	if (!prefix) prefix = "_SDL_";
@@ -667,10 +677,15 @@ static uintptr_t ucontext_reg(const void* ucontext, int reg)
 #endif
 }
 
-static void print_signal_macho_context(uintptr_t pc)
+static void print_signal_macho_context(const char* label, uintptr_t pc,
+                                       uintptr_t highlight)
 {
 	if (!signal_diag_mh)
 		return;
+	if (!pc) {
+		fprintf(stderr, "machgate: guest context %s=(nil)\n", label);
+		return;
+	}
 
 	struct mach_header_64* header = (struct mach_header_64*)signal_diag_mh;
 	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
@@ -719,24 +734,46 @@ static void print_signal_macho_context(uintptr_t pc)
 
 		if (symbol) {
 			fprintf(stderr,
-			        "machgate: guest context pc=%p vmaddr=0x%lx symbol=%s+0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
+			        "machgate: guest context %s=%p vmaddr=0x%lx symbol=%s+0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
+			        label,
 			        (void*)pc, (unsigned long)(pc - signal_diag_slide),
 			        symbol, symbol_offset, 16, seg->segname, 16, section_name,
 			        (unsigned long long)section_fileoff,
 			        insn, prev_insn, next_insn);
 		} else {
 			fprintf(stderr,
-			        "machgate: guest context pc=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
+			        "machgate: guest context %s=%p vmaddr=0x%lx segment=%.*s section=%.*s fileoff=0x%llx insn=0x%08x prev=0x%08x next=0x%08x\n",
+			        label,
 			        (void*)pc, (unsigned long)(pc - signal_diag_slide),
 			        16, seg->segname, 16, section_name,
 			        (unsigned long long)section_fileoff,
 			        insn, prev_insn, next_insn);
 		}
+		if ((pc & 3u) == 0 && highlight) {
+			uintptr_t window_start = pc >= seg_start + 20 ? pc - 20 : seg_start;
+			uintptr_t window_end = pc + 16 <= seg_end ? pc + 16 : seg_end;
+			window_start &= ~(uintptr_t)3u;
+			window_end &= ~(uintptr_t)3u;
+			for (uintptr_t cursor = window_start; cursor < window_end; cursor += 4) {
+				uint64_t cursor_fileoff = section_fileoff;
+				if (cursor >= pc)
+					cursor_fileoff += cursor - pc;
+				else
+					cursor_fileoff -= pc - cursor;
+				fprintf(stderr,
+				        "machgate: guest context %s window %c %p vmaddr=0x%lx fileoff=0x%llx insn=0x%08x\n",
+				        label, cursor == highlight ? '>' : ' ',
+				        (void*)cursor,
+				        (unsigned long)(cursor - signal_diag_slide),
+				        (unsigned long long)cursor_fileoff,
+				        *(uint32_t*)cursor);
+			}
+		}
 		return;
 	}
 
-	fprintf(stderr, "machgate: guest context pc=%p outside main Mach-O image\n",
-	        (void*)pc);
+	fprintf(stderr, "machgate: guest context %s=%p outside main Mach-O image\n",
+	        label, (void*)pc);
 }
 
 static void print_signal_init_context(void)
@@ -795,7 +832,7 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		}
 	}
 
-	if (getenv("MACHGATE_TRACE_SIGNALS")) {
+	if (getenv_compat("MACHGATE_TRACE_SIGNALS", "MACHISMO_TRACE_SIGNALS")) {
 		uintptr_t pc = ucontext_pc(ucontext);
 		uintptr_t lr = ucontext_reg(ucontext, 30);
 		uintptr_t sp = ucontext_reg(ucontext, 31);
@@ -807,6 +844,10 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		print_signal_init_context();
 		if (lr >= 4)
 			print_signal_indirect_branch(lr - 4, ucontext);
+		print_signal_macho_context("signal.pc", pc, 0);
+		print_signal_macho_context("signal.lr", lr, 0);
+		if (lr >= 4)
+			print_signal_macho_context("signal.lr-4", lr - 4, lr - 4);
 		fprintf(stderr,
 		        "machgate: regs x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p\n",
 		        (void*)ucontext_reg(ucontext, 0),
@@ -842,7 +883,6 @@ static void stale_data_sigsegv(int sig, siginfo_t* info, void* ucontext)
 		        (void*)ucontext_reg(ucontext, 26),
 		        (void*)ucontext_reg(ucontext, 27),
 		        (void*)ucontext_reg(ucontext, 28));
-		print_signal_macho_context(pc);
 	}
 
 	/* Not our fault — re-raise with default handler */
