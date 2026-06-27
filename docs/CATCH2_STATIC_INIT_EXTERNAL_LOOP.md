@@ -990,3 +990,37 @@ discipline was not the failing invariant for this specific object.
 The next private run should answer whether the storage is never constructed,
 constructed and later zeroed, or guarded as already initialized before its
 constructor runs.
+
+## v0.3.17 Private Run Follow-Up
+
+The private `Core.UnitTest` run with `MACHGATE_TRACE_CXX_INIT=1` still crashed
+at `mod_init[3/707]` in libc++ `__tree::__insert_node_at`, with
+`__MergedGlobals + 0x10` / `+0x18` still showing the uninitialized empty-tree
+shape. However, the log contained no loader-side `cxx-init` lines and no
+shim-side `__cxa_guard_*` lines.
+
+That means the Docker helper did not pass `MACHGATE_TRACE_CXX_INIT` through to
+the container, so this run did not actually exercise the new v0.3.17 C++
+diagnostics.
+
+The same run also showed:
+
+- `libc++.1.dylib` had no mapping and was skipped.
+- The resolver ended with `3380 failed` binds.
+
+For this C++ workload, the next diagnostic run must use an updated
+`scripts/run-macho-docker.sh` plus an Apple-ABI libc++ mapping:
+
+```bash
+MACHGATE_TRACE_CXX_INIT=1 \
+MACHGATE_TRACE_SIGNALS=1 \
+MACHGATE_TRACE_LCMAIN=1 \
+MACHGATE_VERBOSE=1 \
+MACHGATE_TIMEOUT=120 \
+MACHGATE_LIBCXX=/home/kapablanka/repos/machgate/build-libcxx/lib/libc++.so.1 \
+MACHGATE_TARBALL=/path/to/machgate-0.3.17-linux-arm64.tar.gz \
+scripts/run-macho-docker.sh /path/to/Core.UnitTest
+```
+
+The runner now passes every `MACHGATE_TRACE_*` variable through dynamically and
+maps `libc++.1.dylib` when `MACHGATE_LIBCXX` is set.

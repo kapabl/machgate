@@ -20,6 +20,8 @@ Optional environment:
   MACHGATE_TARBALL    Local MachGate linux-arm64 release tarball to mount and
                       unpack instead of downloading a release.
   MACHGATE_IMAGE      Docker image to use, default: ubuntu:24.04
+  MACHGATE_LIBCXX     Local Apple-ABI libc++.so.1 to mount and map as
+                      libc++.1.dylib for C++ Mach-O binaries.
   MACHGATE_VERBOSE    Set to 1 to run MachGate with -v.
   MACHGATE_TIMEOUT    Kill MachGate after this many seconds, default: disabled.
   MACHGATE_TRACE_*    Debug trace flags are passed through to the container.
@@ -45,6 +47,7 @@ version="${MACHGATE_VERSION:-latest}"
 image="${MACHGATE_IMAGE:-ubuntu:24.04}"
 local_dir="${MACHGATE_LOCAL_DIR:-}"
 tarball="${MACHGATE_TARBALL:-}"
+libcxx="${MACHGATE_LIBCXX:-}"
 verbose="${MACHGATE_VERBOSE:-}"
 guest_timeout="${MACHGATE_TIMEOUT:-}"
 
@@ -60,13 +63,15 @@ docker_args=(
     -v "$guest_dir:/input:ro"
 )
 
-for env_name in \
-    MACHGATE_TRACE_LCMAIN \
-    MACHGATE_TRACE_SIGNALS \
-    MACHGATE_TRACE_SYSCALLS \
-    MACHGATE_TRACE_MMAP \
-    MACHGATE_EXTERNAL_MAP_LIBCXX
-do
+while IFS='=' read -r env_name _; do
+    case "$env_name" in
+        MACHGATE_TRACE_*)
+            docker_args+=(-e "$env_name")
+            ;;
+    esac
+done < <(env)
+
+for env_name in MACHGATE_EXTERNAL_MAP_LIBCXX; do
     if [ -n "${!env_name:-}" ]; then
         docker_args+=(-e "$env_name=${!env_name}")
     fi
@@ -92,6 +97,17 @@ if [ -n "$tarball" ]; then
     docker_args+=(-v "$tarball_dir:/machgate-dist:ro")
 fi
 
+libcxx_name=""
+if [ -n "$libcxx" ]; then
+    if [ ! -f "$libcxx" ]; then
+        echo "MACHGATE_LIBCXX is not a file: $libcxx" >&2
+        exit 1
+    fi
+    libcxx_dir="$(cd "$(dirname "$libcxx")" && pwd)"
+    libcxx_name="$(basename "$libcxx")"
+    docker_args+=(-v "$libcxx_dir:/machgate-libcxx:ro")
+fi
+
 if ! docker run --rm --platform linux/arm64 --entrypoint /bin/sh "$image" -c 'test "$(uname -m)" = aarch64' >/dev/null 2>&1; then
     cat >&2 <<EOF
 Docker cannot execute linux/arm64 containers on this host.
@@ -111,16 +127,17 @@ echo "machgate-docker: running ${guest_binary}" >&2
 
 "${docker_args[@]}" \
     "$image" \
-    bash -s -- "$version" "$guest_name" "$local_dir" "$tarball_name" "$verbose" "$guest_timeout" "$@" <<'EOF'
+    bash -s -- "$version" "$guest_name" "$local_dir" "$tarball_name" "$libcxx_name" "$verbose" "$guest_timeout" "$@" <<'EOF'
 set -euo pipefail
 
 requested_version="$1"
 guest_name="$2"
 local_dir="$3"
 tarball_name="$4"
-verbose="$5"
-guest_timeout="$6"
-shift 6
+libcxx_name="$5"
+verbose="$6"
+guest_timeout="$7"
+shift 7
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -178,6 +195,21 @@ else
     shim_path=/opt/machgate/lib/libsystem_shim.so
 fi
 
+libcxx_path=""
+if [ -n "$libcxx_name" ]; then
+    libcxx_path="/machgate-libcxx/${libcxx_name}"
+    if [ ! -f "$libcxx_path" ]; then
+        echo "Mounted MACHGATE_LIBCXX is missing inside the container: $libcxx_path" >&2
+        exit 1
+    fi
+elif [ "${MACHGATE_EXTERNAL_MAP_LIBCXX:-0}" = "1" ]; then
+    if [ -f "${machgate_root}/lib/libc++.so.1" ]; then
+        libcxx_path="${machgate_root}/lib/libc++.so.1"
+    else
+        echo "machgate-docker: MACHGATE_EXTERNAL_MAP_LIBCXX=1 requested, but ${machgate_root}/lib/libc++.so.1 is not present" >&2
+    fi
+fi
+
 cat > /tmp/machgate.conf <<'CONFIG_EOF'
 [general]
 dylib_map = /tmp/dylib_map.conf
@@ -199,8 +231,16 @@ SystemConfiguration = SKIP
 AppKit = SKIP
 MAP_EOF
 sed -i "s#__SHIM_PATH__#${shim_path}#g" /tmp/dylib_map.conf
+if [ -n "$libcxx_path" ]; then
+    echo "libc++.1 = ${libcxx_path}" >> /tmp/dylib_map.conf
+    echo "machgate-docker: mapped libc++.1.dylib to ${libcxx_path}" >&2
+fi
 
-export LD_LIBRARY_PATH="${machgate_root}/lib:${machgate_root}"
+if [ -n "$libcxx_path" ]; then
+    export LD_LIBRARY_PATH="$(dirname "$libcxx_path"):${machgate_root}/lib:${machgate_root}"
+else
+    export LD_LIBRARY_PATH="${machgate_root}/lib:${machgate_root}"
+fi
 export MACHGATE_CONFIG=/tmp/machgate.conf
 machgate_args=()
 if [ "$verbose" = "1" ]; then

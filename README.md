@@ -260,6 +260,14 @@ Some C++ Mach-O binaries also need an Apple-ABI-compatible `libc++.so.1` and a
 `libc++.1 = /path/to/libc++.so.1` entry in `dylib_map.conf`. Most Go/Rust/static
 CLI probes in the current corpus do not need that extra mapping.
 
+When running a C++ binary through the Docker helper, pass the local libc++ build:
+
+```bash
+MACHGATE_LIBCXX=/path/to/build-libcxx/lib/libc++.so.1 \
+MACHGATE_TARBALL=/path/to/machgate-0.3.17-linux-arm64.tar.gz \
+scripts/run-macho-docker.sh /path/to/macos-arm64-cxx-binary
+```
+
 MachGate config discovery:
 
 1. `$MACHGATE_CONFIG` environment variable
@@ -330,6 +338,7 @@ Carbon = SKIP
 | `MACHGATE_TRACE_WAIT` | Trace wait/exit process status translation |
 | `MACHGATE_TRACE_SIGNALS` | Trace signal shim translation paths |
 | `MACHGATE_TRACE_CXX_INIT` | Trace C++ initializer guards and `__MergedGlobals` state |
+| `MACHGATE_LIBCXX` | Docker helper path to Apple-ABI `libc++.so.1` for `libc++.1.dylib` mapping |
 | `MACHGATE_EXTERNAL_MAP_LIBCXX` | Enable external-test libc++ mapping |
 | `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER` | Diagnostic opt-in for installing the host Linux SIGCHLD handler |
 
