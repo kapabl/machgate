@@ -770,6 +770,42 @@ Fix staged after this trace:
   the proven Darwin libc default allocator slots while leaving binaries that do
   not contain those symbols untouched.
 
+`v0.3.8` moved the private binary past the NULL allocator call. The next trace:
+
+```text
+machgate: mod_init[3/707] at 0x10000b41c
+libsystem_shim: guest signal signum=11 darwin=11 code=1 addr=(nil) pc=0x1001ba5a4 lr=0x10050a690
+machgate: guest context signal.pc=0x1001ba5a4 vmaddr=0x1001ba5a4 symbol=_ZNSt3__16__treeINS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEENS_4lessIS6_EENS4_IS6_EEE16__insert_node_atEPNS_15__tree_end_nodeIPNS_16__tree_node_baseIPvEEEERSF_SF_+0x20 segment=__TEXT section=__text fileoff=0x1ba5a4 insn=0xf9400108
+machgate: guest regs x0=0x100da3320 x1=0x100da3328 x2=0x100da3328 x3=0x75463f4b2e50 ... x8=(nil)
+```
+
+Interpretation:
+
+- Constructor `3/707` now reaches libc++ `std::__tree::__insert_node_at`.
+- The call shape matches an empty-tree insert: `x0` is the tree object,
+  `x1/x2` point at the embedded end/root slot, and `x3` is the new node.
+- In a constructed empty libc++ tree, `__begin_node_` should point at the
+  embedded end node. The faulting load with `x8 == NULL` strongly suggests
+  `__begin_node_` is still zero, so a C++ tree object is being used before its
+  constructor has run.
+- Apple dyld's `MachOAnalyzer::forEachInitializer()` runs initializer phases
+  in this order: `LC_ROUTINES`, then `S_MOD_INIT_FUNC_POINTERS`, then
+  `S_INIT_FUNC_OFFSETS`. MachGate previously scanned sections once and ran
+  whichever initializer section it encountered first, which can interleave
+  those phases differently from macOS.
+
+Fix staged after this trace:
+
+- Main-executable initializers now run in dyld phase order:
+  `LC_ROUTINES`, `LC_ROUTINES_64`, all `__mod_init_func`, then all
+  `__init_offsets`.
+- Initializers are called with dyld-style `(argc, argv, envp, apple)` registers
+  instead of through a no-argument function pointer. C++ constructor thunks
+  ignore these registers, but Darwin initializers that expect them now see the
+  right ABI.
+- The verbose log preserves the existing `mod_init[i/N]` / `init[i/N]` labels
+  so private traces remain comparable.
+
 Expected next private run output shape:
 
 ```text

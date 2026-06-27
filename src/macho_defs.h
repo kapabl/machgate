@@ -96,7 +96,9 @@ struct mach_header_64 {
 #define LC_ID_DYLIB          0xd
 #define LC_LOAD_DYLINKER     0xe
 #define LC_ID_DYLINKER       0xf
+#define LC_ROUTINES          0x11
 #define LC_SEGMENT_64        0x19
+#define LC_ROUTINES_64       0x1a
 #define LC_UUID              0x1b
 #define LC_CODE_SIGNATURE    0x1d
 #define LC_DYLD_INFO         0x22
@@ -201,8 +203,36 @@ struct section_64 {
 #define S_NON_LAZY_SYMBOL_POINTERS  0x6
 #define S_LAZY_SYMBOL_POINTERS      0x7
 #define S_SYMBOL_STUBS              0x8
+#define S_MOD_INIT_FUNC_POINTERS    0x9
+#define S_INIT_FUNC_OFFSETS         0x16
 #define S_ATTR_PURE_INSTRUCTIONS  0x80000000
 #define S_ATTR_SOME_INSTRUCTIONS  0x00000400
+
+struct routines_command {
+	uint32_t cmd;
+	uint32_t cmdsize;
+	uint32_t init_address;
+	uint32_t init_module;
+	uint32_t reserved1;
+	uint32_t reserved2;
+	uint32_t reserved3;
+	uint32_t reserved4;
+	uint32_t reserved5;
+	uint32_t reserved6;
+};
+
+struct routines_command_64 {
+	uint32_t cmd;
+	uint32_t cmdsize;
+	uint64_t init_address;
+	uint64_t init_module;
+	uint64_t reserved1;
+	uint64_t reserved2;
+	uint64_t reserved3;
+	uint64_t reserved4;
+	uint64_t reserved5;
+	uint64_t reserved6;
+};
 
 /* --- Dynamic symbol table --- */
 

@@ -1463,12 +1463,51 @@ static void setup_tlv_image(struct load_results* lr)
 	}
 }
 
-/*
- * Run C++ static initializers from __init_offsets section.
- * This section contains 32-bit relative offsets from the Mach-O base
- * to void(void) initializer functions. On macOS, dyld runs these before main().
- */
-static void run_init_offsets(struct load_results* lr) {
+typedef void (*dyld_init_func_t)(int, char**, char**, char**);
+
+static void call_dyld_initializer(struct load_results* lr, const char* kind,
+                                  int index, int total, uintptr_t func_addr)
+{
+	const char* log_kind = kind;
+	if (strcmp(kind, "__mod_init_func") == 0)
+		log_kind = "mod_init";
+	else if (strcmp(kind, "__init_offsets") == 0)
+		log_kind = "init";
+
+	if (machismo_verbose)
+		fprintf(stderr, "machgate: %s[%d/%d] at 0x%lx\n",
+		        log_kind, index, total, func_addr);
+	note_init_context(kind, index, total, func_addr);
+	((dyld_init_func_t)func_addr)((int)lr->argc, lr->argv, lr->envp, lr->applep);
+	clear_init_context();
+}
+
+static void run_lc_routines_initializers(struct load_results* lr)
+{
+	struct mach_header_64* mh = (struct mach_header_64*)lr->mh;
+	uint8_t* cmds = (uint8_t*)(mh + 1);
+	uint32_t p = 0;
+	int index = 0;
+
+	for (uint32_t i = 0; i < mh->ncmds && p < mh->sizeofcmds; i++) {
+		struct load_command* lc = (struct load_command*)&cmds[p];
+		if (lc->cmd == LC_ROUTINES) {
+			struct routines_command* routines = (struct routines_command*)lc;
+			uintptr_t func_addr = (uintptr_t)routines->init_address + lr->slide;
+			fprintf(stderr, "machgate: running LC_ROUTINES initializer\n");
+			call_dyld_initializer(lr, "LC_ROUTINES", index++, 1, func_addr);
+		} else if (lc->cmd == LC_ROUTINES_64) {
+			struct routines_command_64* routines = (struct routines_command_64*)lc;
+			uintptr_t func_addr = (uintptr_t)routines->init_address + lr->slide;
+			fprintf(stderr, "machgate: running LC_ROUTINES_64 initializer\n");
+			call_dyld_initializer(lr, "LC_ROUTINES_64", index++, 1, func_addr);
+		}
+		p += lc->cmdsize;
+	}
+}
+
+static void run_mod_init_func_initializers(struct load_results* lr)
+{
 	struct mach_header_64* mh = (struct mach_header_64*)lr->mh;
 	uint8_t* cmds = (uint8_t*)(mh + 1);
 	uint32_t p = 0;
@@ -1479,40 +1518,12 @@ static void run_init_offsets(struct load_results* lr) {
 			struct segment_command_64* seg = (struct segment_command_64*)lc;
 			struct section_64* sect = (struct section_64*)(seg + 1);
 			for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
-				/* S_INIT_FUNC_OFFSETS = 0x16 */
-				if ((sect->flags & 0xff) == 0x16) {
-					uint32_t* offsets = (uint32_t*)(lr->mh + sect->addr - seg->vmaddr + sect->offset
-							+ (lr->slide - 0) /* offset within mapped segment */);
-					/* offsets are at the mapped section address */
-					offsets = (uint32_t*)(sect->addr + lr->slide);
-					int count = sect->size / sizeof(uint32_t);
-					fprintf(stderr, "machgate: running %d C++ static initializers from __init_offsets\n", count);
-					typedef void (*init_func_t)(void);
-					extern int machismo_verbose;
-					for (int j = 0; j < count; j++) {
-						uintptr_t func_addr = lr->mh + offsets[j];
-						init_func_t func = (init_func_t)func_addr;
-						if (machismo_verbose)
-							fprintf(stderr, "machgate: init[%d/%d] at 0x%lx\n", j, count, func_addr);
-						note_init_context("__init_offsets", j, count, func_addr);
-						func();
-						clear_init_context();
-					}
-					fprintf(stderr, "machgate: static initializers complete\n");
-				}
-				/* S_MOD_INIT_FUNC_POINTERS = 0x09 */
-				if ((sect->flags & 0xff) == 0x09) {
+				if ((sect->flags & SECTION_TYPE) == S_MOD_INIT_FUNC_POINTERS) {
 					uintptr_t* funcs = (uintptr_t*)(sect->addr + lr->slide);
 					int count = sect->size / sizeof(uintptr_t);
 					fprintf(stderr, "machgate: running %d static constructors from __mod_init_func\n", count);
-					typedef void (*init_func_t)(void);
-					extern int machismo_verbose;
 					for (int j = 0; j < count; j++) {
-						if (machismo_verbose)
-							fprintf(stderr, "machgate: mod_init[%d/%d] at 0x%lx\n", j, count, funcs[j]);
-						note_init_context("__mod_init_func", j, count, funcs[j]);
-						((init_func_t)funcs[j])();
-						clear_init_context();
+						call_dyld_initializer(lr, "__mod_init_func", j, count, funcs[j]);
 					}
 					fprintf(stderr, "machgate: __mod_init_func constructors complete\n");
 				}
@@ -1520,6 +1531,41 @@ static void run_init_offsets(struct load_results* lr) {
 		}
 		p += lc->cmdsize;
 	}
+}
+
+static void run_init_offset_initializers(struct load_results* lr)
+{
+	struct mach_header_64* mh = (struct mach_header_64*)lr->mh;
+	uint8_t* cmds = (uint8_t*)(mh + 1);
+	uint32_t p = 0;
+
+	for (uint32_t i = 0; i < mh->ncmds && p < mh->sizeofcmds; i++) {
+		struct load_command* lc = (struct load_command*)&cmds[p];
+		if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			struct section_64* sect = (struct section_64*)(seg + 1);
+			for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+				if ((sect->flags & SECTION_TYPE) == S_INIT_FUNC_OFFSETS) {
+					uint32_t* offsets = (uint32_t*)(sect->addr + lr->slide);
+					int count = sect->size / sizeof(uint32_t);
+					fprintf(stderr, "machgate: running %d C++ static initializers from __init_offsets\n", count);
+					for (int j = 0; j < count; j++) {
+						uintptr_t func_addr = lr->mh + offsets[j];
+						call_dyld_initializer(lr, "__init_offsets", j, count, func_addr);
+					}
+					fprintf(stderr, "machgate: static initializers complete\n");
+				}
+			}
+		}
+		p += lc->cmdsize;
+	}
+}
+
+static void run_init_offsets(struct load_results* lr)
+{
+	run_lc_routines_initializers(lr);
+	run_mod_init_func_initializers(lr);
+	run_init_offset_initializers(lr);
 }
 
 static void lc_main_return(int status)
