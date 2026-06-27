@@ -720,6 +720,16 @@ Diagnostic improvement added after this trace:
   also inspect the slot's Mach-O section and LC_DYSYMTAB indirect symbol table.
   The next run should print `indirect-slot-section` and, when available,
   `indirect-symbol` with the symbol-table name for the pointer slot.
+- `v0.3.6` showed the private NULL slot lives in `__DATA,__common`,
+  `type=0x1`, not in a lazy/non-lazy symbol pointer section. That means the
+  call target is a zero-fill global/common variable or a field inside one, not
+  an imported function pointer. The current leading causes are a MachGate
+  initialization-order difference, a prior constructor/runtime call returning
+  different state than macOS, or a Darwin runtime setup step missing before
+  app constructors.
+- The next diagnostic prints `data-symbol`, the nearest Mach-O nlist symbol in
+  that data section, to identify the global object/function-pointer cell whose
+  value is still zero.
 - `MACHGATE_TRACE_BINDINGS=all` prints every resolver bind when a full import
   dump is needed.
 
@@ -731,6 +741,7 @@ machgate: guest context signal.lr-4 window   0x... vmaddr=0x... fileoff=0x... in
 machgate: guest context signal.lr-4 window > 0x... vmaddr=0x... fileoff=0x... insn=0xd63f0100
 machgate: guest context signal.lr-4 indirect-slot x8 slot=0x... value=0x... bind='<symbol>' lookup='<name>' dylib='<dylib>' context='<resolver-path>' resolved=0x... source='<source>' path='<path>'
 machgate: guest context signal.lr-4 indirect-slot-section slot=0x... segment=... section=... type=0x... reserved1=... pointer-index=... indirect-index=...
+machgate: guest context signal.lr-4 data-symbol slot=0x... section-ordinal=... symbol='<symbol>'+0x... symbol-vmaddr=0x... next='...' next-delta=0x...
 machgate: guest context signal.lr-4 indirect-symbol indirect-index=... symbol-index=... symbol='<symbol>' n_type=... n_desc=... n_value=...
 ```
 

@@ -148,6 +148,63 @@ static int decode_ldr_x_unsigned(uint32_t insn, int* out_rt, int* out_rn,
 	return 1;
 }
 
+static void print_nearest_section_symbol(const char* label,
+                                         uintptr_t slot_addr,
+                                         struct symtab_command* symtab,
+                                         struct segment_command_64* linkedit,
+                                         uint8_t section_ordinal)
+{
+	if (!symtab || !linkedit || !section_ordinal)
+		return;
+
+	uintptr_t linkedit_base = machismo_load_results.slide + linkedit->vmaddr - linkedit->fileoff;
+	struct nlist_64* syms = (struct nlist_64*)(linkedit_base + symtab->symoff);
+	const char* strtab = (const char*)(linkedit_base + symtab->stroff);
+	uint64_t unslid_slot = slot_addr - machismo_load_results.slide;
+	struct nlist_64* best = NULL;
+	struct nlist_64* next = NULL;
+
+	for (uint32_t i = 0; i < symtab->nsyms; i++) {
+		struct nlist_64* sym = &syms[i];
+		if ((sym->n_type & N_TYPE) != N_SECT || sym->n_sect != section_ordinal)
+			continue;
+		if (sym->n_value <= unslid_slot &&
+		    (!best || sym->n_value > best->n_value))
+			best = sym;
+		if (sym->n_value > unslid_slot &&
+		    (!next || sym->n_value < next->n_value))
+			next = sym;
+	}
+
+	if (!best) {
+		fprintf(stderr,
+		        "machgate: guest context %s data-symbol slot=%p section-ordinal=%u symbol=(none-before-slot)\n",
+		        label, (void*)slot_addr, section_ordinal);
+		return;
+	}
+
+	const char* best_name = "(bad-strx)";
+	if (best->n_strx < symtab->strsize)
+		best_name = strtab + best->n_strx;
+
+	uint64_t offset = unslid_slot - best->n_value;
+	if (next) {
+		const char* next_name = "(bad-strx)";
+		if (next->n_strx < symtab->strsize)
+			next_name = strtab + next->n_strx;
+		fprintf(stderr,
+		        "machgate: guest context %s data-symbol slot=%p section-ordinal=%u symbol='%s'+0x%llx symbol-vmaddr=0x%llx next='%s' next-delta=0x%llx\n",
+		        label, (void*)slot_addr, section_ordinal, best_name,
+		        (unsigned long long)offset, (unsigned long long)best->n_value,
+		        next_name, (unsigned long long)(next->n_value - unslid_slot));
+	} else {
+		fprintf(stderr,
+		        "machgate: guest context %s data-symbol slot=%p section-ordinal=%u symbol='%s'+0x%llx symbol-vmaddr=0x%llx next=(none)\n",
+		        label, (void*)slot_addr, section_ordinal, best_name,
+		        (unsigned long long)offset, (unsigned long long)best->n_value);
+	}
+}
+
 static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr)
 {
 	struct mach_header_64* header = (struct mach_header_64*)machismo_load_results.mh;
@@ -159,6 +216,8 @@ static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr
 	struct segment_command_64* linkedit = NULL;
 	struct section_64* owner = NULL;
 	struct segment_command_64* owner_segment = NULL;
+	uint8_t owner_section_ordinal = 0;
+	uint8_t section_ordinal = 1;
 
 	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
 	for (uint32_t i = 0; i < header->ncmds; i++) {
@@ -181,10 +240,12 @@ static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr
 					if (slot_addr >= section_start && slot_addr < section_end) {
 						owner = sect;
 						owner_segment = seg;
+						owner_section_ordinal = section_ordinal + section_index;
 						break;
 					}
 				}
 			}
+			section_ordinal += seg->nsects;
 		}
 		cmd_ptr += lc->cmdsize;
 	}
@@ -202,10 +263,13 @@ static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr
 	uint32_t indirect_index = owner->reserved1 + pointer_index;
 
 	fprintf(stderr,
-	        "machgate: guest context %s indirect-slot-section slot=%p segment=%.*s section=%.*s type=0x%x reserved1=%u pointer-index=%u indirect-index=%u\n",
+	        "machgate: guest context %s indirect-slot-section slot=%p segment=%.*s section=%.*s section-ordinal=%u type=0x%x reserved1=%u pointer-index=%u indirect-index=%u\n",
 	        label, (void*)slot_addr, 16, owner_segment->segname, 16,
-	        owner->sectname, section_type, owner->reserved1,
+	        owner->sectname, owner_section_ordinal, section_type, owner->reserved1,
 	        pointer_index, indirect_index);
+
+	print_nearest_section_symbol(label, slot_addr, symtab, linkedit,
+	                             owner_section_ordinal);
 
 	if (!symtab || !dysymtab || !linkedit ||
 	    indirect_index >= dysymtab->nindirectsyms)
