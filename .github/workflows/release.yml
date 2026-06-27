@@ -73,11 +73,20 @@ jobs:
               scripts/build-libcxx.sh
               cp -a build-libcxx/lib/libc++.so* /work/package/opt/machgate/lib/
               cp -a build-libcxx/lib/libc++abi.so* /work/package/opt/machgate/lib/
+              if compgen -G "/usr/lib/aarch64-linux-gnu/libatomic.so.1*" >/dev/null; then
+                cp -a /usr/lib/aarch64-linux-gnu/libatomic.so.1* /work/package/opt/machgate/lib/
+              else
+                echo "libatomic.so.1 runtime dependency not found" >&2
+                exit 1
+              fi
               mkdir -p /work/package/opt/machgate/share/doc/machgate
               cp README.md /work/package/opt/machgate/share/doc/machgate/
               cp ATTRIBUTION.md /work/package/opt/machgate/share/doc/machgate/
               cp extern/llvm-project/libcxx/LICENSE.TXT /work/package/opt/machgate/share/doc/machgate/LICENSE.libcxx.txt
               cp extern/llvm-project/libcxxabi/LICENSE.TXT /work/package/opt/machgate/share/doc/machgate/LICENSE.libcxxabi.txt
+              if [ -f /usr/share/doc/libatomic1/copyright ]; then
+                cp /usr/share/doc/libatomic1/copyright /work/package/opt/machgate/share/doc/machgate/LICENSE.libatomic.txt
+              fi
               cp docs/*.md /work/package/opt/machgate/share/doc/machgate/
             '
           version="${RELEASE_TAG#v}"

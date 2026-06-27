@@ -59,3 +59,6 @@ Release tarballs may also include an Apple-ABI-compatible build of LLVM
 distributed under the Apache License v2.0 with LLVM exceptions; see
 `share/doc/machgate/LICENSE.libcxx.txt` and
 `share/doc/machgate/LICENSE.libcxxabi.txt` in the release package.
+
+When bundled libc++ depends on GCC `libatomic`, release tarballs also include
+`libatomic.so.1`; see `share/doc/machgate/LICENSE.libatomic.txt` when present.

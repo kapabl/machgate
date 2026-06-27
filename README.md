@@ -257,10 +257,10 @@ This path is slower than native ARM64 because Docker is emulating the ARM64
 Linux container, but it is useful for testing from an Intel workstation.
 
 Some C++ Mach-O binaries also need an Apple-ABI-compatible `libc++.so.1`.
-Release tarballs include MachGate's Apple-ABI libc++ build under `lib/`, and
-the Docker helper maps it automatically as `libc++.1.dylib` when present.
-Most Go/Rust/static CLI probes in the current corpus do not need that extra
-mapping.
+Release tarballs include MachGate's Apple-ABI libc++ build and its required
+`libatomic.so.1` runtime dependency under `lib/`, and the Docker helper maps
+it automatically as `libc++.1.dylib` when present. Most Go/Rust/static CLI
+probes in the current corpus do not need that extra mapping.
 
 When using an older release tarball or a custom local build without bundled
 libc++, pass a local libc++ build explicitly:
