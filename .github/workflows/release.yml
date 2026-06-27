@@ -27,7 +27,7 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Check out Apple-ABI libc++ source
-        run: git submodule update --init extern/llvm-project
+        run: git submodule update --init --depth 1 extern/llvm-project
 
       - name: Set release tag
         run: |
