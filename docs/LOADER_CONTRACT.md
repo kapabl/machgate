@@ -39,11 +39,16 @@ signal handler.
 - Main executable fixups are resolved before main initializers.
 - Loaded Mach-O dylib fixups are resolved before dylib initializers.
 - CPU compatibility patches are applied before guest execution.
+- The guest stack and `argv`/`envp`/`apple` vectors are built before any Mach-O
+  initializer can run.
 - Main runtime bootstrap now runs before any Mach-O initializer:
   - Darwin pthread data fixups
   - Darwin libc allocator default slots
   - TLV image metadata setup
   - main executable EH-frame registration
+- Main executable and loaded Mach-O dylib initializers enter through an ARM64
+  guest-call helper that switches to the guest stack, passes dyld initializer
+  arguments, preserves host return state, and returns to the loader.
 - Signal diagnostics print initializer context and LR/LR-4 instruction windows
   for null-branch crashes during pre-main execution.
 
@@ -51,8 +56,8 @@ signal handler.
 
 - Dylib initializer ordering is still load-order based, not dependency
   bottom-up.
-- Dylib initializer calls still use a narrower ABI than dyld's full initializer
-  argument contract.
+- Dylib initializer calls now use the same guest-stack dyld argument path as
+  main-image initializers, but ordering is still load-order based.
 - Lazy binding is mostly pre-resolved; a true dyld lazy binder is not fully
   emulated.
 - Main fixup resolution is still coupled to the configured dylib map for bind

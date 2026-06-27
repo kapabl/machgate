@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 
 #include "dylib_loader.h"
+#include "loader.h"
 #include "macho_defs.h"
 
 #ifndef PAGE_SIZE
@@ -334,15 +335,32 @@ struct macho_dylib_info *dylib_loader_find(const char *basename)
 	return NULL;
 }
 
-void dylib_loader_run_inits(struct macho_dylib_info *info)
+extern void machgate_call_guest_initializer(uintptr_t func_addr, int argc,
+                                            char **argv, char **envp,
+                                            char **applep,
+                                            uintptr_t stack_top);
+
+typedef void (*dyld_init_func_t)(int, char **, char **, char **);
+
+__attribute__((weak))
+void machgate_call_guest_initializer(uintptr_t func_addr, int argc,
+                                     char **argv, char **envp,
+                                     char **applep,
+                                     uintptr_t stack_top)
 {
-	if (!info || !info->mh)
+	(void)stack_top;
+	((dyld_init_func_t)func_addr)(argc, argv, envp, applep);
+}
+
+void dylib_loader_run_inits(struct macho_dylib_info *info,
+                            struct load_results *runtime)
+{
+	if (!info || !info->mh || !runtime)
 		return;
 
 	struct mach_header_64 *mh = info->mh;
 	uint8_t *cmds = (uint8_t *)(mh + 1);
 	uint32_t p = 0;
-	typedef void (*init_func_t)(void);
 
 	for (uint32_t i = 0; i < mh->ncmds && p < mh->sizeofcmds; i++) {
 		struct load_command *lc = (struct load_command *)&cmds[p];
@@ -363,7 +381,10 @@ void dylib_loader_run_inits(struct macho_dylib_info *info)
 					        count, info->path);
 					for (int k = 0; k < count; k++) {
 						uintptr_t func_addr = (uintptr_t)mh + offsets[k];
-						((init_func_t)func_addr)();
+						machgate_call_guest_initializer(
+							func_addr, (int)runtime->argc,
+							runtime->argv, runtime->envp, runtime->applep,
+							runtime->stack_top);
 					}
 				} else if (sect_type == 0x09) {
 					/* S_MOD_INIT_FUNC_POINTERS: array of function pointers */
@@ -373,7 +394,10 @@ void dylib_loader_run_inits(struct macho_dylib_info *info)
 					        count, info->path);
 					for (int k = 0; k < count; k++) {
 						/* Function pointers are already rebased by fixup resolution */
-						((init_func_t)funcs[k])();
+						machgate_call_guest_initializer(
+							funcs[k], (int)runtime->argc,
+							runtime->argv, runtime->envp, runtime->applep,
+							runtime->stack_top);
 					}
 				}
 			}

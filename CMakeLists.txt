@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(machgate C CXX)
+project(machgate C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 14)
@@ -35,6 +35,10 @@ set(MACHGATE_SOURCES
     src/elfcalls/elfcalls.c
     src/elfcalls/threads.c
 )
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    list(APPEND MACHGATE_SOURCES src/guest_call.S)
+endif()
 
 add_executable(machgate ${MACHGATE_SOURCES})
 

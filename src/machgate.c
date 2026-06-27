@@ -76,6 +76,9 @@ static void start_thread(struct load_results* lr);
 static void setup_stack64(const char* filepath, struct load_results* lr);
 static void lc_main_return(int status) __attribute__((noreturn));
 static void trace_lc_main_abi(struct load_results* lr);
+void machgate_call_guest_initializer(uintptr_t func_addr, int argc,
+                                     char** argv, char** envp,
+                                     char** applep, uintptr_t stack_top);
 void machgate_trace_guest_address(const char* label, uintptr_t address);
 
 typedef void (*shim_note_init_context_fn)(const char*, int, int, uintptr_t);
@@ -651,9 +654,6 @@ int main(int argc, char** argv, char** envp)
 	/* Adjust argv: remove machgate args so the loaded binary sees its path as argv[0] */
 	machgate_load_results.argc = argc - arg_idx;
 	machgate_load_results.argv = argv + arg_idx;
-	__machgate_guest_argc = (int)machgate_load_results.argc;
-	__machgate_guest_argv = machgate_load_results.argv;
-	__machgate_guest_envp = machgate_load_results.envp;
 	__machgate_guest_executable_path = filename;
 
 	/* Load config file — look next to the binary, or use MACHGATE_CONFIG */
@@ -727,6 +727,13 @@ int main(int argc, char** argv, char** envp)
 				cfg.num_trampolines = 1;
 			}
 		}
+	}
+
+	if (machgate_load_results.mh) {
+		setup_stack64(filename, &machgate_load_results);
+		__machgate_guest_argc = (int)machgate_load_results.argc;
+		__machgate_guest_argv = machgate_load_results.argv;
+		__machgate_guest_envp = machgate_load_results.envp;
 	}
 
 	/* LSE emulation state — shared between main exe and dylib patching */
@@ -974,7 +981,8 @@ int main(int argc, char** argv, char** envp)
 		 * Must be after fixup resolution (function pointers in
 		 * __mod_init_func need to be rebased). */
 		for (int i = 0; i < g_num_macho_dylibs; i++) {
-			dylib_loader_run_inits(&g_macho_dylibs[i]);
+			dylib_loader_run_inits(&g_macho_dylibs[i],
+			                       &machgate_load_results);
 		}
 	}
 
@@ -1150,9 +1158,6 @@ int main(int argc, char** argv, char** envp)
 		trampoline_install_signal_diagnostics((void*)machgate_load_results.mh,
 		                                      machgate_load_results.slide);
 	}
-
-	/* Set up the Mach-O stack layout */
-	setup_stack64(filename, &machgate_load_results);
 
 	start_thread(&machgate_load_results);
 
@@ -1553,7 +1558,8 @@ static void call_dyld_initializer(struct load_results* lr, const char* kind,
 		fprintf(stderr, "machgate: %s[%d/%d] at 0x%lx\n",
 		        log_kind, index, total, func_addr);
 	note_init_context(kind, index, total, func_addr);
-	((dyld_init_func_t)func_addr)((int)lr->argc, lr->argv, lr->envp, lr->applep);
+	machgate_call_guest_initializer(func_addr, (int)lr->argc, lr->argv,
+	                                lr->envp, lr->applep, lr->stack_top);
 	clear_init_context();
 }
 

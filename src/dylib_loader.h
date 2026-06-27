@@ -53,11 +53,14 @@ uintptr_t dylib_loader_lookup(struct macho_dylib_info *info, const char *name);
  */
 struct macho_dylib_info *dylib_loader_find(const char *basename);
 
+struct load_results;
+
 /*
  * Run __mod_init_func and S_INIT_FUNC_OFFSETS initializers for a loaded dylib.
  * Must be called after the dylib's chained fixups have been resolved.
  */
-void dylib_loader_run_inits(struct macho_dylib_info *info);
+void dylib_loader_run_inits(struct macho_dylib_info *info,
+                            struct load_results *runtime);
 
 /* Allocate a chunk from the dylib's adjacent pool. Returns NULL if exhausted. */
 static inline void *dylib_pool_alloc(struct macho_dylib_info *info, size_t size)
