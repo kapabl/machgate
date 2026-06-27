@@ -206,6 +206,51 @@ static void print_nearest_section_symbol(const char* label,
 	}
 }
 
+static void print_data_address_symbol_context(const char* label,
+                                              uintptr_t address)
+{
+	struct mach_header_64* header = (struct mach_header_64*)machismo_load_results.mh;
+	struct symtab_command* symtab = NULL;
+	struct segment_command_64* linkedit = NULL;
+	uint8_t section_ordinal = 1;
+
+	if (!header)
+		return;
+
+	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		struct load_command* lc = (struct load_command*)cmd_ptr;
+		if (lc->cmd == LC_SYMTAB) {
+			symtab = (struct symtab_command*)lc;
+		} else if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			if (strncmp(seg->segname, "__LINKEDIT", 16) == 0)
+				linkedit = seg;
+		}
+		cmd_ptr += lc->cmdsize;
+	}
+
+	cmd_ptr = (uint8_t*)(header + 1);
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		struct load_command* lc = (struct load_command*)cmd_ptr;
+		if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			struct section_64* sect = (struct section_64*)(seg + 1);
+			for (uint32_t section_index = 0; section_index < seg->nsects; section_index++, sect++) {
+				uintptr_t section_start = sect->addr + machismo_load_results.slide;
+				uintptr_t section_end = section_start + sect->size;
+				if (address >= section_start && address < section_end) {
+					print_nearest_section_symbol(label, address, symtab, linkedit,
+					                             section_ordinal + section_index);
+					return;
+				}
+			}
+			section_ordinal += seg->nsects;
+		}
+		cmd_ptr += lc->cmdsize;
+	}
+}
+
 static void print_indirect_symbol_context(const char* label, uintptr_t slot_addr)
 {
 	struct mach_header_64* header = (struct mach_header_64*)machismo_load_results.mh;
@@ -424,6 +469,9 @@ void machgate_trace_guest_address(const char* label, uintptr_t address)
 			        16, seg->segname, 16, section_name,
 			        (unsigned long long)section_fileoff, insn);
 		}
+
+		if (!(seg->initprot & VM_PROT_EXECUTE))
+			print_data_address_symbol_context(label ? label : "address", address);
 
 		if (label && strstr(label, "lr-4") && (address & 3u) == 0) {
 			uintptr_t window_start = address >= seg_start + 20 ? address - 20 : seg_start;

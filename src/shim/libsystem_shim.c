@@ -6901,7 +6901,7 @@ static void trace_signal_pointer_words(const char* label, uintptr_t address)
 
 static void trace_signal_register_context(void* ucontext)
 {
-	for (int reg = 0; reg <= 8; reg++) {
+	for (int reg = 0; reg <= 2; reg++) {
 		char label[32];
 		uintptr_t value = trace_ucontext_reg(ucontext, reg);
 
@@ -6910,6 +6910,8 @@ static void trace_signal_register_context(void* ucontext)
 		snprintf(label, sizeof(label), "signal.x%d", reg);
 		trace_guest_address_context(label, value);
 	}
+	if (trace_ucontext_reg(ucontext, 8))
+		trace_guest_address_context("signal.x8", trace_ucontext_reg(ucontext, 8));
 }
 
 static void trace_signal_tree_insert_context(uintptr_t pc, void* ucontext)
@@ -6928,7 +6930,8 @@ static void trace_signal_tree_insert_context(uintptr_t pc, void* ucontext)
 	trace_signal_pointer_words("x0.tree", trace_ucontext_reg(ucontext, 0));
 	trace_signal_pointer_words("x1.child-slot", trace_ucontext_reg(ucontext, 1));
 	trace_signal_pointer_words("x2.child-slot", trace_ucontext_reg(ucontext, 2));
-	trace_signal_pointer_words("x3.new-node", trace_ucontext_reg(ucontext, 3));
+	fprintf(stderr, "libsystem_shim: signal memory x3.new-node=%p (not dereferenced)\n",
+	        (void*)trace_ucontext_reg(ucontext, 3));
 	trace_guest_address_context("signal.tree", trace_ucontext_reg(ucontext, 0));
 	trace_guest_address_context("signal.tree+8", trace_ucontext_reg(ucontext, 0) + 8);
 }

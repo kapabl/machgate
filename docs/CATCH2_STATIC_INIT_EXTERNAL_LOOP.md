@@ -842,6 +842,37 @@ or not the root cause. The next release is diagnostic-only:
   and determine whether the tree object is fully zero, partially initialized,
   or has a bad `__begin_node_` only.
 
+`v0.3.11` confirmed the tree object is in guest zero-fill storage:
+
+```text
+machgate: guest context signal.x0=0x100da3320 vmaddr=0x100da3320 segment=__DATA section=__bss fileoff=0x10fa0 insn=0x00000000
+machgate: guest context signal.x1=0x100da3328 vmaddr=0x100da3328 segment=__DATA section=__bss fileoff=0x10fa8 insn=0x6227ae50
+machgate: guest context signal.x2=0x100da3328 vmaddr=0x100da3328 segment=__DATA section=__bss fileoff=0x10fa8 insn=0x6227ae50
+```
+
+Interpretation:
+
+- `x0` is the libc++ tree object in `__DATA,__bss`.
+- `x1` and `x2` both point at `tree + 8`, the embedded child/root slot.
+- The low word printed at `tree + 8` matches the low bits of `x3`, so the
+  insertion already stored the new node into the child/root slot.
+- The fault remains `ldr x8, [x8]` with `x8 == NULL`, meaning `tree[0]`
+  (`__begin_node_`) is NULL. A constructed empty libc++ tree should have
+  `__begin_node_ == tree + 8`.
+- The first `v0.3.11` register walker was too broad and appears to have crashed
+  inside the signal handler before printing the targeted memory-word probe.
+
+Fix staged after this trace:
+
+- Restrict the signal register address context to guest-image candidates needed
+  for this failure (`x0`, `x1`, `x2`, and non-NULL `x8`).
+- Do not dereference the host-heap `x3` new-node pointer in the signal handler.
+- Print nearest data symbols for normal `__DATA` addresses, not only for
+  indirect-call slots, so `signal.x0` / `signal.tree` should identify the
+  owning global.
+- Keep the focused memory-word dump for `x0.tree`, `x1.child-slot`, and
+  `x2.child-slot`.
+
 Expected next private run output shape:
 
 ```text
