@@ -829,6 +829,19 @@ Fix staged after this trace:
   is set only after successful release; byte `1` tracks pending/completed
   initialization for the current single guest thread.
 
+`v0.3.10` still did not move the private trace. That means the C++ guard
+surface was either not used on this path, statically linked inside the binary,
+or not the root cause. The next release is diagnostic-only:
+
+- For signal traces, MachGate now prints section/symbol context for register
+  values `x0` through `x8` when they point into the guest Mach-O image.
+- For the exact libc++ tree-insert fault instruction `0xf9400108`, the shim
+  dumps four pointer-sized words at `x0` (tree object), `x1`/`x2` (child slot),
+  and `x3` (new node).
+- Expected evidence: identify the Mach-O data symbol owning `x0=0x100da3320`
+  and determine whether the tree object is fully zero, partially initialized,
+  or has a bad `__begin_node_` only.
+
 Expected next private run output shape:
 
 ```text

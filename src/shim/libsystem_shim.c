@@ -6872,6 +6872,67 @@ static void trace_signal_indirect_branch(uintptr_t call_site, void* ucontext)
 	        (void*)trace_ucontext_reg(ucontext, reg));
 }
 
+static int trace_read_u64(uintptr_t address, uint64_t* value)
+{
+	if (!address)
+		return 0;
+	memcpy(value, (void*)address, sizeof(*value));
+	return 1;
+}
+
+static void trace_signal_pointer_words(const char* label, uintptr_t address)
+{
+	uint64_t words[4] = {0};
+
+	if (!address)
+		return;
+	if (!trace_read_u64(address, &words[0]) ||
+	    !trace_read_u64(address + 8, &words[1]) ||
+	    !trace_read_u64(address + 16, &words[2]) ||
+	    !trace_read_u64(address + 24, &words[3]))
+		return;
+
+	fprintf(stderr,
+	        "libsystem_shim: signal memory %s=%p [0]=%p [8]=%p [16]=%p [24]=%p\n",
+	        label, (void*)address, (void*)(uintptr_t)words[0],
+	        (void*)(uintptr_t)words[1], (void*)(uintptr_t)words[2],
+	        (void*)(uintptr_t)words[3]);
+}
+
+static void trace_signal_register_context(void* ucontext)
+{
+	for (int reg = 0; reg <= 8; reg++) {
+		char label[32];
+		uintptr_t value = trace_ucontext_reg(ucontext, reg);
+
+		if (!value)
+			continue;
+		snprintf(label, sizeof(label), "signal.x%d", reg);
+		trace_guest_address_context(label, value);
+	}
+}
+
+static void trace_signal_tree_insert_context(uintptr_t pc, void* ucontext)
+{
+	uint32_t insn = 0;
+
+	if (!pc)
+		return;
+	memcpy(&insn, (void*)pc, sizeof(insn));
+	if (insn != 0xf9400108u)
+		return;
+
+	fprintf(stderr,
+	        "libsystem_shim: signal libcxx-tree-insert probe pc=%p\n",
+	        (void*)pc);
+	trace_signal_pointer_words("x0.tree", trace_ucontext_reg(ucontext, 0));
+	trace_signal_pointer_words("x1.child-slot", trace_ucontext_reg(ucontext, 1));
+	trace_signal_pointer_words("x2.child-slot", trace_ucontext_reg(ucontext, 2));
+	trace_signal_pointer_words("x3.new-node", trace_ucontext_reg(ucontext, 3));
+	trace_guest_address_context("signal.tree", trace_ucontext_reg(ucontext, 0));
+	trace_guest_address_context("signal.tree+8", trace_ucontext_reg(ucontext, 0) + 8);
+}
+
 static int shim_wait_trace_enabled(void)
 {
 	const char* value = getenv("MACHGATE_TRACE_WAIT");
@@ -8371,6 +8432,8 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		trace_guest_address_context("signal.lr", lr);
 		if (lr >= 4)
 			trace_guest_address_context("signal.lr-4", lr - 4);
+		trace_signal_register_context(ucontext);
+		trace_signal_tree_insert_context(pc, ucontext);
 	}
 
 	if (signum > 0 && signum < _NSIG) {
