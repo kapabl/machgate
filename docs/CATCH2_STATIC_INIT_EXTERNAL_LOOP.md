@@ -1145,3 +1145,44 @@ Validation:
   passes
 - ARM64 Docker `BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh` passes
   `29 / 29`
+
+## v0.3.27 Host libc++ Operator Allocation Follow-Up
+
+The `v0.3.26` private run still aborts after `_main` with the same
+`trackDeallocate` assertion and no `MACHGATE_TRACE_ALLOC_SIZE=72` events. That
+negative trace means the failing 72-byte ownership path was not visible through
+MachGate's exported malloc/default-zone ledger.
+
+New evidence:
+
+- packaged `libc++.so.1` has undefined `operator new/delete` symbols
+- packaged `libc++abi.so.1` provides weak `operator new/delete` symbols backed
+  by the host allocator
+- `libsystem_shim.so` did not export those C++ operator symbols, so host
+  libc++/libc++abi code servicing Mach-O calls could allocate outside the
+  MachGate ownership path
+- native testing also showed that calling an exported shim symbol from inside
+  the shim can be interposed through the ELF PLT; `_ZdlPvm` logged the sized
+  delete but initially did not reach the shim `free` tombstone path
+
+Accepted fix:
+
+- export C++ allocation/deallocation operators from `libsystem_shim.so`:
+  ordinary, array, nothrow, aligned, sized, and sized-aligned forms
+- route those operators through the same private shim allocation helpers used
+  by Darwin malloc/default-zone callbacks
+- split `malloc`, `free`, `calloc`, and `realloc` into private implementation
+  helpers plus exported symbols, so internal shim calls cannot be hijacked by
+  ELF symbol interposition
+- extend `tests/test_libsystem_shim.sh` to directly call `_Znwm`,
+  `_ZnwmSt11align_val_t`, `_ZdlPvm`, and `_ZdlPvmSt11align_val_t`
+
+Validation:
+
+- native `MACHGATE_TRACE_ALLOC=2 BUILD_DIR=... tests/test_libsystem_shim.sh`
+  shows `_ZdlPvm` followed by the real shim `free` event and a tracked-freed
+  tombstone
+- ARM64 Docker `BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh` passes
+  `29 / 29`
+- ARM64 `nm -D build-arm64/libsystem_shim.so` shows exported `_Znwm`,
+  `_ZdlPvm`, and aligned operator forms

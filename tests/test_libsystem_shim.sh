@@ -83,6 +83,16 @@ lib.realloc.restype = ctypes.c_void_p
 lib.free.argtypes = [ctypes.c_void_p]
 lib.malloc_size.argtypes = [ctypes.c_void_p]
 lib.malloc_size.restype = ctypes.c_size_t
+operator_new = getattr(lib, '_Znwm')
+operator_new.argtypes = [ctypes.c_size_t]
+operator_new.restype = ctypes.c_void_p
+operator_new_aligned = getattr(lib, '_ZnwmSt11align_val_t')
+operator_new_aligned.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
+operator_new_aligned.restype = ctypes.c_void_p
+operator_delete_sized = getattr(lib, '_ZdlPvm')
+operator_delete_sized.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+operator_delete_aligned_sized = getattr(lib, '_ZdlPvmSt11align_val_t')
+operator_delete_aligned_sized.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
 
 heap_ptr = lib.malloc(72)
 assert heap_ptr, 'malloc failed'
@@ -117,6 +127,18 @@ assert zone_memalign_ptr and zone_memalign_ptr % 64 == 0, f'malloc_zone_memalign
 assert lib.malloc_size(zone_memalign_ptr) >= 72, 'malloc_size returned too little for malloc_zone_memalign allocation'
 lib.free(zone_memalign_ptr)
 assert lib.malloc_size(zone_memalign_ptr) == 0, 'malloc_size did not clear after malloc_zone_memalign free'
+
+new_ptr = operator_new(72)
+assert new_ptr, 'operator new failed'
+assert lib.malloc_size(new_ptr) >= 72, 'malloc_size returned too little for operator new allocation'
+operator_delete_sized(new_ptr, 72)
+assert lib.malloc_size(new_ptr) == 0, 'malloc_size did not clear after sized operator delete'
+
+aligned_new_ptr = operator_new_aligned(72, 64)
+assert aligned_new_ptr and aligned_new_ptr % 64 == 0, f'aligned operator new returned unaligned pointer {aligned_new_ptr:#x}'
+assert lib.malloc_size(aligned_new_ptr) >= 72, 'malloc_size returned too little for aligned operator new allocation'
+operator_delete_aligned_sized(aligned_new_ptr, 72, 64)
+assert lib.malloc_size(aligned_new_ptr) == 0, 'malloc_size did not clear after sized aligned operator delete'
 
 # Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates
 # names such as auto_start_dbg through std::isalnum, which reaches ___maskrune.
