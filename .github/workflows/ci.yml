@@ -21,6 +21,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check whitespace
+        run: git diff --check
+
       - name: Build ARM64 toolchain image
         run: |
           docker build \
@@ -43,5 +46,4 @@ jobs:
               cmake --build build-arm64 --verbose -j1
               BUILD_DIR=/work/build-arm64 bash tests/fixtures/build_fixtures.sh
               BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh
-              git diff --check
             '
