@@ -430,6 +430,8 @@ lib.machgate_shim_set_guest_cxx_allocators.argtypes = [ctypes.c_void_p] * 12
 lib.machgate_shim_guest_operator_new.argtypes = [ctypes.c_size_t]
 lib.machgate_shim_guest_operator_new.restype = ctypes.c_void_p
 lib.machgate_shim_guest_operator_delete.argtypes = [ctypes.c_void_p]
+lib.machgate_shim_guest_operator_delete_sized_aligned.argtypes = [
+    ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
 lib.machgate_shim_set_guest_cxx_allocators(
     ctypes.cast(fake_guest_new, ctypes.c_void_p), None, None, None,
     ctypes.cast(fake_guest_delete, ctypes.c_void_p), None, None, None,
@@ -440,6 +442,32 @@ lib.machgate_shim_guest_operator_delete(guest_bridge_ptr)
 assert guest_delete_calls.value == 1, f'first guest delete calls={guest_delete_calls.value}, expected 1'
 lib.machgate_shim_guest_operator_delete(guest_bridge_ptr)
 assert guest_delete_calls.value == 1, 'guest C++ ownership mark survived delete'
+
+guest_delete_calls.value = 0
+guest_bridge_ptr = lib.machgate_shim_guest_operator_new(72)
+lib.machgate_shim_guest_operator_delete_sized_aligned(guest_bridge_ptr, 72, 64)
+assert guest_delete_calls.value == 1, 'sized aligned guest delete did not fall back to unsized guest delete'
+lib.machgate_shim_guest_operator_delete(guest_bridge_ptr)
+assert guest_delete_calls.value == 1, 'guest C++ ownership mark survived sized aligned delete fallback'
+
+reentrant_outer = ctypes.c_void_p()
+reentrant_inner = ctypes.c_void_p()
+reentrant_delete_calls = ctypes.c_int(0)
+
+@GUEST_DELETE
+def fake_guest_delete_reentrant(ptr):
+    reentrant_delete_calls.value += 1
+    if ptr == reentrant_outer.value:
+        lib.machgate_shim_guest_operator_delete(reentrant_inner.value)
+
+lib.machgate_shim_set_guest_cxx_allocators(
+    ctypes.cast(fake_guest_new, ctypes.c_void_p), None, None, None,
+    ctypes.cast(fake_guest_delete_reentrant, ctypes.c_void_p), None, None, None,
+    None, None, None, None)
+reentrant_outer.value = lib.machgate_shim_guest_operator_new(72)
+reentrant_inner.value = lib.machgate_shim_guest_operator_new(72)
+lib.machgate_shim_guest_operator_delete(reentrant_outer.value)
+assert reentrant_delete_calls.value == 2, 'nested guest delete was routed away from guest deleter'
 lib.machgate_shim_set_guest_cxx_allocators(None, None, None, None, None, None, None, None, None, None, None, None)
 
 # Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates

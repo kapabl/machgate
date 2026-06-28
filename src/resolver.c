@@ -116,11 +116,54 @@ static int is_operator_delete_symbol(const char *sym_name)
 
 static uintptr_t resolve_cxx_operator_hook(const char *sym_name)
 {
-	if (is_operator_new_symbol(sym_name))
+	const char *name = normalize_cxx_operator_symbol(sym_name);
+	const char *wrapper_name = NULL;
+	void *wrapper;
+
+	if (strcmp(name, "_Znwm") == 0 ||
+	    strcmp(name, "_ZnwmRKSt9nothrow_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_new";
+	else if (strcmp(name, "_Znam") == 0 ||
+	         strcmp(name, "_ZnamRKSt9nothrow_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_new_array";
+	else if (strcmp(name, "_ZnwmSt11align_val_t") == 0 ||
+	         strcmp(name, "_ZnwmSt11align_val_tRKSt9nothrow_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_new_aligned";
+	else if (strcmp(name, "_ZnamSt11align_val_t") == 0 ||
+	         strcmp(name, "_ZnamSt11align_val_tRKSt9nothrow_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_new_array_aligned";
+	else if (strcmp(name, "_ZdlPv") == 0 ||
+	         strcmp(name, "_ZdlPvRKSt9nothrow_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_delete";
+	else if (strcmp(name, "_ZdaPv") == 0 ||
+	         strcmp(name, "_ZdaPvRKSt9nothrow_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_delete_array";
+	else if (strcmp(name, "_ZdlPvm") == 0)
+		wrapper_name = "machgate_shim_guest_operator_delete_sized";
+	else if (strcmp(name, "_ZdaPvm") == 0)
+		wrapper_name = "machgate_shim_guest_operator_delete_array_sized";
+	else if (strcmp(name, "_ZdlPvSt11align_val_t") == 0 ||
+	         strcmp(name, "_ZdlPvSt11align_val_tRKSt9nothrow_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_delete_aligned";
+	else if (strcmp(name, "_ZdaPvSt11align_val_t") == 0 ||
+	         strcmp(name, "_ZdaPvSt11align_val_tRKSt9nothrow_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_delete_array_aligned";
+	else if (strcmp(name, "_ZdlPvmSt11align_val_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_delete_sized_aligned";
+	else if (strcmp(name, "_ZdaPvmSt11align_val_t") == 0)
+		wrapper_name = "machgate_shim_guest_operator_delete_array_sized_aligned";
+
+	if (wrapper_name) {
+		wrapper = dlsym(RTLD_DEFAULT, wrapper_name);
+		if (wrapper)
+			return (uintptr_t)wrapper;
+	}
+
+	if (is_operator_new_symbol(name))
 		return (uintptr_t)zeroing_operator_new;
-	if (is_operator_new_aligned_symbol(sym_name))
+	if (is_operator_new_aligned_symbol(name))
 		return (uintptr_t)zeroing_operator_new_aligned;
-	if (is_operator_delete_symbol(sym_name))
+	if (is_operator_delete_symbol(name))
 		return (uintptr_t)zeroing_operator_delete;
 	return 0;
 }
