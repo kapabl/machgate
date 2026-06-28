@@ -412,6 +412,36 @@ assert aligned_new_ptr and aligned_new_ptr % 64 == 0, f'aligned operator new ret
 assert lib.malloc_size(aligned_new_ptr) >= 72, 'malloc_size returned too little for aligned operator new allocation'
 operator_delete_aligned_sized(aligned_new_ptr, 72, 64)
 
+GUEST_NEW = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
+GUEST_DELETE = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+guest_delete_calls = ctypes.c_int(0)
+guest_new_backing = ctypes.c_void_p()
+
+@GUEST_NEW
+def fake_guest_new(size):
+    guest_new_backing.value = lib.malloc(size)
+    return guest_new_backing.value
+
+@GUEST_DELETE
+def fake_guest_delete(ptr):
+    guest_delete_calls.value += 1
+
+lib.machgate_shim_set_guest_cxx_allocators.argtypes = [ctypes.c_void_p] * 12
+lib.machgate_shim_guest_operator_new.argtypes = [ctypes.c_size_t]
+lib.machgate_shim_guest_operator_new.restype = ctypes.c_void_p
+lib.machgate_shim_guest_operator_delete.argtypes = [ctypes.c_void_p]
+lib.machgate_shim_set_guest_cxx_allocators(
+    ctypes.cast(fake_guest_new, ctypes.c_void_p), None, None, None,
+    ctypes.cast(fake_guest_delete, ctypes.c_void_p), None, None, None,
+    None, None, None, None)
+guest_bridge_ptr = lib.machgate_shim_guest_operator_new(72)
+assert guest_bridge_ptr == guest_new_backing.value, 'guest C++ bridge did not return fake guest allocation'
+lib.machgate_shim_guest_operator_delete(guest_bridge_ptr)
+assert guest_delete_calls.value == 1, f'first guest delete calls={guest_delete_calls.value}, expected 1'
+lib.machgate_shim_guest_operator_delete(guest_bridge_ptr)
+assert guest_delete_calls.value == 1, 'guest C++ ownership mark survived delete'
+lib.machgate_shim_set_guest_cxx_allocators(None, None, None, None, None, None, None, None, None, None, None, None)
+
 # Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates
 # names such as auto_start_dbg through std::isalnum, which reaches ___maskrune.
 lib.__maskrune.argtypes = [ctypes.c_int, ctypes.c_ulong]

@@ -11258,8 +11258,20 @@ struct machgate_allocation_record {
 };
 
 static struct machgate_allocation_record allocation_records[MACHGATE_ALLOCATION_TABLE_SIZE];
+static volatile int allocation_records_lock;
 
 #define MACHGATE_ALLOCATION_GUEST_CXX 1u
+
+static void lock_allocation_records(void)
+{
+	while (__sync_lock_test_and_set(&allocation_records_lock, 1))
+		sched_yield();
+}
+
+static void unlock_allocation_records(void)
+{
+	__sync_lock_release(&allocation_records_lock);
+}
 
 static size_t allocation_record_index(const void* ptr)
 {
@@ -11280,6 +11292,7 @@ static void record_allocation_with_zone(void* ptr, size_t size, void* zone)
 		return;
 
 	index = allocation_record_index(ptr);
+	lock_allocation_records();
 	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
 		struct machgate_allocation_record* record =
 		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
@@ -11289,6 +11302,7 @@ static void record_allocation_with_zone(void* ptr, size_t size, void* zone)
 			record->size = size;
 			record->zone = zone;
 			record->flags = 0;
+			unlock_allocation_records();
 			return;
 		}
 		if (record->ptr && record->size == 0 && !reusable_record)
@@ -11300,6 +11314,7 @@ static void record_allocation_with_zone(void* ptr, size_t size, void* zone)
 			record->size = size;
 			record->zone = zone;
 			record->flags = 0;
+			unlock_allocation_records();
 			return;
 		}
 	}
@@ -11308,8 +11323,10 @@ static void record_allocation_with_zone(void* ptr, size_t size, void* zone)
 		reusable_record->size = size;
 		reusable_record->zone = zone;
 		reusable_record->flags = 0;
+		unlock_allocation_records();
 		return;
 	}
+	unlock_allocation_records();
 	fprintf(stderr, "libsystem_shim: WARNING: allocation ledger full, dropping ptr=%p size=%zu zone=%p\n",
 	        ptr, size, zone);
 }
@@ -11327,21 +11344,26 @@ static int lookup_allocation(const void* ptr, size_t* size_out, void** zone_out)
 		return 0;
 
 	index = allocation_record_index(ptr);
+	lock_allocation_records();
 	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
 		const struct machgate_allocation_record* record =
 		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
 
-		if (!record->ptr)
+		if (!record->ptr) {
+			unlock_allocation_records();
 			return 0;
+		}
 		if (record->ptr == ptr) {
 			if (size_out)
 				*size_out = record->size;
 			if (zone_out)
 				*zone_out = record->zone;
+			unlock_allocation_records();
 			return 1;
 		}
 	}
 
+	unlock_allocation_records();
 	return 0;
 }
 
@@ -11366,19 +11388,24 @@ static void forget_allocation(const void* ptr)
 		return;
 
 	index = allocation_record_index(ptr);
+	lock_allocation_records();
 	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
 		struct machgate_allocation_record* record =
 		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
 
-		if (!record->ptr)
+		if (!record->ptr) {
+			unlock_allocation_records();
 			return;
+		}
 		if (record->ptr == ptr) {
 			record->size = 0;
 			record->zone = NULL;
 			record->flags = 0;
+			unlock_allocation_records();
 			return;
 		}
 	}
+	unlock_allocation_records();
 }
 
 static void mark_guest_cxx_allocation(void* ptr, size_t size)
@@ -11389,6 +11416,7 @@ static void mark_guest_cxx_allocation(void* ptr, size_t size)
 		return;
 
 	index = allocation_record_index(ptr);
+	lock_allocation_records();
 	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
 		struct machgate_allocation_record* record =
 		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
@@ -11398,18 +11426,21 @@ static void mark_guest_cxx_allocation(void* ptr, size_t size)
 			record->size = recorded_allocation_size(ptr, size);
 			record->zone = NULL;
 			record->flags = MACHGATE_ALLOCATION_GUEST_CXX;
+			unlock_allocation_records();
 			return;
 		}
 		if (record->ptr == ptr) {
 			if (record->size == 0)
 				record->size = recorded_allocation_size(ptr, size);
 			record->flags |= MACHGATE_ALLOCATION_GUEST_CXX;
+			unlock_allocation_records();
 			return;
 		}
 	}
+	unlock_allocation_records();
 }
 
-static int is_guest_cxx_allocation(const void* ptr)
+static int take_guest_cxx_allocation(const void* ptr)
 {
 	size_t index;
 
@@ -11417,17 +11448,29 @@ static int is_guest_cxx_allocation(const void* ptr)
 		return 0;
 
 	index = allocation_record_index(ptr);
+	lock_allocation_records();
 	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
-		const struct machgate_allocation_record* record =
+		struct machgate_allocation_record* record =
 		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
 
-		if (!record->ptr)
+		if (!record->ptr) {
+			unlock_allocation_records();
 			return 0;
-		if (record->ptr == ptr)
-			return record->size != 0 &&
-			       (record->flags & MACHGATE_ALLOCATION_GUEST_CXX);
+		}
+		if (record->ptr == ptr) {
+			int result = record->size != 0 &&
+			    (record->flags & MACHGATE_ALLOCATION_GUEST_CXX);
+			if (result) {
+				record->size = 0;
+				record->zone = NULL;
+				record->flags = 0;
+			}
+			unlock_allocation_records();
+			return result;
+		}
 	}
 
+	unlock_allocation_records();
 	return 0;
 }
 
@@ -11784,8 +11827,8 @@ void* machgate_shim_guest_operator_new_array_aligned(size_t size, size_t alignme
 
 void machgate_shim_guest_operator_delete(void* ptr)
 {
-	if (ptr && guest_operator_delete && is_guest_cxx_allocation(ptr) &&
-	    !guest_cxx_allocator_depth) {
+	if (ptr && guest_operator_delete && !guest_cxx_allocator_depth &&
+	    take_guest_cxx_allocation(ptr)) {
 		guest_cxx_allocator_depth++;
 		guest_operator_delete(ptr);
 		guest_cxx_allocator_depth--;
@@ -11796,8 +11839,8 @@ void machgate_shim_guest_operator_delete(void* ptr)
 
 void machgate_shim_guest_operator_delete_array(void* ptr)
 {
-	if (ptr && guest_operator_delete_array && is_guest_cxx_allocation(ptr) &&
-	    !guest_cxx_allocator_depth) {
+	if (ptr && guest_operator_delete_array && !guest_cxx_allocator_depth &&
+	    take_guest_cxx_allocation(ptr)) {
 		guest_cxx_allocator_depth++;
 		guest_operator_delete_array(ptr);
 		guest_cxx_allocator_depth--;
@@ -11808,7 +11851,7 @@ void machgate_shim_guest_operator_delete_array(void* ptr)
 
 void machgate_shim_guest_operator_delete_sized(void* ptr, size_t size)
 {
-	if (ptr && is_guest_cxx_allocation(ptr) && !guest_cxx_allocator_depth) {
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
 		guest_cxx_allocator_depth++;
 		if (guest_operator_delete_sized)
 			guest_operator_delete_sized(ptr, size);
@@ -11824,7 +11867,7 @@ void machgate_shim_guest_operator_delete_sized(void* ptr, size_t size)
 
 void machgate_shim_guest_operator_delete_array_sized(void* ptr, size_t size)
 {
-	if (ptr && is_guest_cxx_allocation(ptr) && !guest_cxx_allocator_depth) {
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
 		guest_cxx_allocator_depth++;
 		if (guest_operator_delete_array_sized)
 			guest_operator_delete_array_sized(ptr, size);
@@ -11840,7 +11883,7 @@ void machgate_shim_guest_operator_delete_array_sized(void* ptr, size_t size)
 
 void machgate_shim_guest_operator_delete_aligned(void* ptr, size_t alignment)
 {
-	if (ptr && is_guest_cxx_allocation(ptr) && !guest_cxx_allocator_depth) {
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
 		guest_cxx_allocator_depth++;
 		if (guest_operator_delete_aligned)
 			guest_operator_delete_aligned(ptr, alignment);
@@ -11856,7 +11899,7 @@ void machgate_shim_guest_operator_delete_aligned(void* ptr, size_t alignment)
 
 void machgate_shim_guest_operator_delete_array_aligned(void* ptr, size_t alignment)
 {
-	if (ptr && is_guest_cxx_allocation(ptr) && !guest_cxx_allocator_depth) {
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
 		guest_cxx_allocator_depth++;
 		if (guest_operator_delete_array_aligned)
 			guest_operator_delete_array_aligned(ptr, alignment);
@@ -11873,7 +11916,7 @@ void machgate_shim_guest_operator_delete_array_aligned(void* ptr, size_t alignme
 void machgate_shim_guest_operator_delete_sized_aligned(void* ptr, size_t size,
                                                        size_t alignment)
 {
-	if (ptr && is_guest_cxx_allocation(ptr) && !guest_cxx_allocator_depth) {
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
 		guest_cxx_allocator_depth++;
 		if (guest_operator_delete_sized_aligned)
 			guest_operator_delete_sized_aligned(ptr, size, alignment);
@@ -11895,7 +11938,7 @@ void machgate_shim_guest_operator_delete_array_sized_aligned(void* ptr,
                                                              size_t size,
                                                              size_t alignment)
 {
-	if (ptr && is_guest_cxx_allocation(ptr) && !guest_cxx_allocator_depth) {
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
 		guest_cxx_allocator_depth++;
 		if (guest_operator_delete_array_sized_aligned)
 			guest_operator_delete_array_sized_aligned(ptr, size, alignment);
