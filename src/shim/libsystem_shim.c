@@ -6963,6 +6963,22 @@ static void trace_signal_pointer_words(const char* label, uintptr_t address)
 	        (void*)(uintptr_t)words[3]);
 }
 
+static void trace_signal_pointer_word_contexts(const char* label,
+                                               const uint64_t* words,
+                                               size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		uintptr_t value = (uintptr_t)words[i];
+		char word_label[96];
+
+		if (!value)
+			continue;
+		snprintf(word_label, sizeof(word_label), "%s[%zu]", label,
+		         i * sizeof(uint64_t));
+		trace_guest_address_context(word_label, value);
+	}
+}
+
 static void trace_signal_pointer_words_wide(const char* label, uintptr_t address)
 {
 	uint64_t words[8] = {0};
@@ -6981,6 +6997,8 @@ static void trace_signal_pointer_words_wide(const char* label, uintptr_t address
 	        (void*)(uintptr_t)words[2], (void*)(uintptr_t)words[3],
 	        (void*)(uintptr_t)words[4], (void*)(uintptr_t)words[5],
 	        (void*)(uintptr_t)words[6], (void*)(uintptr_t)words[7]);
+	trace_signal_pointer_word_contexts(label, words,
+	                                   sizeof(words) / sizeof(words[0]));
 }
 
 static void trace_signal_register_context(void* ucontext)
