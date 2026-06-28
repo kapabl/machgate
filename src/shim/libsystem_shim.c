@@ -6880,9 +6880,9 @@ static void trace_init_context(void)
 		return;
 
 	fprintf(stderr,
-	        "libsystem_shim: current initializer kind=%s index=%d total=%d address=%p\n",
-	        shim_init_kind, shim_init_index, shim_init_total,
-	        (void*)shim_init_address);
+	        "libsystem_shim: current initializer kind=%s progress=%d/%d index=%d address=%p\n",
+	        shim_init_kind, shim_init_index + 1, shim_init_total,
+	        shim_init_index, (void*)shim_init_address);
 }
 
 static void trace_guest_address_context(const char* label, uintptr_t address)

@@ -292,8 +292,8 @@ static void trace_merged_globals_words(const char* phase, const char* kind,
 
 	words = (uint64_t*)address;
 	fprintf(stderr,
-	        "machgate: cxx-init %s kind=%s index=%d/%d initializer=%p __MergedGlobals=%p words=[%#llx %#llx %#llx %#llx %#llx %#llx]\n",
-	        phase, kind, index, total, (void*)initializer, (void*)address,
+	        "machgate: cxx-init %s kind=%s progress=%d/%d index=%d initializer=%p __MergedGlobals=%p words=[%#llx %#llx %#llx %#llx %#llx %#llx]\n",
+	        phase, kind, index + 1, total, index, (void*)initializer, (void*)address,
 	        (unsigned long long)words[0], (unsigned long long)words[1],
 	        (unsigned long long)words[2], (unsigned long long)words[3],
 	        (unsigned long long)words[4], (unsigned long long)words[5]);
@@ -1643,8 +1643,8 @@ static void call_dyld_initializer(struct load_results* lr, const char* kind,
 		log_kind = "init";
 
 	if (machgate_verbose)
-		fprintf(stderr, "machgate: %s[%d/%d] at 0x%lx\n",
-		        log_kind, index, total, func_addr);
+		fprintf(stderr, "machgate: %s[%d/%d] index=%d at 0x%lx\n",
+		        log_kind, index + 1, total, index, func_addr);
 	note_init_context(kind, index, total, func_addr);
 	trace_merged_globals_words("before", kind, index, total, func_addr);
 	machgate_call_guest_initializer(func_addr, (int)lr->argc, lr->argv,

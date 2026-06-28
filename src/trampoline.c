@@ -782,9 +782,10 @@ static void print_signal_init_context(void)
 		return;
 
 	fprintf(stderr,
-	        "machgate: current initializer kind=%s index=%d total=%d address=%p\n",
-	        signal_diag_init_kind, signal_diag_init_index,
-	        signal_diag_init_total, (void*)signal_diag_init_address);
+	        "machgate: current initializer kind=%s progress=%d/%d index=%d address=%p\n",
+	        signal_diag_init_kind, signal_diag_init_index + 1,
+	        signal_diag_init_total, signal_diag_init_index,
+	        (void*)signal_diag_init_address);
 }
 
 static void print_signal_indirect_branch(uintptr_t call_site, const void* ucontext)
