@@ -7098,6 +7098,13 @@ static void trace_signal_catch2_assertion_result(const char* label,
 	trace_read_u32(result + 48, &disposition);
 	trace_read_u32(result + 120, &result_type);
 
+	fprintf(stderr,
+	        "libsystem_shim: catch2 %s assertion-result-raw=%p macro-data=%p macro-size=%llu file-data=%p line=%llu expr-data=%p expr-size=%llu disposition=0x%x result-type-candidate=0x%x\n",
+	        label, (void*)result, (void*)(uintptr_t)macro_data,
+	        (unsigned long long)macro_size, (void*)(uintptr_t)file_data,
+	        (unsigned long long)line, (void*)(uintptr_t)expr_data,
+	        (unsigned long long)expr_size, disposition, result_type);
+
 	trace_copy_string_preview(macro, sizeof(macro), (uintptr_t)macro_data,
 	                          (size_t)macro_size);
 	trace_copy_c_string_preview(file, sizeof(file), (uintptr_t)file_data);
@@ -7174,15 +7181,15 @@ static void trace_signal_faulting_load_context(uintptr_t pc, void* ucontext)
 			        (void*)(pc - 4), previous, previous_rt, previous_rn,
 			        previous_offset, (void*)previous_base,
 			        (void*)previous_effective, (void*)(uintptr_t)loaded);
+			if (!base && rn == 8 && rt == 0 && previous_rn == 19 &&
+			    previous_offset == 32)
+				trace_signal_catch2_null_active_testcase(ucontext);
 			if (previous_base)
 				trace_signal_pointer_words_wide("faulting-load.source-base",
 				                                previous_base);
 			if (previous_effective)
 				trace_guest_address_context("faulting-load.source-effective",
 				                            previous_effective);
-			if (!base && rn == 8 && rt == 0 && previous_rn == 19 &&
-			    previous_offset == 32)
-				trace_signal_catch2_null_active_testcase(ucontext);
 		}
 	}
 }
