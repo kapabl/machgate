@@ -51,6 +51,8 @@
 #include <locale.h>
 #include <sched.h>
 
+#define MACHGATE_SHIM_CALLER() __builtin_extract_return_addr(__builtin_return_address(0))
+
 extern char **environ;
 
 static int shim_hw_ncpu(void);
@@ -60,6 +62,7 @@ static int shim_delta_vm_trace_enabled(void);
 static int shim_wait_trace_enabled(void);
 static int shim_alloc_trace_enabled(void);
 static int shim_alloc_mismatch_trace_enabled(void);
+static int shim_alloc_signal_dump_enabled(void);
 static int shim_host_sigchld_handler_enabled(void);
 static FILE* shim_open_trace_file(void);
 static void shim_fd_trace_log(const char* format, ...);
@@ -7035,6 +7038,14 @@ static int shim_alloc_mismatch_trace_enabled(void)
 	return shim_alloc_trace_enabled();
 }
 
+static int shim_alloc_signal_dump_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_ALLOC_MISMATCH");
+	if (value && strcmp(value, "0") == 0)
+		return 0;
+	return 1;
+}
+
 static size_t shim_alloc_trace_size(void)
 {
 	const char* value = getenv("MACHGATE_TRACE_ALLOC_SIZE");
@@ -7082,11 +7093,53 @@ static void shim_record_alloc_event(const char* op, const void* ptr,
 	alloc_event_seq++;
 }
 
+static size_t shim_alloc_event_extent(const struct machgate_alloc_event* event)
+{
+	return event->size > event->old_size ? event->size : event->old_size;
+}
+
+static void shim_dump_related_alloc_event(unsigned long seq,
+                                          const struct machgate_alloc_event* event,
+                                          const void* ptr)
+{
+	uintptr_t target;
+	uintptr_t base;
+	size_t extent;
+	long long offset;
+
+	if (!ptr || !event->ptr)
+		return;
+	extent = shim_alloc_event_extent(event);
+	if (!extent)
+		return;
+	target = (uintptr_t)ptr;
+	base = (uintptr_t)event->ptr;
+	if (target < base) {
+		if (base - target > 64)
+			return;
+		offset = -(long long)(base - target);
+	} else {
+		if (target - base > extent + 64)
+			return;
+		offset = (long long)(target - base);
+	}
+	fprintf(stderr,
+	        "libsystem_shim: alloc related[%lu] op=%s base=%p offset=%lld extent=%zu caller=%p\n",
+	        seq, event->op, event->ptr, offset, extent,
+	        event->caller);
+	if (event->caller)
+		trace_guest_address_context("alloc.related-caller",
+		                            (uintptr_t)event->caller);
+}
+
 static void shim_dump_recent_alloc_events(const char* reason, const void* ptr)
 {
 	unsigned long start;
 
-	if (!shim_alloc_mismatch_trace_enabled())
+	if (!shim_alloc_signal_dump_enabled() &&
+	    !shim_alloc_mismatch_trace_enabled())
+		return;
+	if (alloc_event_seq == 0)
 		return;
 
 	fprintf(stderr,
@@ -7103,18 +7156,19 @@ static void shim_dump_recent_alloc_events(const char* reason, const void* ptr)
 		        "libsystem_shim: alloc recent[%lu] op=%s ptr=%p size=%zu old_size=%zu zone=%p caller=%p known=%d\n",
 		        seq, event->op, event->ptr, event->size, event->old_size,
 		        event->zone, event->caller, event->known);
+		shim_dump_related_alloc_event(seq, event, ptr);
 		if (event->caller)
 			trace_guest_address_context("alloc.caller", (uintptr_t)event->caller);
 	}
 }
 
-static void shim_trace_alloc_event(const char* op, const void* ptr,
-                                   size_t size, size_t old_size)
+static void shim_trace_alloc_event_at(const char* op, const void* ptr,
+                                      size_t size, size_t old_size,
+                                      void* caller, int known)
 {
 	size_t trace_size;
-	void* caller = __builtin_extract_return_addr(__builtin_return_address(0));
 
-	shim_record_alloc_event(op, ptr, size, old_size, NULL, caller, old_size != 0);
+	shim_record_alloc_event(op, ptr, size, old_size, NULL, caller, known);
 
 	if (!shim_alloc_trace_enabled())
 		return;
@@ -8592,6 +8646,9 @@ static uintptr_t trace_ucontext_reg(void* ucontext, int reg)
 
 static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 {
+	if (signum == SIGABRT)
+		shim_dump_recent_alloc_events("signal-sigabrt", NULL);
+
 	if (shim_signal_trace_enabled()) {
 		uintptr_t pc = trace_ucontext_pc(ucontext);
 		uintptr_t lr = trace_ucontext_reg(ucontext, 30);
@@ -11087,7 +11144,7 @@ static void resolve_real_funcs(void)
 	                                                    "posix_memalign");
 }
 
-static void *shim_malloc_impl(size_t size)
+static void *shim_malloc_impl_at(size_t size, void* caller)
 {
 	if (!real_malloc) {
 		resolve_real_funcs();
@@ -11109,7 +11166,7 @@ static void *shim_malloc_impl(size_t size)
 	if (p) {
 		memset(p, 0, size);
 		record_allocation(p, recorded_allocation_size(p, size));
-		shim_trace_alloc_event("malloc", p, size, 0);
+		shim_trace_alloc_event_at("malloc", p, size, 0, caller, 1);
 	}
 	return p;
 }
@@ -11117,17 +11174,17 @@ static void *shim_malloc_impl(size_t size)
 void *shim_malloc(size_t size) __asm__("malloc");
 void *shim_malloc(size_t size)
 {
-	return shim_malloc_impl(size);
+	return shim_malloc_impl_at(size, MACHGATE_SHIM_CALLER());
 }
 
-static void shim_free_impl(void *ptr)
+static void shim_free_impl_at(void *ptr, void* caller)
 {
 	size_t old_size = 0;
 	int known;
 
 	if (!ptr) return;
 	known = lookup_allocation_size(ptr, &old_size);
-	shim_trace_alloc_event("free", ptr, old_size, old_size);
+	shim_trace_alloc_event_at("free", ptr, old_size, old_size, caller, known);
 	if (!known)
 		shim_dump_recent_alloc_events("free-unknown-pointer", ptr);
 	forget_allocation(ptr);
@@ -11148,22 +11205,22 @@ static void shim_free_impl(void *ptr)
 void shim_free(void *ptr) __asm__("free");
 void shim_free(void *ptr)
 {
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
-static void *shim_calloc_impl(size_t nmemb, size_t size)
+static void *shim_calloc_impl_at(size_t nmemb, size_t size, void* caller)
 {
 	if (!real_calloc) {
 		resolve_real_funcs();
 		if (!real_calloc) {
 			size_t total = nmemb * size;
-			return shim_malloc_impl(total);
+			return shim_malloc_impl_at(total, caller);
 		}
 	}
 	void *p = real_calloc(nmemb, size);
 	if (p) {
 		record_allocation(p, recorded_allocation_size(p, nmemb * size));
-		shim_trace_alloc_event("calloc", p, nmemb * size, 0);
+		shim_trace_alloc_event_at("calloc", p, nmemb * size, 0, caller, 1);
 	}
 	return p;
 }
@@ -11171,10 +11228,10 @@ static void *shim_calloc_impl(size_t nmemb, size_t size)
 void *shim_calloc(size_t nmemb, size_t size) __asm__("calloc");
 void *shim_calloc(size_t nmemb, size_t size)
 {
-	return shim_calloc_impl(nmemb, size);
+	return shim_calloc_impl_at(nmemb, size, MACHGATE_SHIM_CALLER());
 }
 
-static void *shim_realloc_impl(void *ptr, size_t size)
+static void *shim_realloc_impl_at(void *ptr, size_t size, void* caller)
 {
 	size_t old_size = 0;
 	int known = 0;
@@ -11182,7 +11239,7 @@ static void *shim_realloc_impl(void *ptr, size_t size)
 	if (ptr && (char *)ptr >= bootstrap_buf &&
 	    (char *)ptr < bootstrap_buf + sizeof(bootstrap_buf)) {
 		lookup_allocation_size(ptr, &old_size);
-		void* new_ptr = shim_malloc_impl(size);
+		void* new_ptr = shim_malloc_impl_at(size, caller);
 		if (!new_ptr && size != 0)
 			return NULL;
 		if (new_ptr && old_size)
@@ -11203,7 +11260,7 @@ static void *shim_realloc_impl(void *ptr, size_t size)
 		forget_allocation(ptr);
 	if (new_ptr) {
 		record_allocation(new_ptr, recorded_allocation_size(new_ptr, size));
-		shim_trace_alloc_event("realloc", new_ptr, size, old_size);
+		shim_trace_alloc_event_at("realloc", new_ptr, size, old_size, caller, known);
 	}
 	return new_ptr;
 }
@@ -11211,10 +11268,11 @@ static void *shim_realloc_impl(void *ptr, size_t size)
 void *shim_realloc(void *ptr, size_t size) __asm__("realloc");
 void *shim_realloc(void *ptr, size_t size)
 {
-	return shim_realloc_impl(ptr, size);
+	return shim_realloc_impl_at(ptr, size, MACHGATE_SHIM_CALLER());
 }
 
-static int shim_posix_memalign_impl(void **memptr, size_t alignment, size_t size)
+static int shim_posix_memalign_impl_at(void **memptr, size_t alignment,
+                                       size_t size, void* caller)
 {
 	if (!memptr)
 		return EINVAL;
@@ -11227,7 +11285,8 @@ static int shim_posix_memalign_impl(void **memptr, size_t alignment, size_t size
 	int result = real_posix_memalign(memptr, alignment, size);
 	if (result == 0) {
 		record_allocation(*memptr, recorded_allocation_size(*memptr, size));
-		shim_trace_alloc_event("posix_memalign", *memptr, size, alignment);
+		shim_trace_alloc_event_at("posix_memalign", *memptr, size, alignment,
+		                          caller, 1);
 	}
 	return result;
 }
@@ -11235,7 +11294,8 @@ static int shim_posix_memalign_impl(void **memptr, size_t alignment, size_t size
 int shim_posix_memalign(void **memptr, size_t alignment, size_t size) __asm__("posix_memalign");
 int shim_posix_memalign(void **memptr, size_t alignment, size_t size)
 {
-	return shim_posix_memalign_impl(memptr, alignment, size);
+	return shim_posix_memalign_impl_at(memptr, alignment, size,
+	                                   MACHGATE_SHIM_CALLER());
 }
 
 size_t malloc_size(const void* ptr);
@@ -11243,36 +11303,42 @@ size_t malloc_good_size(size_t size);
 
 void* machgate_shim_malloc(size_t size)
 {
-	return shim_malloc_impl(size);
+	return shim_malloc_impl_at(size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_shim_calloc(size_t count, size_t size)
 {
-	return shim_calloc_impl(count, size);
+	return shim_calloc_impl_at(count, size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_shim_realloc(void* ptr, size_t size)
 {
-	return shim_realloc_impl(ptr, size);
+	return shim_realloc_impl_at(ptr, size, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_shim_free(void* ptr)
 {
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 int machgate_shim_posix_memalign(void** memptr, size_t alignment, size_t size)
 {
-	return shim_posix_memalign_impl(memptr, alignment, size);
+	return shim_posix_memalign_impl_at(memptr, alignment, size,
+	                                   MACHGATE_SHIM_CALLER());
+}
+
+static void* machgate_shim_memalign_at(size_t alignment, size_t size, void* caller)
+{
+	void* result = NULL;
+
+	if (shim_posix_memalign_impl_at(&result, alignment, size, caller) != 0)
+		return NULL;
+	return result;
 }
 
 void* machgate_shim_memalign(size_t alignment, size_t size)
 {
-	void* result = NULL;
-
-	if (shim_posix_memalign_impl(&result, alignment, size) != 0)
-		return NULL;
-	return result;
+	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_shim_valloc(size_t size)
@@ -11281,22 +11347,26 @@ void* machgate_shim_valloc(size_t size)
 
 	if (page_size == 0)
 		page_size = 4096;
-	return machgate_shim_memalign(page_size, size);
+	return machgate_shim_memalign_at(page_size, size, MACHGATE_SHIM_CALLER());
 }
 
 void* memalign(size_t alignment, size_t size)
 {
-	return machgate_shim_memalign(alignment, size);
+	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
 }
 
 void* aligned_alloc(size_t alignment, size_t size)
 {
-	return machgate_shim_memalign(alignment, size);
+	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
 }
 
 void* valloc(size_t size)
 {
-	return machgate_shim_valloc(size);
+	size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+
+	if (page_size == 0)
+		page_size = 4096;
+	return machgate_shim_memalign_at(page_size, size, MACHGATE_SHIM_CALLER());
 }
 
 size_t machgate_shim_malloc_size(const void* ptr)
@@ -11312,123 +11382,131 @@ size_t machgate_shim_malloc_good_size(size_t size)
 void* machgate_operator_new(size_t size) __asm__("_Znwm");
 void* machgate_operator_new(size_t size)
 {
-	return shim_malloc_impl(size);
+	return shim_malloc_impl_at(size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_array(size_t size) __asm__("_Znam");
 void* machgate_operator_new_array(size_t size)
 {
-	return shim_malloc_impl(size);
+	return shim_malloc_impl_at(size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_nothrow(size_t size, const void* nothrow_arg) __asm__("_ZnwmRKSt9nothrow_t");
 void* machgate_operator_new_nothrow(size_t size, const void* nothrow_arg)
 {
 	(void)nothrow_arg;
-	return shim_malloc_impl(size);
+	return shim_malloc_impl_at(size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_array_nothrow(size_t size, const void* nothrow_arg) __asm__("_ZnamRKSt9nothrow_t");
 void* machgate_operator_new_array_nothrow(size_t size, const void* nothrow_arg)
 {
 	(void)nothrow_arg;
-	return shim_malloc_impl(size);
+	return shim_malloc_impl_at(size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_aligned(size_t size, size_t alignment) __asm__("_ZnwmSt11align_val_t");
 void* machgate_operator_new_aligned(size_t size, size_t alignment)
 {
-	return machgate_shim_memalign(alignment, size);
+	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_array_aligned(size_t size, size_t alignment) __asm__("_ZnamSt11align_val_t");
 void* machgate_operator_new_array_aligned(size_t size, size_t alignment)
 {
-	return machgate_shim_memalign(alignment, size);
+	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_aligned_nothrow(size_t size, size_t alignment, const void* nothrow_arg) __asm__("_ZnwmSt11align_val_tRKSt9nothrow_t");
 void* machgate_operator_new_aligned_nothrow(size_t size, size_t alignment, const void* nothrow_arg)
 {
 	(void)nothrow_arg;
-	return machgate_shim_memalign(alignment, size);
+	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_array_aligned_nothrow(size_t size, size_t alignment, const void* nothrow_arg) __asm__("_ZnamSt11align_val_tRKSt9nothrow_t");
 void* machgate_operator_new_array_aligned_nothrow(size_t size, size_t alignment, const void* nothrow_arg)
 {
 	(void)nothrow_arg;
-	return machgate_shim_memalign(alignment, size);
+	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete(void* ptr) __asm__("_ZdlPv");
 void machgate_operator_delete(void* ptr)
 {
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete_array(void* ptr) __asm__("_ZdaPv");
 void machgate_operator_delete_array(void* ptr)
 {
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete_sized(void* ptr, size_t size) __asm__("_ZdlPvm");
 void machgate_operator_delete_sized(void* ptr, size_t size)
 {
-	shim_trace_alloc_event("operator_delete_sized", ptr, size, size);
-	shim_free_impl(ptr);
+	void* caller = MACHGATE_SHIM_CALLER();
+	shim_trace_alloc_event_at("operator_delete_sized", ptr, size, size,
+	                          caller, 1);
+	shim_free_impl_at(ptr, caller);
 }
 
 void machgate_operator_delete_array_sized(void* ptr, size_t size) __asm__("_ZdaPvm");
 void machgate_operator_delete_array_sized(void* ptr, size_t size)
 {
-	shim_trace_alloc_event("operator_delete_array_sized", ptr, size, size);
-	shim_free_impl(ptr);
+	void* caller = MACHGATE_SHIM_CALLER();
+	shim_trace_alloc_event_at("operator_delete_array_sized", ptr, size, size,
+	                          caller, 1);
+	shim_free_impl_at(ptr, caller);
 }
 
 void machgate_operator_delete_nothrow(void* ptr, const void* nothrow_arg) __asm__("_ZdlPvRKSt9nothrow_t");
 void machgate_operator_delete_nothrow(void* ptr, const void* nothrow_arg)
 {
 	(void)nothrow_arg;
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete_array_nothrow(void* ptr, const void* nothrow_arg) __asm__("_ZdaPvRKSt9nothrow_t");
 void machgate_operator_delete_array_nothrow(void* ptr, const void* nothrow_arg)
 {
 	(void)nothrow_arg;
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete_aligned(void* ptr, size_t alignment) __asm__("_ZdlPvSt11align_val_t");
 void machgate_operator_delete_aligned(void* ptr, size_t alignment)
 {
 	(void)alignment;
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete_array_aligned(void* ptr, size_t alignment) __asm__("_ZdaPvSt11align_val_t");
 void machgate_operator_delete_array_aligned(void* ptr, size_t alignment)
 {
 	(void)alignment;
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete_sized_aligned(void* ptr, size_t size, size_t alignment) __asm__("_ZdlPvmSt11align_val_t");
 void machgate_operator_delete_sized_aligned(void* ptr, size_t size, size_t alignment)
 {
 	(void)alignment;
-	shim_trace_alloc_event("operator_delete_sized_aligned", ptr, size, size);
-	shim_free_impl(ptr);
+	void* caller = MACHGATE_SHIM_CALLER();
+	shim_trace_alloc_event_at("operator_delete_sized_aligned", ptr, size, size,
+	                          caller, 1);
+	shim_free_impl_at(ptr, caller);
 }
 
 void machgate_operator_delete_array_sized_aligned(void* ptr, size_t size, size_t alignment) __asm__("_ZdaPvmSt11align_val_t");
 void machgate_operator_delete_array_sized_aligned(void* ptr, size_t size, size_t alignment)
 {
 	(void)alignment;
-	shim_trace_alloc_event("operator_delete_array_sized_aligned", ptr, size, size);
-	shim_free_impl(ptr);
+	void* caller = MACHGATE_SHIM_CALLER();
+	shim_trace_alloc_event_at("operator_delete_array_sized_aligned", ptr, size, size,
+	                          caller, 1);
+	shim_free_impl_at(ptr, caller);
 }
 
 void machgate_operator_delete_aligned_nothrow(void* ptr, size_t alignment, const void* nothrow_arg) __asm__("_ZdlPvSt11align_val_tRKSt9nothrow_t");
@@ -11436,7 +11514,7 @@ void machgate_operator_delete_aligned_nothrow(void* ptr, size_t alignment, const
 {
 	(void)alignment;
 	(void)nothrow_arg;
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete_array_aligned_nothrow(void* ptr, size_t alignment, const void* nothrow_arg) __asm__("_ZdaPvSt11align_val_tRKSt9nothrow_t");
@@ -11444,7 +11522,7 @@ void machgate_operator_delete_array_aligned_nothrow(void* ptr, size_t alignment,
 {
 	(void)alignment;
 	(void)nothrow_arg;
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
 }
 
 struct machgate_malloc_zone {
@@ -11533,6 +11611,7 @@ void malloc_zone_free(void* zone, void* ptr);
 
 void* malloc_zone_malloc(void* zone, size_t size)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
 	if (machgate_zone && machgate_zone->malloc) {
 		void* result = machgate_zone->malloc(zone, size);
@@ -11540,15 +11619,17 @@ void* malloc_zone_malloc(void* zone, size_t size)
 			record_allocation_with_zone(result,
 			                            zone_recorded_size(machgate_zone, zone, result, size),
 			                            zone);
-			shim_trace_alloc_event("malloc_zone_malloc", result, size, 0);
+			shim_trace_alloc_event_at("malloc_zone_malloc", result, size, 0,
+			                          caller, 1);
 		}
 		return result;
 	}
-	return shim_malloc_impl(size);
+	return shim_malloc_impl_at(size, caller);
 }
 
 void* malloc_zone_realloc(void* zone, void* ptr, size_t size)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	void* effective_zone = effective_malloc_zone(zone, ptr);
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(effective_zone);
 	if (machgate_zone && machgate_zone->realloc) {
@@ -11560,25 +11641,28 @@ void* malloc_zone_realloc(void* zone, void* ptr, size_t size)
 			record_allocation_with_zone(result,
 			                            zone_recorded_size(machgate_zone, effective_zone, result, size),
 			                            effective_zone);
-			shim_trace_alloc_event("malloc_zone_realloc", result, size, old_size);
+			shim_trace_alloc_event_at("malloc_zone_realloc", result, size, old_size,
+			                          caller, old_size != 0);
 		}
 		return result;
 	}
-	return shim_realloc_impl(ptr, size);
+	return shim_realloc_impl_at(ptr, size, caller);
 }
 
 void malloc_zone_free(void* zone, void* ptr)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	void* effective_zone = effective_malloc_zone(zone, ptr);
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(effective_zone);
 	if (machgate_zone && machgate_zone->free) {
 		size_t old_size = malloc_zone_size(effective_zone, ptr);
-		shim_trace_alloc_event("malloc_zone_free", ptr, old_size, old_size);
+		shim_trace_alloc_event_at("malloc_zone_free", ptr, old_size, old_size,
+		                          caller, old_size != 0);
 		forget_allocation(ptr);
 		machgate_zone->free(effective_zone, ptr);
 		return;
 	}
-	shim_free_impl(ptr);
+	shim_free_impl_at(ptr, caller);
 }
 
 size_t malloc_zone_size(void* zone, const void* ptr)
@@ -11592,6 +11676,7 @@ size_t malloc_zone_size(void* zone, const void* ptr)
 
 void* malloc_zone_calloc(void* zone, size_t count, size_t size)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
 	if (machgate_zone && machgate_zone->calloc) {
 		size_t total = count * size;
@@ -11600,15 +11685,17 @@ void* malloc_zone_calloc(void* zone, size_t count, size_t size)
 			record_allocation_with_zone(result,
 			                            zone_recorded_size(machgate_zone, zone, result, total),
 			                            zone);
-			shim_trace_alloc_event("malloc_zone_calloc", result, total, 0);
+			shim_trace_alloc_event_at("malloc_zone_calloc", result, total, 0,
+			                          caller, 1);
 		}
 		return result;
 	}
-	return shim_calloc_impl(count, size);
+	return shim_calloc_impl_at(count, size, caller);
 }
 
 void* malloc_zone_valloc(void* zone, size_t size)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
 	if (machgate_zone && machgate_zone->valloc) {
 		void* result = machgate_zone->valloc(zone, size);
@@ -11616,7 +11703,8 @@ void* malloc_zone_valloc(void* zone, size_t size)
 			record_allocation_with_zone(result,
 			                            zone_recorded_size(machgate_zone, zone, result, size),
 			                            zone);
-			shim_trace_alloc_event("malloc_zone_valloc", result, size, 0);
+			shim_trace_alloc_event_at("malloc_zone_valloc", result, size, 0,
+			                          caller, 1);
 		}
 		return result;
 	}
@@ -11626,7 +11714,7 @@ void* malloc_zone_valloc(void* zone, size_t size)
 
 	if (page_size == 0)
 		page_size = 4096;
-	if (shim_posix_memalign_impl(&result, page_size, size) != 0)
+	if (shim_posix_memalign_impl_at(&result, page_size, size, caller) != 0)
 		return NULL;
 	return result;
 }
@@ -11641,6 +11729,7 @@ void malloc_zone_destroy(void* zone)
 unsigned malloc_zone_batch_malloc(void* zone, size_t size,
                                   void** results, unsigned count)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
 	unsigned index;
 
@@ -11650,13 +11739,14 @@ unsigned malloc_zone_batch_malloc(void* zone, size_t size,
 			record_allocation_with_zone(results[index],
 			                            zone_recorded_size(machgate_zone, zone, results[index], size),
 			                            zone);
-			shim_trace_alloc_event("malloc_zone_batch_malloc", results[index], size, 0);
+			shim_trace_alloc_event_at("malloc_zone_batch_malloc", results[index],
+			                          size, 0, caller, 1);
 		}
 		return result;
 	}
 
 	for (index = 0; index < count; index++) {
-		results[index] = shim_malloc_impl(size);
+		results[index] = shim_malloc_impl_at(size, caller);
 		if (!results[index])
 			break;
 	}
@@ -11669,8 +11759,14 @@ void malloc_zone_batch_free(void* zone, void** pointers,
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
 
 	if (machgate_zone && machgate_zone->batch_free) {
-		for (unsigned index = 0; index < count; index++)
+		void* caller = MACHGATE_SHIM_CALLER();
+		for (unsigned index = 0; index < count; index++) {
+			size_t old_size = malloc_zone_size(zone, pointers[index]);
+			shim_trace_alloc_event_at("malloc_zone_batch_free",
+			                          pointers[index], old_size, old_size,
+			                          caller, old_size != 0);
 			forget_allocation(pointers[index]);
+		}
 		machgate_zone->batch_free(zone, pointers, count);
 		return;
 	}
@@ -11681,6 +11777,7 @@ void malloc_zone_batch_free(void* zone, void** pointers,
 
 void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
 	void* result = NULL;
 
@@ -11692,21 +11789,24 @@ void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
 			record_allocation_with_zone(result,
 			                            zone_recorded_size(machgate_zone, zone, result, size),
 			                            zone);
-			shim_trace_alloc_event("malloc_zone_memalign", result, size, alignment);
+			shim_trace_alloc_event_at("malloc_zone_memalign", result, size, alignment,
+			                          caller, 1);
 		}
 		return result;
 	}
-	if (shim_posix_memalign_impl(&result, alignment, size) != 0)
+	if (shim_posix_memalign_impl_at(&result, alignment, size, caller) != 0)
 		return NULL;
 	return result;
 }
 
 void malloc_zone_free_definite_size(void* zone, void* ptr, size_t size)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	void* effective_zone = effective_malloc_zone(zone, ptr);
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(effective_zone);
 	if (machgate_zone && machgate_zone->free_definite_size) {
-		shim_trace_alloc_event("malloc_zone_free_definite_size", ptr, size, size);
+		shim_trace_alloc_event_at("malloc_zone_free_definite_size", ptr, size, size,
+		                          caller, 1);
 		forget_allocation(ptr);
 		machgate_zone->free_definite_size(effective_zone, ptr, size);
 		return;
@@ -11738,6 +11838,7 @@ int malloc_zone_claimed_address(void* zone, void* ptr)
 void* malloc_zone_malloc_with_options(void* zone, size_t alignment,
                                       size_t size, unsigned options)
 {
+	void* caller = MACHGATE_SHIM_CALLER();
 	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
 	if (machgate_zone && machgate_zone->malloc_with_options) {
 		void* result = machgate_zone->malloc_with_options(zone, alignment, size, options);
@@ -11745,7 +11846,8 @@ void* malloc_zone_malloc_with_options(void* zone, size_t alignment,
 			record_allocation_with_zone(result,
 			                            zone_recorded_size(machgate_zone, zone, result, size),
 			                            zone);
-			shim_trace_alloc_event("malloc_zone_malloc_with_options", result, size, alignment);
+			shim_trace_alloc_event_at("malloc_zone_malloc_with_options", result,
+			                          size, alignment, caller, 1);
 		}
 		return result;
 	}
