@@ -6944,6 +6944,41 @@ static int trace_read_u64(uintptr_t address, uint64_t* value)
 	return 1;
 }
 
+static int trace_read_u32(uintptr_t address, uint32_t* value)
+{
+	if (!address)
+		return 0;
+	memcpy(value, (void*)address, sizeof(*value));
+	return 1;
+}
+
+static void trace_copy_string_preview(char* out, size_t out_size,
+                                      uintptr_t address, size_t length)
+{
+	size_t copied = 0;
+
+	if (!out_size)
+		return;
+	out[0] = '\0';
+	if (!address)
+		return;
+	if (length >= out_size)
+		length = out_size - 1;
+	for (; copied < length; copied++) {
+		unsigned char ch = ((const unsigned char*)address)[copied];
+		if (!ch)
+			break;
+		out[copied] = isprint(ch) ? (char)ch : '.';
+	}
+	out[copied] = '\0';
+}
+
+static void trace_copy_c_string_preview(char* out, size_t out_size,
+                                        uintptr_t address)
+{
+	trace_copy_string_preview(out, out_size, address, out_size - 1);
+}
+
 static void trace_signal_pointer_words(const char* label, uintptr_t address)
 {
 	uint64_t words[4] = {0};
@@ -7036,6 +7071,61 @@ static int trace_decode_ldr_unsigned_64(uint32_t insn, int* rt, int* rn,
 	return 1;
 }
 
+static void trace_signal_catch2_assertion_result(const char* label,
+                                                 uintptr_t result)
+{
+	uint64_t macro_data = 0;
+	uint64_t macro_size = 0;
+	uint64_t file_data = 0;
+	uint64_t line = 0;
+	uint64_t expr_data = 0;
+	uint64_t expr_size = 0;
+	uint32_t disposition = 0;
+	uint32_t result_type = 0;
+	char macro[96];
+	char file[192];
+	char expr[192];
+
+	if (!result)
+		return;
+	if (!trace_read_u64(result, &macro_data) ||
+	    !trace_read_u64(result + 8, &macro_size) ||
+	    !trace_read_u64(result + 16, &file_data) ||
+	    !trace_read_u64(result + 24, &line) ||
+	    !trace_read_u64(result + 32, &expr_data) ||
+	    !trace_read_u64(result + 40, &expr_size))
+		return;
+	trace_read_u32(result + 48, &disposition);
+	trace_read_u32(result + 120, &result_type);
+
+	trace_copy_string_preview(macro, sizeof(macro), (uintptr_t)macro_data,
+	                          (size_t)macro_size);
+	trace_copy_c_string_preview(file, sizeof(file), (uintptr_t)file_data);
+	trace_copy_string_preview(expr, sizeof(expr), (uintptr_t)expr_data,
+	                          (size_t)expr_size);
+
+	fprintf(stderr,
+	        "libsystem_shim: catch2 %s assertion-result=%p macro='%s' file='%s' line=%llu expr='%s' disposition=0x%x result-type-candidate=0x%x\n",
+	        label, (void*)result, macro, file,
+	        (unsigned long long)line, expr, disposition, result_type);
+	trace_guest_address_context("catch2.assertion-result", result);
+	trace_guest_address_context("catch2.assertion.macro", (uintptr_t)macro_data);
+	trace_guest_address_context("catch2.assertion.file", (uintptr_t)file_data);
+	trace_guest_address_context("catch2.assertion.expr", (uintptr_t)expr_data);
+}
+
+static void trace_signal_catch2_null_active_testcase(void* ucontext)
+{
+	uintptr_t result = trace_ucontext_reg(ucontext, 1);
+	uintptr_t saved_result = trace_ucontext_reg(ucontext, 20);
+
+	fprintf(stderr,
+	        "libsystem_shim: catch2 RunContext m_activeTestCase is null while handling assertion\n");
+	trace_signal_catch2_assertion_result("x1", result);
+	if (saved_result && saved_result != result)
+		trace_signal_catch2_assertion_result("x20", saved_result);
+}
+
 static void trace_signal_faulting_load_context(uintptr_t pc, void* ucontext)
 {
 	uint32_t insn = 0;
@@ -7090,6 +7180,9 @@ static void trace_signal_faulting_load_context(uintptr_t pc, void* ucontext)
 			if (previous_effective)
 				trace_guest_address_context("faulting-load.source-effective",
 				                            previous_effective);
+			if (!base && rn == 8 && rt == 0 && previous_rn == 19 &&
+			    previous_offset == 32)
+				trace_signal_catch2_null_active_testcase(ucontext);
 		}
 	}
 }
