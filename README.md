@@ -235,6 +235,13 @@ MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TRACE_SIGNALS=1 MACHGATE_TRA
 Use `MACHGATE_TRACE_CXX_INIT=full` only when you need per-initializer
 `__MergedGlobals` and `__cxa_guard_*` diagnostics.
 
+To diagnose allocator accounting failures without dumping every allocation,
+filter the allocator trace to the failing size:
+
+```bash
+MACHGATE_VERBOSE=1 MACHGATE_TRACE_ALLOC=1 MACHGATE_TRACE_ALLOC_SIZE=72 MACHGATE_TARBALL=/path/to/machgate-0.3.26-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
+```
+
 To stop a stuck guest after a fixed interval while keeping live logs:
 
 ```bash
@@ -344,6 +351,8 @@ Carbon = SKIP
 | `MACHGATE_TRACE_WAIT` | Trace wait/exit process status translation |
 | `MACHGATE_TRACE_SIGNALS` | Trace signal shim translation paths |
 | `MACHGATE_TRACE_CXX_INIT` | `1` for compact C++ initializer progress; `full` for per-initializer guard and `__MergedGlobals` diagnostics |
+| `MACHGATE_TRACE_ALLOC` | Trace allocator ledger misses; use `2`, `all`, or `full` for every shim allocation event |
+| `MACHGATE_TRACE_ALLOC_SIZE` | With `MACHGATE_TRACE_ALLOC=1`, trace only allocation events matching this size |
 | `MACHGATE_LIBCXX` | Docker helper path to Apple-ABI `libc++.so.1` for `libc++.1.dylib` mapping |
 | `MACHGATE_EXTERNAL_MAP_LIBCXX` | Enable external-test libc++ mapping |
 | `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER` | Diagnostic opt-in for installing the host Linux SIGCHLD handler |

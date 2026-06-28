@@ -31,6 +31,7 @@
  * the game binary's allocations are zeroed — avoids the reentrancy
  * issues of globally interposing malloc. */
 static void *(*shim_malloc_fn)(size_t) = NULL;
+static void *(*shim_memalign_fn)(size_t, size_t) = NULL;
 static void (*shim_free_fn)(void *) = NULL;
 
 static void *zeroing_operator_new(size_t size)
@@ -47,12 +48,57 @@ static void *zeroing_operator_new(size_t size)
 	return p;
 }
 
+static void *zeroing_operator_new_aligned(size_t size, size_t alignment)
+{
+	void *p = NULL;
+
+	if (alignment < sizeof(void *))
+		alignment = sizeof(void *);
+	if (shim_memalign_fn)
+		p = shim_memalign_fn(alignment, size);
+	else if (posix_memalign(&p, alignment, size) == 0 && p)
+		memset(p, 0, size);
+	return p;
+}
+
 static void zeroing_operator_delete(void *ptr)
 {
 	if (shim_free_fn)
 		shim_free_fn(ptr);
 	else
 		free(ptr);
+}
+
+static int is_operator_new_symbol(const char *sym_name)
+{
+	return strcmp(sym_name, "__Znwm") == 0 ||
+	       strcmp(sym_name, "__Znam") == 0 ||
+	       strcmp(sym_name, "__ZnwmRKSt9nothrow_t") == 0 ||
+	       strcmp(sym_name, "__ZnamRKSt9nothrow_t") == 0;
+}
+
+static int is_operator_new_aligned_symbol(const char *sym_name)
+{
+	return strcmp(sym_name, "__ZnwmSt11align_val_t") == 0 ||
+	       strcmp(sym_name, "__ZnamSt11align_val_t") == 0 ||
+	       strcmp(sym_name, "__ZnwmSt11align_val_tRKSt9nothrow_t") == 0 ||
+	       strcmp(sym_name, "__ZnamSt11align_val_tRKSt9nothrow_t") == 0;
+}
+
+static int is_operator_delete_symbol(const char *sym_name)
+{
+	return strcmp(sym_name, "__ZdlPv") == 0 ||
+	       strcmp(sym_name, "__ZdaPv") == 0 ||
+	       strcmp(sym_name, "__ZdlPvm") == 0 ||
+	       strcmp(sym_name, "__ZdaPvm") == 0 ||
+	       strcmp(sym_name, "__ZdlPvRKSt9nothrow_t") == 0 ||
+	       strcmp(sym_name, "__ZdaPvRKSt9nothrow_t") == 0 ||
+	       strcmp(sym_name, "__ZdlPvSt11align_val_t") == 0 ||
+	       strcmp(sym_name, "__ZdaPvSt11align_val_t") == 0 ||
+	       strcmp(sym_name, "__ZdlPvmSt11align_val_t") == 0 ||
+	       strcmp(sym_name, "__ZdaPvmSt11align_val_t") == 0 ||
+	       strcmp(sym_name, "__ZdlPvSt11align_val_tRKSt9nothrow_t") == 0 ||
+	       strcmp(sym_name, "__ZdaPvSt11align_val_tRKSt9nothrow_t") == 0;
 }
 
 /* ---- LuaJIT profiler hooks ----
@@ -1409,6 +1455,8 @@ int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file)
 			if (rs.dylibs[i].action == DYLIB_MAP &&
 			    strstr(rs.dylibs[i].name, "libSystem")) {
 				shim_malloc_fn = (void *(*)(size_t))dlsym(rs.dylibs[i].handle, "malloc");
+				shim_memalign_fn = (void *(*)(size_t, size_t))dlsym(rs.dylibs[i].handle,
+				                                                    "machgate_shim_memalign");
 				shim_free_fn = (void (*)(void *))dlsym(rs.dylibs[i].handle, "free");
 				break;
 			}
@@ -1968,12 +2016,16 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 		fprintf(stderr, "resolver: TRACE s_instance: ordinal=%u lib_ordinal=%d weak=%d name='%s'\n",
 				ordinal, lib_ordinal, weak, sym_name);
 
-	/* Hook operator new/new[]/delete/delete[] for macOS malloc compat + heap tracing */
-	if (strcmp(sym_name, "__Znwm") == 0 || strcmp(sym_name, "__Znam") == 0) {
+	/* Hook C++ allocation functions for macOS malloc compat + heap tracing. */
+	if (is_operator_new_symbol(sym_name)) {
 		rs->binds_resolved++;
 		return (uintptr_t)zeroing_operator_new;
 	}
-	if (strcmp(sym_name, "__ZdlPv") == 0 || strcmp(sym_name, "__ZdaPv") == 0) {
+	if (is_operator_new_aligned_symbol(sym_name)) {
+		rs->binds_resolved++;
+		return (uintptr_t)zeroing_operator_new_aligned;
+	}
+	if (is_operator_delete_symbol(sym_name)) {
 		rs->binds_resolved++;
 		return (uintptr_t)zeroing_operator_delete;
 	}
@@ -2360,12 +2412,16 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
 		}
 	}
 
-	/* Hook operator new/new[]/delete/delete[] for macOS malloc compat */
-	if (strcmp(sym_name, "__Znwm") == 0 || strcmp(sym_name, "__Znam") == 0) {
+	/* Hook C++ allocation functions for macOS malloc compat + heap tracing. */
+	if (is_operator_new_symbol(sym_name)) {
 		rs->binds_resolved++;
 		return (uintptr_t)zeroing_operator_new;
 	}
-	if (strcmp(sym_name, "__ZdlPv") == 0 || strcmp(sym_name, "__ZdaPv") == 0) {
+	if (is_operator_new_aligned_symbol(sym_name)) {
+		rs->binds_resolved++;
+		return (uintptr_t)zeroing_operator_new_aligned;
+	}
+	if (is_operator_delete_symbol(sym_name)) {
 		rs->binds_resolved++;
 		return (uintptr_t)zeroing_operator_delete;
 	}

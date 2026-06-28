@@ -1109,3 +1109,39 @@ Accepted logging behavior:
   initializer crashes before completion.
 - `MACHGATE_TRACE_INIT_EACH=1` can also force per-initializer address logs
   without enabling the full C++ object-state dump.
+
+## v0.3.26 Allocator Interposition Follow-Up
+
+The `v0.3.25` private run still reaches `_main` and then aborts in guest memory
+accounting:
+
+```text
+Memory.cpp(884) ASSERTION FAILED: rest >= size && rest <= kMaxHeapSize
+Function: trackDeallocate
+Message: rest=0, size=72
+```
+
+New evidence from the ARM64 regression test showed that internal shim calls to
+`posix_memalign` could go through the ELF PLT and resolve to glibc instead of
+the shim implementation. That returns a valid host allocation, but it bypasses
+MachGate's allocation-size ledger. The direct symptom was a 72-byte aligned
+allocation whose later `malloc_size` lookup returned too little.
+
+Accepted fix:
+
+- split `posix_memalign` into a private `shim_posix_memalign_impl` helper plus
+  the exported Darwin-compatible symbol
+- make `machgate_shim_memalign`, `machgate_shim_posix_memalign`,
+  `malloc_zone_memalign`, and `malloc_zone_valloc` call the private helper
+  directly
+- route sized, nothrow, and aligned C++ allocation/deallocation imports through
+  the same MachGate allocation hooks as ordinary `operator new/delete`
+- add `MACHGATE_TRACE_ALLOC_SIZE=<n>` so private runs can trace only the
+  allocation size involved in a guest failure, for example `72`
+
+Validation:
+
+- `BUILD_DIR=/home/kapablanka/repos/machgate/build bash tests/test_libsystem_shim.sh`
+  passes
+- ARM64 Docker `BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh` passes
+  `29 / 29`

@@ -7016,6 +7016,46 @@ static int shim_alloc_trace_enabled(void)
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
+static int shim_alloc_trace_full_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_ALLOC");
+	return value && (strcmp(value, "2") == 0 ||
+	                 strcmp(value, "all") == 0 ||
+	                 strcmp(value, "full") == 0 ||
+	                 strcmp(value, "verbose") == 0);
+}
+
+static size_t shim_alloc_trace_size(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_ALLOC_SIZE");
+	char* end = NULL;
+	unsigned long long size;
+
+	if (!value || !*value)
+		return 0;
+	errno = 0;
+	size = strtoull(value, &end, 0);
+	if (errno || end == value)
+		return 0;
+	return (size_t)size;
+}
+
+static void shim_trace_alloc_event(const char* op, const void* ptr,
+                                   size_t size, size_t old_size)
+{
+	size_t trace_size;
+
+	if (!shim_alloc_trace_enabled())
+		return;
+	trace_size = shim_alloc_trace_size();
+	if (!shim_alloc_trace_full_enabled() &&
+	    (!trace_size || (size != trace_size && old_size != trace_size)))
+		return;
+	fprintf(stderr,
+	        "libsystem_shim: alloc %s ptr=%p size=%zu old_size=%zu\n",
+	        op, ptr, size, old_size);
+}
+
 static int shim_host_sigchld_handler_enabled(void)
 {
 	const char* value = getenv("MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER");
@@ -10971,6 +11011,7 @@ void *shim_malloc(size_t size)
 	if (p) {
 		memset(p, 0, size);
 		record_allocation(p, recorded_allocation_size(p, size));
+		shim_trace_alloc_event("malloc", p, size, 0);
 	}
 	return p;
 }
@@ -10978,7 +11019,11 @@ void *shim_malloc(size_t size)
 void shim_free(void *ptr) __asm__("free");
 void shim_free(void *ptr)
 {
+	size_t old_size = 0;
+
 	if (!ptr) return;
+	lookup_allocation_size(ptr, &old_size);
+	shim_trace_alloc_event("free", ptr, old_size, old_size);
 	forget_allocation(ptr);
 	/* Don't free bootstrap allocations */
 	if ((char *)ptr >= bootstrap_buf &&
@@ -11006,8 +11051,10 @@ void *shim_calloc(size_t nmemb, size_t size)
 		}
 	}
 	void *p = real_calloc(nmemb, size);
-	if (p)
+	if (p) {
 		record_allocation(p, recorded_allocation_size(p, nmemb * size));
+		shim_trace_alloc_event("calloc", p, nmemb * size, 0);
+	}
 	return p;
 }
 
@@ -11033,13 +11080,14 @@ void *shim_realloc(void *ptr, size_t size)
 	void *new_ptr = real_realloc(ptr, size);
 	if (new_ptr || size == 0)
 		forget_allocation(ptr);
-	if (new_ptr)
+	if (new_ptr) {
 		record_allocation(new_ptr, recorded_allocation_size(new_ptr, size));
+		shim_trace_alloc_event("realloc", new_ptr, size, old_size);
+	}
 	return new_ptr;
 }
 
-int shim_posix_memalign(void **memptr, size_t alignment, size_t size) __asm__("posix_memalign");
-int shim_posix_memalign(void **memptr, size_t alignment, size_t size)
+static int shim_posix_memalign_impl(void **memptr, size_t alignment, size_t size)
 {
 	if (!memptr)
 		return EINVAL;
@@ -11050,9 +11098,17 @@ int shim_posix_memalign(void **memptr, size_t alignment, size_t size)
 	if (!real_posix_memalign)
 		return ENOMEM;
 	int result = real_posix_memalign(memptr, alignment, size);
-	if (result == 0)
+	if (result == 0) {
 		record_allocation(*memptr, recorded_allocation_size(*memptr, size));
+		shim_trace_alloc_event("posix_memalign", *memptr, size, alignment);
+	}
 	return result;
+}
+
+int shim_posix_memalign(void **memptr, size_t alignment, size_t size) __asm__("posix_memalign");
+int shim_posix_memalign(void **memptr, size_t alignment, size_t size)
+{
+	return shim_posix_memalign_impl(memptr, alignment, size);
 }
 
 size_t malloc_size(const void* ptr);
@@ -11080,14 +11136,14 @@ void machgate_shim_free(void* ptr)
 
 int machgate_shim_posix_memalign(void** memptr, size_t alignment, size_t size)
 {
-	return shim_posix_memalign(memptr, alignment, size);
+	return shim_posix_memalign_impl(memptr, alignment, size);
 }
 
 void* machgate_shim_memalign(size_t alignment, size_t size)
 {
 	void* result = NULL;
 
-	if (shim_posix_memalign(&result, alignment, size) != 0)
+	if (shim_posix_memalign_impl(&result, alignment, size) != 0)
 		return NULL;
 	return result;
 }
@@ -11149,7 +11205,7 @@ static void* malloc_zone_valloc(void* zone, size_t size)
 
 	if (page_size == 0)
 		page_size = 4096;
-	if (posix_memalign(&result, page_size, size) != 0)
+	if (shim_posix_memalign_impl(&result, page_size, size) != 0)
 		return NULL;
 	return result;
 }
@@ -11188,7 +11244,7 @@ void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
 	(void)zone;
 	if (alignment < sizeof(void*))
 		alignment = sizeof(void*);
-	if (posix_memalign(&result, alignment, size) != 0)
+	if (shim_posix_memalign_impl(&result, alignment, size) != 0)
 		return NULL;
 	return result;
 }
