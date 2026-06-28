@@ -217,11 +217,31 @@ static void print_nearest_section_symbol(const char* label,
 	}
 }
 
-static int trace_cxx_init_enabled(void)
+static int trace_cxx_init_full_enabled(void)
 {
 	const char* value = getenv_compat("MACHGATE_TRACE_CXX_INIT",
 	                                  "MACHISMO_TRACE_CXX_INIT");
-	return value && value[0] && strcmp(value, "0") != 0;
+	return value && (strcmp(value, "full") == 0 ||
+	                 strcmp(value, "verbose") == 0 ||
+	                 strcmp(value, "all") == 0 ||
+	                 strcmp(value, "2") == 0);
+}
+
+static int trace_initializer_each_enabled(void)
+{
+	const char* value = getenv_compat("MACHGATE_TRACE_INIT_EACH",
+	                                  "MACHISMO_TRACE_INIT_EACH");
+	return (value && value[0] && strcmp(value, "0") != 0) ||
+	       trace_cxx_init_full_enabled();
+}
+
+static int should_log_initializer_progress(int index, int total)
+{
+	int progress = index + 1;
+
+	if (total <= 1)
+		return 1;
+	return progress == 1 || progress == total || (progress % 100) == 0;
 }
 
 static uintptr_t find_main_defined_symbol(const char* name)
@@ -275,7 +295,7 @@ static void trace_merged_globals_words(const char* phase, const char* kind,
 	uintptr_t address;
 	uint64_t* words;
 
-	if (!trace_cxx_init_enabled())
+	if (!trace_cxx_init_full_enabled())
 		return;
 
 	address = find_main_defined_symbol("__MergedGlobals");
@@ -1642,9 +1662,14 @@ static void call_dyld_initializer(struct load_results* lr, const char* kind,
 	else if (strcmp(kind, "__init_offsets") == 0)
 		log_kind = "init";
 
-	if (machgate_verbose)
-		fprintf(stderr, "machgate: %s[%d/%d] index=%d at 0x%lx\n",
-		        log_kind, index + 1, total, index, func_addr);
+	if (machgate_verbose) {
+		if (trace_initializer_each_enabled())
+			fprintf(stderr, "machgate: %s[%d/%d] index=%d at 0x%lx\n",
+			        log_kind, index + 1, total, index, func_addr);
+		else if (should_log_initializer_progress(index, total))
+			fprintf(stderr, "machgate: %s progress %d/%d\n",
+			        log_kind, index + 1, total);
+	}
 	note_init_context(kind, index, total, func_addr);
 	trace_merged_globals_words("before", kind, index, total, func_addr);
 	machgate_call_guest_initializer(func_addr, (int)lr->argc, lr->argv,

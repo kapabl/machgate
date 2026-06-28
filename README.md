@@ -225,12 +225,15 @@ To diagnose startup hangs in static constructors, enable LC_MAIN tracing:
 MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TARBALL=/path/to/machgate-0.3.17-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
 
-To diagnose C++ static-initializer ordering or guarded-local-static failures,
-enable the C++ initializer trace:
+To diagnose C++ static-initializer progress without flooding the terminal,
+enable the compact C++ initializer trace:
 
 ```bash
 MACHGATE_VERBOSE=1 MACHGATE_TRACE_LCMAIN=1 MACHGATE_TRACE_SIGNALS=1 MACHGATE_TRACE_CXX_INIT=1 MACHGATE_TARBALL=/path/to/machgate-0.3.17-linux-arm64.tar.gz scripts/run-macho-docker.sh /path/to/macos-arm64-binary
 ```
+
+Use `MACHGATE_TRACE_CXX_INIT=full` only when you need per-initializer
+`__MergedGlobals` and `__cxa_guard_*` diagnostics.
 
 To stop a stuck guest after a fixed interval while keeping live logs:
 
@@ -340,7 +343,7 @@ Carbon = SKIP
 | `MACHGATE_TRACE_SYSCALL` | Trace selected Darwin syscall gateway activity |
 | `MACHGATE_TRACE_WAIT` | Trace wait/exit process status translation |
 | `MACHGATE_TRACE_SIGNALS` | Trace signal shim translation paths |
-| `MACHGATE_TRACE_CXX_INIT` | Trace C++ initializer guards and `__MergedGlobals` state |
+| `MACHGATE_TRACE_CXX_INIT` | `1` for compact C++ initializer progress; `full` for per-initializer guard and `__MergedGlobals` diagnostics |
 | `MACHGATE_LIBCXX` | Docker helper path to Apple-ABI `libc++.so.1` for `libc++.1.dylib` mapping |
 | `MACHGATE_EXTERNAL_MAP_LIBCXX` | Enable external-test libc++ mapping |
 | `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER` | Diagnostic opt-in for installing the host Linux SIGCHLD handler |

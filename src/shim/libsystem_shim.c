@@ -55,7 +55,7 @@ extern char **environ;
 
 static int shim_hw_ncpu(void);
 static int shim_trace_enabled(void);
-static int shim_cxx_init_trace_enabled(void);
+static int shim_cxx_init_full_trace_enabled(void);
 static int shim_delta_vm_trace_enabled(void);
 static int shim_wait_trace_enabled(void);
 static int shim_alloc_trace_enabled(void);
@@ -5961,7 +5961,7 @@ int __cxa_guard_acquire(uint64_t* guard)
 		return 0;
 	initialized = __atomic_load_n(&bytes[0], __ATOMIC_ACQUIRE);
 	in_use = __atomic_load_n(&bytes[1], __ATOMIC_ACQUIRE);
-	if (shim_cxx_init_trace_enabled()) {
+	if (shim_cxx_init_full_trace_enabled()) {
 		fprintf(stderr,
 		        "libsystem_shim: __cxa_guard_acquire guard=%p value=%#llx initialized=%d in_use=%#x caller=%p\n",
 		        guard, (unsigned long long)*guard, initialized, in_use,
@@ -5978,7 +5978,7 @@ int __cxa_guard_acquire(uint64_t* guard)
 	}
 	bytes[1] = 0x02;
 	__sync_synchronize();
-	if (shim_cxx_init_trace_enabled())
+	if (shim_cxx_init_full_trace_enabled())
 		fprintf(stderr, "libsystem_shim: __cxa_guard_acquire guard=%p -> run initializer\n",
 		        guard);
 	return 1;
@@ -5992,7 +5992,7 @@ void __cxa_guard_release(uint64_t* guard)
 		return;
 	__atomic_store_n(&bytes[0], 0x01, __ATOMIC_RELEASE);
 	__atomic_store_n(&bytes[1], 0x01, __ATOMIC_RELEASE);
-	if (shim_cxx_init_trace_enabled())
+	if (shim_cxx_init_full_trace_enabled())
 		fprintf(stderr, "libsystem_shim: __cxa_guard_release guard=%p value=%#llx caller=%p\n",
 		        guard, (unsigned long long)*guard,
 		        __builtin_return_address(0));
@@ -6005,7 +6005,7 @@ void __cxa_guard_abort(uint64_t* guard)
 	if (!guard)
 		return;
 	__atomic_store_n(&bytes[1], 0x00, __ATOMIC_RELEASE);
-	if (shim_cxx_init_trace_enabled())
+	if (shim_cxx_init_full_trace_enabled())
 		fprintf(stderr, "libsystem_shim: __cxa_guard_abort guard=%p value=%#llx caller=%p\n",
 		        guard, (unsigned long long)*guard,
 		        __builtin_return_address(0));
@@ -6823,10 +6823,13 @@ static int shim_trace_enabled(void)
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
-static int shim_cxx_init_trace_enabled(void)
+static int shim_cxx_init_full_trace_enabled(void)
 {
 	const char* value = getenv("MACHGATE_TRACE_CXX_INIT");
-	return value && value[0] && strcmp(value, "0") != 0;
+	return value && (strcmp(value, "full") == 0 ||
+	                 strcmp(value, "verbose") == 0 ||
+	                 strcmp(value, "all") == 0 ||
+	                 strcmp(value, "2") == 0);
 }
 
 static int shim_delta_vm_trace_enabled(void)

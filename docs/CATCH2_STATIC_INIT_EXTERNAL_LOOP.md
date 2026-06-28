@@ -1093,3 +1093,19 @@ Next accepted fix:
 - Add opt-in `MACHGATE_TRACE_ALLOC=1` diagnostics that report whether a
   zero-size `malloc_size(ptr)` result is for a tracked-freed pointer or a
   foreign/untracked pointer.
+
+## v0.3.25 Logging Follow-Up
+
+The private runs proved that the constructor loop is healthy enough to reach
+`_main`, so per-initializer logs are now too noisy for normal diagnosis.
+
+Accepted logging behavior:
+
+- `-v` prints sparse initializer progress only: first initializer, every 100th
+  initializer, last initializer, and completion.
+- `MACHGATE_TRACE_CXX_INIT=1` stays compact and does not print
+  per-initializer `__MergedGlobals` words or every `__cxa_guard_*` call.
+- `MACHGATE_TRACE_CXX_INIT=full` restores the old deep dump for cases where an
+  initializer crashes before completion.
+- `MACHGATE_TRACE_INIT_EACH=1` can also force per-initializer address logs
+  without enabling the full C++ object-state dump.
