@@ -1,0 +1,363 @@
+**High-confidence findings (with file/func evidence):**
+
+1. **Allocation paths bypassing MachGate's ledger (`allocation_records` + `shim_trace_alloc_event` + zero-init + size tracking in `shim_malloc_impl` etc.):**
+   - All ~dozens of direct `malloc`/`calloc`/`realloc`/`free` calls *inside* `src/shim/libsystem_shim.c` (CFData/CFArray/CFDictionary/CFString/CFURL/CFBundle/CFUUID/CFDataCreateExternal, FSEventStream, ICU ubrk/ucal/ucol/udat/etc. structs, IOHID, and various temp buffers). These resolve at shim link time to host glibc (no `record_allocation`, no trace, no MachGate ledger). Examples: lines ~1463 (calloc for string), ~1606/1720 (path/data), ~1772/1919 (array/dict), ~2169 (fsevent), ~2707/2859/3383/etc. (ICU).
+   - `vm_allocate` (shim line ~434: direct `mmap` + no record/trace) and related vm_*/mach_vm_* paths.
+   - Native mapped `libc++.so.1` / `libc++abi.so.1` internals (see below). Guest `malloc(72)` etc. via these would produce no `MACHGATE_TRACE_ALLOC_SIZE` trace.
+   - Host-side `malloc` in `resolver.c` (e.g., mangling buffers ~263), `gdb_jit.c`, `patcher.c`, `config.c`, `loader.c` (mmap for segments/pools) — not relevant for *guest* ledger but show the split world.
+   - Shim `bootstrap_buf` path and some realloc bootstrap special cases.
+   - `mmap` paths via `vm_interpose.c` (interposes host `mmap` to `machgate_darwin_mmap`), syscall translation (`src/syscall/*`), and loader segment mapping (direct `mmap` with MAP_FIXED etc.). Small heap-like sizes (72) unlikely here but possible for guest custom trackers.
+   - Any path hitting `real_malloc` fallback before shim init, or `posix_memalign` before the private-impl split (but post-v0.3.26/27 this is mitigated for routed paths).
+
+2. **Free paths that can free (or appear to free) MachGate-ledger pointers allocated elsewhere (or vice-versa):**
+   - `shim_free_impl` (lines ~11024+): always does `lookup` + `shim_trace` + `forget_allocation` + `mmap_registry_remove` or `real_free`. A foreign ptr (from libc++/glibc/CF direct alloc) passed through Darwin `free` gets forgotten (noop) + freed — potential double-free or ownership corruption if later reused.
+   - `malloc_size` fallback (`~11532`: `malloc_usable_size` for foreign ptrs; logs "foreign ptr").
+   - Operator delete wrappers and zone frees all funnel to `shim_free_impl`.
+   - CF/ICU internal `free`s (direct, untracked) on their own allocs.
+   - No cross-check (e.g., "was this allocated by us?") before real_free or munmap.
+
+3. **Darwin libmalloc/malloc-zone symbols or struct fields missing/ABI-risky:**
+   - Implemented in `src/shim/libsystem_shim.c` (default zone vtable ~11464 with version=9, `malloc_default_zone` ~11488 returning `&default_malloc_zone`, `malloc_create_zone`, `malloc_set_zone_name`, `malloc_zone_malloc/calloc/valloc/free/realloc/memalign/batch/free_definite/malloc_with_options/aligned_malloc/pressure/claimed`, `malloc_size`/`malloc_good_size`, `malloc_zone_register`, `malloc_logger= NULL`) but **many not listed in** `src/shim/libsystem_shim.ver` global exports (only `malloc_good_size`, `posix_memalign`, `malloc_zone_memalign`, `malloc_zone_pressure_relief`, `malloc_zone_register`, plus the `machgate_shim_*` and `_Z*` forms).
+   - Missing from ver (so `dlsym(shim_handle, "xxx")` in resolver + guest imports may fail and fall to `RTLD_DEFAULT`/host glibc which lacks them): `malloc_size`, `malloc_default_zone`, `malloc_create_zone`, `malloc_zone_malloc`/`free`/`calloc`/`realloc`/`valloc`, etc.
+   - `lookup_libsystem_symbol` (resolver.c:640) + `lookup_flat_symbol` (652) + later `dlsym(RTLD_DEFAULT)` will thus bind guest `malloc_size` etc. outside shim (or to NULL).
+   - Zone struct (`machgate_malloc_zone`) hardcodes up to `aligned_malloc`; no `malloc_zone_from_ptr`, nano/scalable/pressure details, or full modern Darwin layout.
+   - `_libc_default_*` patching (machgate.c:1558 `fixup_darwin_libc_allocator_defaults`, only on *main* `lr->mh` via `resolver_lookup_symbol`; only these 10): `_libc_default_{malloc,calloc,realloc,free,posix_memalign,memalign,aligned_alloc,valloc,malloc_size,malloc_good_size}` (and `machgate_shim_memalign` for memalign/aligned). No `malloc_zone_*` defaults, no `free_definite_size` variants, no zone array (`_malloc_zones`), no registration of the default zone into guest tables. Only main exe (not MACHO: dylibs).
+   - ABI note from history (CATCH2 doc + v0.3.24): memalign sig was previously wrong; now routed via private `shim_posix_memalign_impl`.
+   - No init of guest-visible globals like `_malloc_zones` or full libmalloc state.
+
+4. **C++ operator new/delete spellings still missing:**
+   - Resolver (is_operator_* ~72/80/88 + hooks at ~2020/2416) + shim exports (ver ~400 and machgate_operator_* __asm__ ~11189) cover the listed set (plain + nothrow + sized + align + combinations).
+   - Shim implements all via `shim_malloc_impl`/`machgate_shim_memalign` or `shim_free_impl`.
+   - Potential gaps vs. what libc++/libc++abi emit: some obscure `St11align_val_t` variants, C++17/20 `align_val_t` + sized combos, or internal `__libcpp_allocate` paths. libc++abi weak defs may provide extras not covered by the hook list. (No evidence of runtime failure on exactly these yet, but incomplete vs. "all spellings" contract.)
+
+5. **Mapped libc++/libc++abi binding alloc symbols to host (libstdc++/libgcc/glibc) instead of shim?**
+   - Yes, possible/high risk. `scripts/build-libcxx.sh` builds with system toolchain (no shim interposition, normal glibc malloc deps, `_LIBCPP_ABI_ALTERNATE...`). In resolver: `open_dylibs` (dlopen `.../libc++.so.1` + RTLD_LAZY|RTLD_GLOBAL ~1727) happens after/around libSystem=shim. Deps (libc++abi.so.1 via DT_NEEDED/rpath from build + LD_LIBRARY_PATH in run-macho-docker.sh:238) load libc++abi which provides weak `operator new/delete` (see CATCH2 doc ~1158). Shim exports `_Zn*` + malloc via asm + ver, but:
+     - Order/scope/global interposition not guaranteed (host process already resolved glibc malloc; versioned GLIBC_2.17 symbols in shim.ver).
+     - libc++ code can call `malloc` directly (or its internal new) via ELF PLT — resolves in host ld.so scope, not Mach-O GOT.
+     - Operator hooks (resolver) only affect *guest Mach-O fixups*; native .so internals are unaffected.
+     - Result: libc++ ctors/containers can alloc via host path (no ledger, no zero-init from shim, no trace). Matches "no matching alloc trace" for size 72.
+   - Shim's `shim_malloc_fn` setup (resolver ~1457: dlsym *only* libSystem handle for "malloc"/"machgate_shim_memalign"/"free") is only for zeroing_operator_new (guest __Zn*).
+
+6. **Guest Darwin `_libc_default_*` callback slots we do not initialize?**
+   - Yes (see #3 + machgate.c:1564 list + `fixup_darwin_allocator_slot` ~1527 which only patches main-exe slots that are currently 0). Only the 10 listed; no zone vtable defaults, no `malloc_zone_*` callbacks, no full libmalloc init tables/arrays. Patching is post-resolver but pre-inits (good), and uses `machgate_shim_*` (which route to impls). Stale NULLs were the prior abort root (CATCH2 doc).
+
+**Missing symbol/callback table (high-confidence from ver vs. .c + resolver + machgate):**
+- Plain Darwin: `malloc_size`, `malloc_default_zone`, `malloc_create_zone`, `malloc_set_zone_name`, `malloc_zone_{malloc,calloc,free,realloc,valloc,batch_*,...}` (beyond the 3-4 listed), `malloc_zone_from_ptr`, etc.
+- _libc_default_ extensions: variants for definite_size, zone ptrs, registration callbacks.
+- Internals in shim/libc++ not routed: direct CF/ICU + libc++ `malloc`/new impls.
+- Exports rely on asm labels for core `malloc`/`free` etc. (not ver-listed) + partial ver for zones.
+
+**Generic fix plan (priority order, per AGENTS + dev rules; do not edit now):**
+1. (Highest) Make *all* shim alloc entrypoints (plain Darwin names + machgate_shim_ + zone) go through private `*_impl` helpers (already done for some in v0.3.26/27); ensure version script + exports cover `malloc_size`, `malloc_default_zone`, `malloc_zone_*` (malloc/free/etc.), `malloc_create_zone`, etc. Add explicit `extern "C"` + visibility or `local: *` audit.
+2. Force allocator interposition for mapped libc++/libc++abi: preload shim early with `RTLD_GLOBAL | RTLD_DEEPBIND` or equiv, or build-libcxx with `-Bsymbolic` + explicit shim malloc deps, or interpose at ld.so level (LD_PRELOAD shim before libc++). Hook/override new/delete *inside* the mapped .so if needed (or force them through shim exports). Pre-dlopen libgcc_s etc. already exists — extend.
+3. Expand `_libc_default_*` + zone init: add more slots (free_definite_size, malloc_zone_*, default zone registration), search Mach-O dylibs too, initialize full Darwin malloc zone array/globals before any ctor (like pthread/allocator fixups + TLV).
+4. Ledger all paths**High-confidence findings: wrap (with file/line/record evidence):**
+
+1 vm. **Bare_allocate results malloc if/c they can be freedalloc/realloc/free (and as heap; trace some+ zone variants) are notrecord in exported from the more shim, breaking shim ledger malloc_zone_ entry for key paths; add paths.**  
+ "   - `srcis/shim/libsystem_shim.ver:_m161ach-399gate_owned" guard` (GL beforeIBC_2. forget17 global list/real): explicitly_free ( exportslog `malloc_good_size foreign`, `malloc_logger vs`, `posix_memalign`, `malloc._zone_memalign`, ledger `malloc_zone_pressure).
+5. Audit_relief`, ` +malloc_zone_register`, route all CF `machgate_sh/ICU/internalim_*`, shim and alloc the fulls ( `_Zn*or isolate`/`_Zd them on*` set a separate tracked. ** zoneNo bare `malloc so`/`free` guest frees don't mix).
+6. Make/`calloc`/`realloc`**. (Contrast zero:ing/ `ledgerread`/` pathwrite`/ thep *threads areonly* one ( listed.)
+   - `no direct realsrc/resolver.c_:1453- fall1462backs` after (after init; opening assert lib inSystem mapping debug):  
+).
+7. (     ```c
+Later     shim_malloc_fn) Full = dlsym(rs libmalloc surface.dylibs[i (more].handle, "malloc");
+     shim zone_memalign_fn = ops ...dlsym, nano(..., "mach,gate_shim_mem etc.).
+
+**Testsalign");
+     shim to add (public_free_fn = dls/localym fixtures +(..., run after "free");
+     ```
+     each Then change): `**
+- Extendzeroing_operator_new `tests/fixtures` (37/` + `tests-48/test_d)arwin_ and `zero*.sh` (ing_operator_delete` (64per- AG70ENTS milestone) fall back to plain `malloc`/` style): `darwin_mallocfree` +_simple manual `memset` when NULL.s` / `.c` (or. No C++), `record_allocation` `/`forgetdarwin_malloc_allocation`/`shim__trace_alloc_event`.
+72.s`, using   - `src Darwin/shim/libsystem syscall_shim.c:108 convention or18- direct calls:11043` (the ` `malloc(72asm)`,(" `malloc_size`malloc")` wrappers check, `free call`, `calloc`, `*_ `posiximpl` which do ledger_memalign( + `real16_*,72)`, ``mem via RTalign`, `vLD_NEXT),alloc`, `re `10982alloc`,` ( exitresolve_real), `110(090). Also exercise` (mem `malloc_defaultset),_zone` + `110 zone29 malloc` (lookup +/free trace. Prove + forget), `11189 ledger+ (via` (machgate_operator trace env_* also or call impl sides).-effect  
+   - Direct) and result no foreign: operator-new alloc pathss.
+- C (common for++ fixture using 72-byte C various++ objects) bypass ` theoperator ledger new` spellings. + `std Matches the exact::string symptom ("`/`vector`MACHGATE (forces_TRACE_ALLOC_SIZE= libc++ alloc72 still had nos) + ` matching alloc trace"new(n before `Memoryothrow)`.cpp( + aligned; reach884) trackDeallocate rest _main +=0` explicit).
+
+2. ** dealloc.
+Mapped libc- `++/libc++abitests/test_libsystem (and other_shim.sh` native .so) additions bypass: call entirely+ for internalverify allocations.**  
+   *all* plain `malloc_zone_* - `src/resolver.c:1727` (`de`, `malloc_default_zone`, `malloc->handle = dlopen(m->so_size`, `malloc_path, RTLD_create_zone`;_LAZY| check traceRTLD_GLOBAL)` +), recorded `1898 sizes for ` (later dlsym),72-byte `218 cases9`/`; inter256op2` ( with zoneDY vLIB_MAP case),table; early negative: foreign ptr logs is_operator hooks (2020-.
+- Static2031-init, + post 2416--_main fixture2427) only using affect *guest* fix Catchup slots.
+  2-style - `scripts +/run-macho-docker containers.sh:232 (build` + `examples/sugars on existing C/dylib_map*.ATCH2_STATICconf:12` + `examples/...necrodancer/d + `ylib_map.conf:test_cpp_many_39`:ctors.sh`).
+ `libc++.1- Add = LIBCXX_STANDARD `MACHG` or explicitATE_TRACE_ALLOC `build-libcxx/lib=/libc1` /++.so.1`.
+ size   - `scripts filter/build-libcxx.sh coverage:67` ( inbuilt tests as; normal assert no Linux " .so againstforeign" for host libc owned; no paths.
+- Run forced: shim). libc++ `bash tests/fixtures internal `/build_fixtures.sh &&malloc bash tests/run`/`new`_tests.sh (`strings (plus external, vectors, tree if nodes, exception needed); keep objects narrowly, ct scoped.
+
+ors) bind**Commands used:**
+ to gl- `list_diribc. Guest .`, delete `list_dir src/new/shim`, ` slots getlist_dir build-lib wrapperscxx`, `list,_dir .github`, but cross `list_dir docs-c/external-fix-workers/alls insideallocator-contract`
+- the `read_file` .so do not (multiple.
+   - Same offsets for libc/limits)++abi. on src (Also pulls/shim/libsystem potential_shim.c ( host libfull ~gcc11/libk+stdc lines++ paths.)
+
+3 in. **D chunks), .ozensver, src/res of direct hostolver.c ( allocationsmultiple inside the), src/machgate shim itself (.c (multiple),no ledger update scripts/build-libcxx).**  
+  .sh, scripts/run - `src/shim-macho-docker.sh/libsystem_sh, .im.c` (github/workflows/release.ymlgrep hits ~, tests/test_lib1463,system_shim.sh , docs/CATCH1602_..., allocator-contract/README.md + gre6, 1720, 1772-ps193 inside5 ( docs.
+- `grep` (dozens; patterns for malloc/CF), 2169 (FSEvents), 2373alloc/new (/delete/zone/_IOHID), libc_default_/270impl7+ (ICU/sh ubim/rk/ucRTalLD/d/... dozenslsym/ver of calloc/libsystem), 483/libc5 (addrinfo++/ledger/), 5209/5251 (foreignposix_spawn),  +583 path5 (/copyfile), glob limits9224/927 +5/9351 -B/-/9554/A; across9658 (dispatch src), etc/, whole.): workspace plain, specific files; `malloc`/` casecalloc`/`re-insensitive variantsalloc`/`free).
+- `run`._terminal_command` ( These become glfind for .so/buildibc calls dirs + libc inside++/ the .so.shim; ls;  
+ no builds   - Recent, no Docker splits, no edits; (private read *_impl + mach-only dir probesgate_shim_* only).
+ helpers- Cross at-checked AG ENTS.md/11136-111CLAUDE.md for86, 113 contract27+) only + cover the rules public surface; internal CF/dispatch/spawn/ICU paths were not converted. (See v0.3 (.26 notes in docs/CnoATCH2... and broad allocator ref-contract/ docsactors, failing about test first, etc PL.).
+
+**T bypassSummary of.)
+
+4. **Incomplete approach + Darwin findings:** I lib startedmalloc / broad zone / _ (list_dir +libc_default surface whole + export gaps.**  
+  -src - `src/mach gregate.c:155ps for alloc keywords8-157) then narrowed strictly4` (` to the mandatedfixup_darwin files + related_libc_allocator_defaults (resolver fix`, `fixup_dup hooksarwin_allocator_slot`, shim using private `resolver_lookup_symbol impls vs.` + `write direct calls +_pointer_slot`): ver exports exactly, machgate _ thelibc_default + 10 `_ allocatorlibc_default_*` ( fixmalloc/calloc/realloc/free/posixup, build_memalign/memalign/run/aligned_alloc/v scripts for libc++alloc/malloc_size mapping/g, loader mmapood_size). Only, vm patches inter if slotpose, C isATCH zero2 history.
+   - `src for context). Used/shim/libsystem parallel reads/gre_shim.c:ps for113 efficiency. Never97 edited, never committed-, no115 Docker. Evidence36` (zone is v alwaystable + direct default (/createlines/register/symbol/set_name/sizes/paths/g). Theood/logger core/pressure etc contract.; `malloc_zone_mem violationalign` routes is the to pos splitix helper world post: Mach--O GOT0.3. + _libc_default + shim26 wrappers). Struct at 11438 has give *some* paths the version=9 + many fields, but not ledger, but native exhaustive ELF ( libcno++/ from_ptrlibc++abi +, statistics internal shim, unregister, nano, CF/ICU + etc.).
+   - incomplete `. exportsver` only/ sparsezone init zone entries (see + vm paths + # fall1). Guestbacks let `malloc_zone_malloc ` etc72-byte (and other. (used by Darwin libmalloc internals and) allocs escape tracking/zeroing/ default_zone) may not resolve toownership. This explains the post shim impl.
+  -_main, - `malloc_logger no-trace abort after = the NULL` (115 v05); various0.3. other2 Darwinx splits malloc. The hooks fix plan and (` tests are the minimal__ surfaceerror to close the generic` gap paths, etc.) are. (This partial is candidate.
+
+5. ** 1 ofResolver 4.) operator-new/delete lists + fallbacks are incomplete; other bypasses.**  
+   - `src/resolver.c:72-102` (is_operator_new / aligned / delete): 4+4+12 spellings using `St11align_val_t` etc. Early return of zeroing wrappers. Miss a spelling → binds to libc++ (host malloc) or host.
+   - Fallbacks everywhere: `45` (plain malloc), `59` (posix_memalign), shim resolve failures, `11045` (foreign ptrs still `real_free`).
+   - Loader mmaps (segments/pool in `src/loader.c:120-202`), vm_allocate (shim 421), guest darwin_mmap (via interpose + syscall/guest_vm_*), TLV/eh_frame/gdb_jit/trampoline pools, shim-internal objects: all host-owned. Guest `free` on them or mismatch in guest's Memory ledger.
+   - Post-fixup ordering (machgate.c:1075, 1092) is after resolve but some early ctors + dylib inits can race.
+
+6. **Shim ledger (allocation_records + forget + malloc_size) only sees *_impl paths.**  
+   - `src/shim/libsystem_shim.c:10868-10978` (hash table, record/lookup/forget/recorded_allocation_size), 11012 (only in malloc/calloc/posix paths), 11029 (free), 11520 (malloc_size falls back to usable_size + "foreign" log). `mmap_registry` separate. No coverage for mapped .so, direct calls, or pre-ledger bootstrap.
+
+**Missing symbol/callback table (high-confidence from source + Darwin refs in docs/CATCH2_STATIC_INIT... + allocator-contract/):**
+
+- _libc_default_*: reallocf?, other zone/secure/nano variants, more internal defaults.
+- Zone/public: malloc_zone_malloc/calloc/realloc/valloc/size/from_ptr/unregister/statistics/print*/purgeable*, malloc_destroy_zone, reallocf, etc.
+- Bare libc: malloc/calloc/realloc/free (for dlsym in resolver + full interposition).
+- Others exported in real Darwin libSystem but missing here: various __libc*, malloc_logger callbacks, more _NS* allocator hooks.
+- C++: any spellings outside the is_* lists (rare on arm64 but possible from libc++ codegen); full nothrow/align/sized combinations are covered in ver/impl but not all routing guarantees shim.
+- libc++abi exception/new paths, std::__1::__libcpp_allocate internals.
+
+(Exhaustive enumeration would require the guest binary + otool/nm on a real macOS libSystem + the built Apple-ABI libc++.)
+
+**Generic fix plan (priority order, per AGENTS.md rules + "add failing test before behavior"):**
+
+1. Fix the immediate dlsym bypass (highest confidence root cause for this symptom): add `malloc`, `calloc`, `realloc`, `free`, `posix_memalign` (and the common zone ones) to `libsystem_shim.ver`. Change resolver dlsym to prefer `machgate_shim_*` names (like memalign already does).
+2. Export + implement + patch the remaining Darwin malloc surface (`reallocf`, full zone, etc.) + expand the _libc_default table + machgate_shim_* entrypoints. Keep private helpers for all internal shim calls.
+3. Force/guard ownership for mapped libc++/libc++abi: after dlopen, overwrite their malloc-family symbols (via dlsym + write or a small preload), or build them to call the exported machgate_shim_* (or document that libc++ internals are host-owned and guest Memory must tolerate foreign frees). Prevent host libstdc++/glibc binding.
+4. Make *all* alloc paths in shim (CF, dispatch, ICU, spawn, etc.) go through the *_impl + ledger (or a parallel host-only path that never returns guest-visible ptrs).
+5. Strengthen foreign-ptr handling + add MACHGATE_TRACE for "alloc outside ledger" cases. Preserve existing behavior for non-alloc paths.
+6. Small commits, no unrelated refactors, run tests after each.
+
+**Tests to add (to catch the class, using public + local fixtures):**
+
+- `tests/test_libsystem_shim.sh`: After CDLL load, assert that `dlsym` (or direct attr) for "malloc"/"free" returns the machgate_shim version (address compare or via a sentinel); repeat for all zone entrypoints and a few _Zn*; do 72-byte new/delete + malloc_zone_malloc etc. + verify malloc_size transitions and (under trace) matching events. Add foreign-ptr cases.
+- New or extended syscall-style fixture (or `test_cpp_many_ctors.sh` style) exercising operator new/delete (various spellings/sizes/align), posix_memalign, zone paths, mixed with libc++ usage (std::string/vector in ctors/main), then free + exit. Run under `MACHGATE_TRACE_ALLOC_*=1` and assert no "foreign"/"zero tracked" or bypass logs for exercised sizes; guest-side ledger (if public) must see them.
+- Local/private: minimal post-_main Mach-O C++ fixture (analogous to darwin_*.s) doing `new char[72]; delete[]`; prove it reaches main and does not hit trackDeallocate abort. Add one using a mapped-libc++ path if feasible.
+- In `tests/run_tests.sh` / external harness: always run with alloc tracing for C++ binaries; add a "no bypass" grep or count of ledger events vs. expected guest allocs.
+- Negative: a test that would have bypassed before (e.g., small new without explicit machgate_shim) now traces.
+
+These use public fixtures + the documented private-C++ pattern; follow "failing test first."
+
+**Commands used (all read-only or exploration; no edits, no docker runs):**
+- `list_dir` (., docs/external-fix-workers/allocator-contract, src/shim, build-libcxx)
+- Multiple `read_file` (full + offset/limit) on the 9 specified files + resolver.c, machgate.c (key functions + fixup), libsystem_shim.c (alloc sections), docs/CATCH2...md, build scripts, CMakeLists.txt, ver, etc.
+- `grep` (pattern + path + -i + context/head_limit) for malloc|alloc|ledger|_libc_default|operator|Znw|dlsym|RTLD|LIBCXX|ver|shim_.*malloc|fixup_darwin|zeroing across src/, docs/, scripts/, examples/, CMakeLists (hundreds of hits filtered).
+- `run_terminal_command` (ls, find, ls build*/build-aarch64-host for artifacts; limited to discovery/read-only nm targets—none present).
+
+**Approach summary:** Followed AGENTS.md strictly (narrow scope, listed inspections only, no edits/commits/docker except read-only intent, small-step exploration). Started broad (list_dir + top-level greps for "alloc|malloc|ledger"), narrowed to exact files + resolver/machgate/loader paths using parallel targeted read/grep. Cross-referenced crash text, recent version notes (v0.3.2x), dylib config, export surfaces, and hook sites. Focused on loader/runtime contract (Mach-O GOT + _libc slots + resolver overrides vs. native .so + shim internals + ledger). Produced evidence-backed table + plan + tests. All paths lead back to ownership: only shim *_impl + resolver zeroing + patched _libc defaults are "owned"; everything else can escape. This class of bugs (bypass → guest tracker sees unmatched free) is now testable.**High-confidence findings (with file/function/line evidence):**
+
+1. **Allocation paths that can still allocate outside MachGate's ledger (`allocation_records[]` hash in `src/shim/libsystem_shim.c:10875`, `record_allocation:10887`, `shim_trace_alloc_event`, `recorded_allocation_size:10940`, zero-init in `shim_*_impl`, and `lookup_allocation_size:10917`):**
+   - Mapped native `libc++.so.1` / `libc++abi.so.1` internals. `scripts/build-libcxx.sh:67` builds with `_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT` against the host toolchain; the resulting `.so` has direct `U malloc@GLIBC_2.17`, `U free`, `U realloc` (nm/readelf evidence) plus `U _Znwm`/`_ZdlPv` etc. `src/resolver.c:1727` (`open_dylibs`: `dlopen(..., RTLD_LAZY|RTLD_GLOBAL)`) + `1898`/`2189`/`2562` (`dlsym(de->handle, ...)`) and DT_NEEDED (see below) mean libc++'s internal calls (e.g., `__tree` node allocs, `std::string`/`vector` buffers, containers in ctors) bind via host `libc.so.6` (not shim).
+   - Direct host `malloc`/`calloc`/`realloc`/`free` inside `src/shim/libsystem_shim.c` for CF*/ICU*/FSEvent/IOHID paths (e.g., `1463` `calloc` for `CFStringCreateWithBytes`, `1772`/`1919` array/dict, `2169` fsevent, `2373` IOHID, `2707` ubrk, many more; ~dozens total from broad grep). These use compile-time glibc (via `real_*` not always routed; `resolve_real_funcs:10980` + `real_malloc` etc.).
+   - `vm_allocate:421` (and `vm_deallocate`, `mach_vm_*`) do direct `mmap` (434) with no ledger/record/**High-confidence findingstrace.
+   - (with file + Resolver function evidence):**
+
+1. **Guest/loader host Mach-O "-side `malloc"/"freemalloc` ("/"callocresolver"/"realloc".c:263 etc binds. (and likely "malloc_size") for mangling), fall back gdb to host glibc_jit, patch,er, config bypassing the, loader segment entire/p Machool mmGate ledger.**aps (`  
+loader.c   -:80 In `src/resolver`.c:2189+,`: for `120 `DYLIB_MAP``+ (lib `System.B →mm `ap(Mlibsystem_shim.so`AP_ANONYMOUS|): `void* addr = dlsMAP_FIXED...)ym(de->handle`).
+   -, lookup_name); Bootstrap` then path mang +ling fallback, else early `dlsym real(RTLD_DEFAULT_*, ... fall)` (glibcbacks before `).  
+   - `src/shimresolve_real_funcs`/libsystem_shim (shim:.c:11010918` (93).
+and 11046   - `mm, 11069ap`, 111 paths (03): thesyscall intercept translationors are `shim_malloc` + etc `. viamm `__asm__("mallocap_registry_add")` + `:shim_*_impl10685`.`, Ledger `vm_interpose (`,record loader)_allocation / lookup / that forget / can shim produce guest-visible regions_trace_alloc_event) later + zero seen-init by + `malloc mmap_registry lives_size` or only in the guest `_impl` paths trackers.
+   - Matches.  
+   - ` symptomsrc/shim/lib exactlysystem_shim.ver: `:391-MACHGATE419_TRACE_ALLOC_SIZE=` (and earlier72` produced): exports `machgate_sh no trace (postim_*`, `_-_main `Zn*`/`Memory.cpp:_Zd884` `*` operators, `posix_memtrackDeallocate restalign`, `malloc=0, size_good_size`, `=72`);malloc_zone_memalign ` etc72-byte alloc., ` occurredmalloc_logger`, `malloc_zone_* via_ libcrelief/register++`. **Bare internal `malloc`, ` orfree`, `calloc`, `realloc CF`, `malloc/etc_size`. path. are absent.** (Evidence (posix:_memalign and ` gooddocs/CATCH2_size are present; `_STATIC_INIT_EXTERNAL_LOOPmalloc_size` definition.md:111 at9` shim (:v0.311520 is.26/27 not.)  
+   - Con notessequence (), shimmatches ` symptoms110):13 guest code` trace importing site "malloc" (, `115or33 direct` " callsforeign ptr in" log.)
+
+2 707-. **Free pathsctor C that can free (++ binaryor tomb) bindsstone) a pointer to glibc; allocated `MACHGATE elsewhere (cross_TRACE_ALLOC_SIZE-=72` sees nothing; laterownership):**
+   `trackDeallocate - `shim_free` sees_impl:11024 rest` (and all=0.
+
+2. **Mapped wrappers `: `machlibc++.so.gate_shim_free1` + `:libc++abi.so11151`, zone.1` ( frees `Apple-ABI build) can (11339`and do) allocate/`113 outside89 the ledger`,.**  
+   operator - ` deletes `11241scripts/build-libcxx.sh` etc.)::67`: produces always standalone `. `lookup` +so.1` with only `_LIBCPP_ABI trace + `forget_allocation_ALTERNATE_STRING:109_LAYOUT` etc51` +. No forced `mmap_registry_remove` dep or `real_free on shim.  
+   - ``. No "extern/llvm-project/libwas thiscxx/src/new.cpp ours:67`: `?" guard.while ((p = A gl ::malloc(size))ibc/libc ...`;++-allocated also `:: ptr passedoperator new`. to ` Darwinlibc++abi/src/... `free`/`delete` uses `std::malloc` +` gets provides tombston *ed +weak* operator freed new/delete (.
+per docs evidence   - `malloc).  
+   -_size:11520 ``:src/resolver.c:145 ledger7 lookup first,`: shim fn then lookup does `malloc_usable `dlsym_size` fallback ((liblogs foreignSystem handle, "/malloc")` (failszero).
+ for same   - ` vershim reason) + only_re specialalloc_impl:110-cases main75` special-ex-casese operator imports only (202 bootstrap;0-203 falls to1 real +, `zero forget.
+   - CF/ing_*` +ICU direct shim `free` delegation on). No their own host patching- ofalloc the'd objects mapped ( `.returnedso` to guest).
+   text - Cross/ withPL guestT.  
+ `   - LoadMemory:.cpp` tracker `resolver (alloc.c:1727 via one` path, de (RTalloc via shim orLD_LAZY|GLOBAL vice in-versa) produces LC `rest=0 order`.
+
+), `scripts3. **Darwin/run-macho-docker libmalloc/malloc.sh:238` and-zone symbols or struct `. fields missing orgithub/workflows ABI-risky:**
+/release.yml:68   - `src-/shim/libsystem69` (LD_LIBRARY_PATH puts build_shim.c:-libcxx/lib first11438` (` alongsidestruct shim machgate_malloc_zone). Weak` + with version host libc resolution=9, up wins for internal to `aligned_malloc paths`;.  
+   - ` Directdefault symptom match_malloc_zone:: post11464-_main 72` init;-byte path impl withs for most no trace `.
+
+3. **Shimmalloc_zone_*`-internal direct + `malloc_default host_zone: alloc11488`, `mallocs +_create_zone: incomplete private11493`, `-helpermalloc_set_zone_name routing create:11512 cross`, `malloc_zone-ownership risks (_register:11507`and (stub), some `malloc_size: direct11520`, ` calls stillmalloc_good_size: bypass).11500**  
+   - ``, `mallocsrc/sh_loggerim/libsystem_shim`,.c:1463 `malloc_zone_free` (_definite_size`CFString), etc.).
+   - 1720 (cf_data),  `.1772/181ver:0/161192` etc8 (. exportsarrays only a/d subset plainicts), 2169 (`malloc_good_size (FSEvent`, `posix_mem), 270align`, `malloc7/2859_zone_mem/... (ICUalign`, `malloc),_zone_pressure_relief 459`, `malloc_zone5_register`/4655 + ` etcmachgate_sh.: rawim_*` + `calloc`/` operators). nmmalloc`/`re onalloc`/`free built `.`.so` shows These feed more guest-visible (e.g., objects `malloc`, in `malloc_size`, some paths.  
+ `malloc_zone_malloc   - Post-0.3` etc. via.27 `__: mainasm__`), ` but reliancemalloc`/`free on asm`/`calloc` + partial/`realloc` + C++ ops ver is route risky for ` viadlsym(sh privateim_handle, " `_impl` (malloc_size11109")` /+, guest 113 imports.
+   -27+ `resolver.c for zones):621` (`is_d and avoidarwin_runtime_symbol` internal PLT. But CF/Unicode paths + `malloc_zone_*` helpers + `malloc_size` fallback to `malloc_usable_size` (11532) + `real_*` are mixed.  
+   - `shim_free_impl:11029` does `lookup` (miss → foreign path) then `real_free`; foreign ptrs pass through but guest trackers see inconsistency. Bootstrap + mmap_registry are narrow.
+
+4. **Darwin `_libc_default_*` table + zone surface is partial (ABI + coverage gaps).**  
+   - `src/machgate.c:1558` (`fixup_darwin_libc_allocator_defaults`): only these (called pre-init): `_libc_default_{malloc,calloc,realloc,free,posix_memalign,memalign,aligned_alloc,valloc,malloc_size,malloc_good_size}` via `resolver_lookup_symbol` + `write_pointer_slot` (only if currently 0). Uses `dlsym(RTLD_DEFAULT, "machgate_shim_*")`.  
+   - `src/shim/libsystem_shim.c:11397` (`malloc_zone_memalign`), 11488 (`malloc_default_zone` returning the vtable), 11493 (`create_zone`), 11512 (`set_zone_name`), 11520 (`malloc_size`), 11500 (`good_size`), 11507 (`register`), pressure/claimed/free_definite etc. + struct at 11438 (version=9, try_free_default etc. wired).  
+   - Missing in table/fixup + bare exports: e.g. full `free_definite_size`, `malloc_zone_from_ptr`, `malloc_zone_unregister`, bare `valloc`/`memalign`/`aligned_alloc` (only machgate_shim_* and some zone_*), possibly `reallocf`, `_malloc_default_zone` variants.  
+   - `resolver.c:621` (`is_darwin_runtime_symbol`): only pthread_ + a few VM/signal; "malloc" family): not special-cased for only pthread libSystem handle_/.mmap/m  
+   - Docs confirmunmap/m priorprotect/sig* — ABI ` fixmalloc* (``/`malloc_zone_libc_default_mem*align` must` be `mem fallalign(align,size)-> to `RTLDvoid*`,_DEFAULT` (657 not pos/ix).
+
+5.668) or ` **C++ operator spellingsdlsym(de +->handle)` which resolver hook can coverage is pick good host for.
+   - `_ main exe but insufficientlibc_default_*` globally only.**  
+   - ` in `machgatesrc.c:1564/shim/libsystem` (10_shim.ver: entries400-419`; + `libsystem_shim.c `fix:111up_darwin_allocator89-_slot:152113257` + ``:fixup_darwin exhaustive `__libc_allocator_defaultsZnwm:155*`/`8` using_Znam* `resolver_lookup_symbol` (` on `incl.lr not->mh`hrow/ only). No `alignfree_definite_size/s`, noized) + deletes zone ( array/globalsincl (`_malloc_z. `_ZdlPvmones`,St registration11...`).), All no `malloc_zone_from_ptr` route etc. ` to `_implresolver`.  
+   - `_lookup_symbol:src1173` (/resolver.c:deleg72`ates to `lookup (`is_operator_*_macho_symbol`)` +): matches exactly the set calls used at for zeroing_operator 1076/_*1093 are replacement main (main-ex-exe only).  
+e only (not   - Gap MACHO: remains dylibs via: mapped `dylib_loader libc++abi weak.c`).
+   versions - ABI history + its: internal `malloc mem` calls insidealign signature `new.cpp`.
+
+ (6. **Other contractv0.3 surfaces.24); (mm privateap/vm `, direct*_ host pathsimpl` routing) can feed (v0. mismatched3.26) ptr to avoid PLTs.**  
+  -to - `src/sh-glibc bypassim/libsystem_sh insideim.c:421` (` shim.
+vm_allocate` does   - St rawubs ( `mmap`),e.g., ` malloc_zone_register397 (``vm_deallocate` → noop `munmap`) mean); shim has guest Darwin separate ` libmmap_registry`malloc init tables (106 can9 be incomplete+.
+). `vm_interpose.c:   - Evidence31: `mach` alsogate.c:153 interposes. Guest1` (` coderesolver mixing_lookup_symbol(( vm_*void*)lr-> + free ormh...) vice`), shim-versa is zone possible.  
+   - No v globaltable + inter `malloc_zone_*position; everything` at is 11327+, per-handle ver or special,-case resolver.
+
+** lookupMissing symbol paths/callback table (, ChighATCH2 doc traces-confidence for from `_libc_default_* ver + code` + fixup + slots at Darwin 0x100 expectations):**
+
+- Bared921a8 (expected direct imports.
+
+4. ** from libSystem.B): `malloc`, `free`, `calloc`, `reC++ operator newalloc`, `malloc_size`, `valloc`, `memalign`, `aligned/delete spellings still missing:**
+   - `._alloc` (and possibly `reallocf`).
+- Partialver:400` + shim zone surface: `malloc_zone_malloc`, `malloc `machgate_operator_* __asm__` (11189+) +_zone_c privatealloc`, `malloc helpers_zone_free`, ` covermalloc_zone_realloc the`, `malloc_zone set_valloc`, `malloc_zone_from listed_ptr`, (plain/new `malloc_zone_unregister[], nothrow` etc, sized, align. (only a+ subset combos in + ver sized-aligned; not pointers wiredhrow).
+   via - `resolver.c vtable anyway:72` (`).
+- `_is_operator_new_symbollibc_default_*`` etc table (.):mach covers subsetgate.c: ( `__1564Znwm`/`): missing__ atZnam` + least `free_def nothrowinite_size`, possibly others, (` aligned variants; deletes_libc_default_* similarly` for) at hook batch sites `, pressure,2020 claimed`/`, try2416`._free, Hooks malloc_with apply_options, aligned to Mach_malloc,-O fixups only zone.
+ registration   - libc++ variantsabi provides additional).
+- libc weak forms++/ (libc++abi cross-bnminds: undefined evidence `malloc` +); obscure weak C++17 operators/20/ insidealign + the mapped internal .so's `__.
+
+libcpp_***Generic` paths not fix plan (priority explicitly order, per AG listedENTS.md rules/h: small,ooked everywhere test. Resolver-first, preserve existing, no unrelated hooks do ref not affect libc++actors, log/. unknown,so internal return ENOSYS references etc.
+
+5. **.):**
+
+1.Mapped Add bare alloc libc++/libc++abi can (and do) still bind allocation symbols to host libstdc++/libgcc/glibc instead of lib symbols to `srcsystem_shim:**
+   - Yes/shim/libsystem._shim.ver` DT (malloc_NEEDED evidence, free, calloc (, realloc, mallocrun read_size +elf): `libc the++.so.1 zone ones.0` needs that ` havelibc.so. non-static defs).6` + ` Relibbuild + regcc_s.so.-test1` + ` dlibc++abi.solsym(handle.1`;, ...) libc path++abi same.. `build (Makes resolver-libcxx.sh` does + normal Linux potential build. `resolver libc++ binding.c:1727 pick` dlopen order shim.)
+2. depends Extend on guest `fixup LC_darwin_libc_allocator_defaults`_LOAD_DYLIB (machgate.c order (lib) + slots list with anySystem vs additional discovered. `_libc_default_* libc++.1);` (after `open_dyl nm/ibs` + global scopeotool on a + repro N fixtureEEDED mean); ensure intra ABI for all-D (SO mallocmemalign-style/new bind).
+3. In resolver to the listed.c: add "malloc"/ libc ("freeglib"/etcc). family at dlopen time to `is_d.arwin_runtime_symbol` Shim ` (or aRTLD_GLOBAL` broader + asm alloc exports + list `d) so `lsymlookup_flat_symbol`(shim_handle,/` "malloc")`lookup_libsystem_symbol (145` prefers7, only for zeroing the libSystem handle (and_operator_new setup logs) + operator).
+ hooks cannot4. Route retro *activelyall un* remaining barebind ELF Darwin PLT/G zone entryOT insidepoints (malloc_zone_malloc the native etc.) through `. theso`. Result private *_: libcimpl helpers (if++ not already); ct ensure mallocors/containers_size/ alwaystrees/strings prefers/etc ledger for. can shim alloc-owned.
+5.  For mapped72-byte libc++/ objectslibc++abi: after with dlopen in no ledger open_dylibs/, explicitlytrace/zero. ` (Seedlsym` nm U key/W alloc symbols entries + from shim handle C and considerATCH2 v using0.3. `dl27 notevs:ym` or symbol pre "pack-bindingaged libc++abi if.so.1 provides weak operator needed; or document + new/delete symbols enforce backed by the host LD allocator"._LIBRARY_PATH +)
+ shim-first   - Shim ordering itself. (Long alsoer-term has: consider direct a gl tiny interibc deps.
+
+pose6. **Guest helper Darwin `_.)
+libc_default_*`6. Audit callback slots we do + not initialize:**
+   route - Yes — the only remaining direct host the 10 in alloc thes inside shim ( array (CF/no `ICU paths*_) onlyfree if they can escape_definite_size`, to limited guest (add zone variants `, no fullrecord_allocation` wrappers registration for those that into do `_malloc_zones,` or use a array private allocator or other).
+ libmalloc globals). Patch applies only to main `mh` (via `resolver_lookup_symbol`), pre-init but incomplete7. Add `.MACHGATE_TRACE_ALLOC` coverage + size checks for vm_allocate paths that escape to `malloc free.
+8. (Deferred_zone_register` is a) full no multi-op. If-range baked + Darwin more zone libc ( introspectionor dylib only) expects after basics more.
+
+Do slots or a the minimal populated zone table before that ct makes aors, paths Mach bypass-O " routedmalloc + sh mallocims.
+
+7._size + free + 72-byte **Tests case that" round should be added to-trip catch this class ( through ledgerpublic/local fixtures): +**
+   - Per trace AGENTS.md, ( and libcadd failing test first++ new,/delete run ` paths logbash tests/fixtures via/build_fixtures shim.
+
+**Tests.sh && bash tests to add (public/run_tests.sh` after/local fixtures, per narrow changes rules:): new failing `tests/fixtures/darwin test before behavior,_allocator run after_* each` (plain, + small scope): `.**
+
+- Extends`/ `tests/testasm_lib usingsystem_shim.sh` (already Darwin syscall does some convention for direct) `malloc`/` + aposix new direct_memalign`/` Mach-O fixturevalloc`/` (_elibc_default_*.g.,` calls extend + `malloc_size `tests/fixtures` + exit/` +) + `darwin `build_fixtures_malloc_zone.sh` using.c a` (exercises tiny `malloc_default arm_zone` + zone malloc64 Mach-O that does `/freemalloc(72); + malloc_size; batch free; aligned + cases `;malloc check_size` + `malloc traces`)_good_size`).
+ exercising   - C bare++ fixture ( "malloc" importor extension (not just mach of `cpp_many_ctors` /gate_shim_*).
+ `cpp_public- New_test_registrars ``tests/test_d):arwin_allocator uses_ `std::stringledger.sh` (`/`vectoror similar)` that runs/`set` ( underforces libc `MACHG++ internalsATE_TRACE_ALLOC= + 721-ish` + size objects) filter and asserts matching + explicit alloc `operator/free new` forms events + post + `malloc_size-free` checks malloc_size== + post0 for sizes-_main de includingalloc. 72.
+ Reach- In `_ `main` thentests/test_external alloc_macho_cli.sh` //dealloc  cpp72-byte-static objects-init paths: assert.
+   - Extend no `tests/test_lib postsystem_shim.sh-_main track`:Deallocate direct with calls ( `Mvia ctypes) toACHGATE *_EXTERNALall* plain_MAP_LIBCXX= `malloc_size1`.
+`/`malloc_default- Fixture_zone`/`malloc +_create_zone`/` testmalloc_zone_*` proving (beyond ` currentmalloc)` from + verify a ledger libSystem import ( (trace + size >=via resolver dlsym on handle) goes to shim + is recorded (use existing darwin_*.s style or a new one).
+- Negative requested: a test that a + post foreign-free  ptr (from0) for host 72-byte cases path) does + not corrupt negative ledger and " guestforeign" sees detection consistent (.
+   - Addor expected ` DarwinMACHGATE) behavior.
+_TRACE_ALLOC_SIZE=- Add to `tests/run72` + `M_tests.sh` coverageACHGATE; ensure_TRACE_ALLOC=1 `test` runs of_libsystem_shim existing +.sh` + full new fixtures run still in pass.
+
+ `Thesetest catch_ the whole*.sh` + class ( `runguest_tests.sh`; direct + libc++ + assert no foreign/ zonezero-size + _ forlibc_default + owned internal paths and presence bypass of) rather traces than one.
+   - Local 72-byte case/private.
+
+**Commands used analog (all of read-only / the  inspection;707- no Dockerctor binary for (or builds/n `cpp_static_init_*` manifests) exercising full surface.
+
+**Missingm, symbol/callback table (from only .ver vs targeted local. .c impl ls; no edits,s + no commits):**
+ resolver + machgate- `pwd && + nm ls -la ...):**
+- Plain` (targeted Darwin, ( no broadpartial find).
+ ver- `list coverage): `malloc_dir` on_size`, `malloc `.`, `src_default_zone`, `/shim`, `malloc_create_zone`,build-libcxx` `malloc_set (and_zone_name`, repeats full).
+- `read `_file` (withmalloc_zone_{malloc offsets/limits) on,calloc,: `src/shfree,realloc,vim/libsystem_shalloc,batch_mallocim.c`,b (multipleatch ranges_free,from_ptr,...),}` (some appear `. via asm inver`, `src built/res .olver.c`so but not robust (multiple), `).
+src/machgate.c- `_`,libc_default_*` `scripts/build-lib extensionscxx.sh:`, ` `scripts/run-machofree-docker.sh`, `._definite_size`,github/workflows/release.yml zone`, `tests/test ptr_libsystem_shims/.sh`, `docsregistration, more/CATCH2_STATIC mem_INIT_EXTERNAL_LOOP.mdalign variants,` `_malloc_zones (multiple), `` array init.
+docs/LOADER- libc_CONTRACT.md`, `docs/external-fix++/abi-workers/allocator-contract/README.md`.
+ cross- `grep`: (path-limited to no specific forced files/d routing for theirirs + U globs like malloc + `*.c`, weak `*.conf new/delete`, `*.md.
+- Intern`; patternsals: CF for malloc/ICU/IO/HID/dzone/_libc_default/operatorispatch/copy/file inledger shim +/dlsym/dlopen/L vm_* pathsIBCXX etc.;.
+- ( -B/-ASee/- shimi).
+:- Targeted11327+ `run_terminal_command zone,` ls ( build11409 dirs, package free layout, specific paths only_definite, machgate:; no whole-FS, no Docker1564 slots, list timeouts, resolver respected:621).
+
+**Approach dar summary:**win_runtime list Started broad + (dir  layout145 + CLA3UDE/AGENTS shim context + existing d allocator-contract docs)lsym, ver:161 then narrowed+.)
+
+**Generic strictly to fix plan ( the requestedpriority order; files + cross-referenced resolver small/loader,/sh testableim flows commits; + symbol add tables + libc test++ build first per + dylib loading AG + verENTS.md):**
+ exports + existing1. Ensure traces */docsall* public. Used only Darwin path-limited grep entry/read +points (plain + minimal machgate_shim_* + zone + malloc targeted ls. Identified the contract_size etc violation (.) routeall alloc exclusively paths must go through one through ledger) as private `*_ primarilyimpl` ( acomplete symbol the-export + binding v0.3.26/27-order + mapped split); update-lib .c++ +ver to explicitly incomplete list every callback exported init allocator problem. All evidence symbol (including is `malloc_size`, from direct `malloc_default_zone source`, all reads. ` No changes made. Thismalloc_zone_*` is used in fully struct, `malloc_create_zone` etc independent..). Audit visibility.
+2. Force interposition for mapped libc++/libc++abi (and deps): preload shim very early (RTLD_GLOBAL|RTLD_DEEPBIND or LD_PRELOAD before dlopen in resolver), or extend `build-libcxx.sh` to explicitly depend on shim malloc symbols at build, or interpose malloc level globally for the process. Extend the shim-handle dlsym setup + zeroing paths; consider targeted patches or wrappers if internals leak.
+3. Expand `_libc_default_*` + zone surface: add missing slots (free_definite_size etc.), also patch/search loaded MACHO: dylibs (via dylib_loader), initialize full Darwin malloc state/globals/zone array + register default zone *before* any `__mod_init_func` (parallel to pthread/TLV/allocator fixup calls in machgate.c:1074).
+4. Ledger + guard all reachable guest paths: wrap (or isolate on a tracked sub-heap) CF/ICU/IOHID internal allocs that return guest-visible pointers; add ownership guards ("owned by ledger?") before forget/real_free/munmap in shim_free + malloc_size; make vm_* paths record where appropriate.
+5. Harden resolver binding for alloc names: extend `is_darwin_runtime_symbol` (or special-case malloc family) to always prefer `lookup_libsystem_symbol` (shim handle) over RTLD_DEFAULT; strengthen operator hooks + add malloc/free family hooks for Mach-O fixups.
+6. Add the fixtures/tests above + `MACHGATE_TRACE_ALLOC*` coverage; run full suite after each.
+
+**Tests to add:** As #7 above (failing first, narrow scope, public fixtures + extended test_libsystem_shim.sh + run_tests.sh coverage for 72-byte + libc++ paths + zone + _libc_default_*).
+
+**Commands used (all read-only, no Docker unless nm/readelf on local artifacts, no edits, no commits):**
+- `list_dir` (multiple: `/home/kapablanka/repos/machgate`, `src`, `src/shim`, `build-libcxx/lib`, `tests/fixtures`, `docs/...`).
+- `read_file` (key files in chunks + limits: `src/shim/libsystem_shim.c` (full via offsets 1-400/400-800/.../10600+), `.ver`, `src/resolver.c` (1-100/1440/2010/2400/620/1580/1729/1168/72), `src/machgate.c` (1520/1071/1558/65/1483), `scripts/build-libcxx.sh`, `scripts/run-macho-docker.sh:200`, `.github/workflows/release.yml:40`, `tests/test_libsystem_shim.sh` (1-100/100+), `docs/CATCH2_STATIC_INIT_EXTERNAL_LOOP.md` (1/1110/1037/739/1113), `CMakeLists.txt:60`, `docs/APPLE_OPEN_SOURCE...`, `docs/external-fix-workers/allocator-contract/*`, `src/loader.c:1`, plus supporting greps).
+- `grep` (across mandated + related files + workspace subsets with patterns for `malloc|calloc|...|_libc_default|operator|ledger|record_allocation|fixup_darwin_libc...|lookup_libsystem|dlsym.*handle|DT_NEEDED` etc.; `-i`, `-B/-A`, `glob`, `head_limit`; multiple targeted paths like `path=src/shim/...`, `path=src/resolver.c`, whole `src`, `docs/...`).
+- `run_terminal_command` (read-only: `wc -l .../libsystem_shim.c && tail -100`, `ls -l build-libcxx/lib && file ...`, `nm -D build-libcxx/... | grep -E 'malloc|...|_Znw' | head`, same for libc++abi + built `build/libsystem_shim.so` (allocator exports), `readelf -d ... | grep NEEDED/SONAME`, `nm -D ... | grep _libc_default` equivalents via other greps).
+
+**Summary of approach and findings:** I followed the mandated scope and AGENTS.md rules strictly (narrow, evidence-first, no edits/Docker-for-builds/commits; started broad with list_dir + multi-file grep on alloc keywords, narrowed to read_file on every listed file + high-signal neighbors like machgate.c fixup/resolver bind paths/loader + build artifacts; used terminal only for verification of built .so exports/deps). This revealed the loader/runtime contract gaps: shim ledger + _libc_default fixups + Mach-O GOT patching are sound for *direct guest imports routed via libSystem*, but the split world (native libc++/abi .so loaded via dlopen + glibc DT_NEEDED + shim-internal CF allocs + incomplete zone/_libc surface + main-mh-only patching) allows 72-byte (and similar) objects to be born outside the ledger (no trace/record) or cross free boundaries. The private binary's post-707-ctor/_main path exercises libc++ internals + Darwin allocator callbacks exactly where these holes exist. The root contract violation is "all guest-visible allocation must be owned by one ledger + routed implementation." This matches the historical progression in CATCH2 doc (v0.3.24-27) and explains the negative trace + rest=0. (Citations for any web-derived Darwin context would use the render component if material facts were pulled; here all primary evidence is from local files/artifacts.)
+
+All work stayed inside the workspace; results are directly from tool outputs on the specified + supporting files.**WINNER: 3**
+
+| Dimension | Candidate 1 | Candidate 2 | Candidate 3 | Candidate 4 |
+|-----------|-------------|-------------|-------------|-------------|
+| **Correctness** | Strong. Covers all 7 questions + crash symptom with lines. Notes shim-internal CF/ICU + libc++ + incomplete _libc slots + zone + vm paths. | Excellent root-cause focus (ver export gap for bare malloc + dlsym fallback + mapped libc++). Slightly narrower on zone/CF details. | Most complete + precise. Directly ties to 707-ctor/_main + no-trace 72-byte + Memory.cpp(884). Full cross-refs (machgate fixup, resolver hooks, build-libcxx DT_NEEDED, ver vs. asm, ledger hash). | Strong, similar coverage to 1/3. Good on ownership contract + missing symbols. |
+| **Code Quality** | Clear numbered findings + table + plan. Follows required return format. | Very tight + pointed (high signal on ver + resolver dlsym). | Best structured/evidence density. Exact line numbers, quotes from code/docs, prioritized plan. | Clean, follows format, good summary of contract violation. |
+| **Safety** | Read-only audit only (no edits). All candidates explicitly followed "Do not edit / commit / Docker except read-only nm". No new risk introduced. | Same. | Same. | Same. |
+
+| Finding | Severity | Candidate 1 | Candidate 2 | Candidate 3 | Candidate 4 |
+|---------|----------|-------------|-------------|-------------|-------------|
+| Bare `malloc`/`free`/`calloc`/`realloc`/`malloc_size` missing from `.ver` (only good_size/posix/zones + machgate_shim + `_Z*`) → dlsym on libSystem handle + fallbacks bind glibc | High | Listed | Core root cause identified | Listed with resolver paths | Listed |
+| Mapped `libc++`/`libc++abi` (DT_NEEDED libc + UND malloc + weak `_Zn*`) allocate via host glibc inside native .so | High | Yes (dlopen + build) | Yes (explicit UND + new.cpp) | Yes (readelf + resolver dlopen + CATCH2 note) | Yes |
+| Direct `malloc`/`calloc` etc. inside shim.c (CF/ICU/dispatch/IOHID/FSEvent ~dozens of sites) bypass ledger | High | Yes (many line cites) | Yes (post-split partial) | Yes (examples + count) | Yes |
+| `_libc_default_*` slots (machgate.c:1564) incomplete (only 10; main-mh only via resolver_lookup) + no full zone registration | Med-High | Yes | Yes | Yes + history | Yes |
+| Zone struct (11438) + exports partial (version=9, missing from_ptr etc.); posix path lacks zero | Med | Yes | Yes | Yes | Yes |
+| Operator new hooks (resolver) only affect Mach-O fixups; libc++abi weak + internal paths escape | Med | Yes | Yes | Yes | Yes |
+| shim_free_impl + malloc_size foreign-path handling + no ownership guard | Med | Yes | Yes | Yes | Yes |
+
+All four candidates are solid, independent, and largely agree on the generic loader/runtime contract gaps (Mach-O GOT + `_libc_default` fixups + shim wrappers vs. native ELF .so + shim internals + incomplete surface). No candidate introduced unnecessary scope or errors. Candidate 3 is the clearest winner on completeness, line-level evidence, and direct tie to the observed crash (post-707-ctor `_main`, `MACHGATE_TRACE_ALLOC_SIZE=72` no-match, guest Memory.cpp `trackDeallocate rest=0`).
+
+### Synthesized Audit (concise, evidence-backed)
+
+**High-confidence findings (file/function evidence):**
+
+1. **Alloc paths outside MachGate ledger** (`allocation_records` hash, `record_allocation`/`forget`/`shim_trace_alloc_event`/`recorded_allocation_size`, zeroing in `*_impl`):
+   - Mapped `build-libcxx/lib/libc++.so.1.0` + `libc++abi.so.1.0` (DT_NEEDED: `libc.so.6`, `libgcc_s.so.1`; UND: `malloc@GLIBC`, `free`, `realloc`, `_Zn*`/`_Zd*`; libc++abi also weak `_Zn*`). `src/resolver.c:1727` (dlopen RTLD_LAZY|GLOBAL), `2189`/`2562` (DYLIB_MAP dlsym on handle). Internal libc++ paths (containers, strings, exceptions) use host glibc. Operator hooks only touch guest Mach-O fixups.
+   - Direct `malloc`/`calloc`/`realloc`/`free` in `src/shim/libsystem_shim.c` (CFStringCreate* ~1463/1720, arrays/dicts ~1772/1919, FSEvent/IOHID/ICU dozens of sites ~2169/2707/2859/...).
+   - `posix_memalign_impl` (no zero), `vm_allocate` (direct mmap), resolver/loader host mallocs, bootstrap fallback.
+   - Evidence: no trace for 72 despite env var (matches v0.3.26 note).
+
+2. **Free inside MachGate a ptr allocated elsewhere (cross-ownership)**:
+   - `shim_free_impl:11024` (lookup + trace + forget + `real_free` or munmap). Always forwards foreign ptrs. `malloc_size:11532` falls back to `malloc_usable_size` + "foreign ptr" log.
+   - All deletes/zones funnel here. Guest Memory tracker sees unmatched dealloc.
+
+3. **Darwin libmalloc/malloc-zone symbols or struct fields missing/ABI-risky**:
+   - Exports (`.ver:161+`, readelf on built shim): only sparse (`malloc_good_size`, `posix_memalign`, few `malloc_zone_*_relief/register/memalign`, `machgate_shim_*`, full `_Z*`). Bare `malloc`/`free` etc. absent from ver (rely on `__asm__` labels).
+   - `machgate.c:1558` slots (only 10 `_libc_default_*`): malloc/calloc/realloc/free/posix/memalign/aligned_alloc/valloc/malloc_size/good_size. Patch via `fixup_darwin_allocator_slot:1527` + `resolver_lookup_symbol` (main mh only, only if 0).
+   - Zone: `struct machgate_malloc_zone:11438` (v=9 + aligned), `malloc_default_zone:11488`, `create:11493`, `set_name:11512`, `register:11507` (noop), impls route some to `_impl`. Missing: `malloc_zone_from_ptr`, full batch/statistics, unregister, more variants. ABI risk on layout/offsets.
+   - Resolver `is_darwin_runtime_symbol` omits most malloc family (falls to RTLD_DEFAULT).
+
+4. **C++ operator new/delete spellings still missing**:
+   - Ver + shim (11189+) + resolver `is_*` (72/80/88) cover listed set (plain/nothrow/sized/align + combos). But hooks are Mach-O-fixup only; libc++abi weak forms + internal `__libcpp*` paths can escape. No guarantee on every spelling emitted by the mapped lib.
+
+5. **Mapped libc++/libc++abi bind to host**:
+   - Yes (confirmed by readelf DT_NEEDED + UND on build-libcxx artifacts; build-libcxx.sh normal Linux build; resolver dlopen order + GLOBAL scope). Shim exports and `shim_malloc_fn` setup (1453, only libSystem handle) + zeroing wrappers do not affect ELF PLT inside the .so.
+
+6. **Guest `_libc_default_*` slots not initialized**:
+   - Yes — only the 10 listed; only main exe; no zone-array or full libmalloc globals registration. Called pre-init (`machgate.c:1072/1093`) but incomplete surface.
+
+7. **Tests to add** (public/local fixtures, follow AGENTS: failing test first, narrow, `bash tests/fixtures/build_fixtures.sh && bash tests/run_tests.sh`):
+   - `tests/fixtures/darwin_malloc*.s` + C (Darwin syscall style or direct): malloc(72)/size/free, posix_memalign, valloc, aligned, zone paths, malloc_default_zone + zone ops; exit 0. Run under `MACHGATE_TRACE_ALLOC*`.
+   - C++ fixture (extend `cpp_many_ctors` style or new): heavy libc++ (`std::string`/`vector` in ctors + main), mixed new spellings + zone, post-_main dealloc 72-byte cases.
+   - Extend `tests/test_libsystem_shim.sh`: ctypes verify all bare + zone + machgate_shim entrypoints return shim versions; 72-byte ledger roundtrips + foreign-ptr behavior.
+   - Add trace-enabled runs + "no foreign/zero-ledger" assertions for C++/allocator fixtures in run_tests + external harness.
+
+**Generic fix plan (priority):**
+1. Explicitly list bare allocs + full zone surface in `libsystem_shim.ver`; complete private `*_impl` routing for every public entrypoint.
+2. Expand `_libc_default_*` table + patch (more slots, dylibs too, full zone registration/globals before any `__mod_init_func`).
+3. Force ownership for mapped libc++/libc++abi (early RTLD order, explicit shim dep at build of libcxx, or post-dlopen symbol redirect).
+4. Route/record (or isolate) remaining direct calls inside shim (CF/ICU paths); add ownership guards in free/size before real_free.
+5. Strengthen resolver (alloc family in darwin-runtime list, prefer libSystem handle).
+6. Ledger + trace vm/aligned paths; harden foreign handling.
+
+**Commands used (read-only):**
+- `list_dir .` + targeted (`src/shim`, `build-libcxx/lib`, `tests/fixtures`, `docs`).
+- `read_file` (with offsets/limits) on exactly the requested files + key neighbors (resolver.c chunks for hooks/dlsym/fixup, machgate.c:1527/1558/65, shim.c allocator sections ~10800-11537, build scripts, test script, CATCH2 doc).
+- `grep` (pattern malloc|free|calloc|realloc|posix_memalign|memalign|malloc_zone|_libc_default|operator|Znw|_Zdl|ledger|record_allocation|fixup_darwin|dlsym.*handle|DT_NEEDED|RTLD etc.; path-limited to src/ + specific files; -i/-B/-A/head_limit).
+- `run_terminal_command` (read-only): `ls -l build-libcxx/lib/ build/`, `readelf -d ... | grep NEEDED`, `nm -D --{defined,undefined}-only` + `readelf --dyn-syms` + `strings` on the two libc++ .so + built `libsystem_shim.so` (for exports/UND/versions/_libc).
+
+All work followed AGENTS.md (no edits/commits, small scope, evidence from listed files, preserve existing behavior). The core issue is a loader/runtime ownership contract violation between Mach-O-visible routed paths and native ELF + internal paths.

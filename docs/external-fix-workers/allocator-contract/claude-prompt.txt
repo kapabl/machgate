@@ -1,0 +1,33 @@
+Read-only task in /home/kapablanka/repos/machgate.
+
+We need a generic allocator/runtime contract audit for MachGate. Current private C++ Mach-O completes 707 static constructors and enters _main, then guest aborts:
+
+Memory.cpp(884) trackDeallocate: rest=0, size=72.
+
+We have already fixed multiple allocator boundary issues:
+- Darwin _libc_default_memalign ABI
+- malloc_size allocation ledger
+- private posix_memalign helper to avoid ELF PLT interposition
+- C++ operator new/delete exports from libsystem_shim
+- private malloc/free/calloc/realloc helpers to avoid internal PLT interposition
+
+Your job: audit for what is still missing generically.
+
+Inspect source and local built artifacts. Focus on:
+- libsystem_shim allocator API and exported symbols
+- resolver C++ allocation import hooks
+- mapped build-libcxx/lib/libc++.so.1 and libc++abi.so.1 symbols
+- malloc zone struct/callback compatibility
+- Darwin _libc_default_* slots
+- weak ELF symbols and LD_LIBRARY_PATH/release packaging order
+- tests that should catch this class
+
+Return:
+1. Evidence-backed gaps only.
+2. Exact files/functions/line references.
+3. Missing symbols/callbacks.
+4. Proposed patches in priority order.
+5. Minimal tests to add.
+
+Do not edit files. Do not commit. Keep the report compact.
+

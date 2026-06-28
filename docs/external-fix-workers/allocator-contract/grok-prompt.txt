@@ -1,0 +1,49 @@
+You are working in /home/kapablanka/repos/machgate on MachGate.
+
+MachGate runs ARM64 Mach-O command-line executables inside ARM64 Linux containers. The current private C++ test binary now completes all 707 Mach-O static constructors and reaches _main, then aborts in guest code:
+
+Memory.cpp(884) ASSERTION FAILED: rest >= size && rest <= kMaxHeapSize
+Function: trackDeallocate
+Message: rest=0, size=72
+
+Recent evidence:
+- v0.3.21 fixed constructor progress enough to reach _main.
+- v0.3.24 fixed a Darwin allocator callback ABI issue: _libc_default_memalign must be memalign(alignment, size) -> void*, not posix_memalign(&ptr, alignment, size) -> int.
+- v0.3.25 made initializer tracing compact.
+- v0.3.26 split posix_memalign into a private helper and routed malloc_zone_memalign/machgate_shim_memalign through it, because internal shim calls through the ELF PLT can resolve to glibc and bypass the ledger.
+- v0.3.27 exports C++ operator new/delete forms from libsystem_shim and splits malloc/free/calloc/realloc into private helpers to avoid internal PLT interposition.
+- v0.3.26 private run with MACHGATE_TRACE_ALLOC_SIZE=72 still had no matching alloc trace before the guest Memory.cpp abort, so a path may still bypass MachGate's allocator ledger or the guest's own memory tracker.
+
+Audit goal:
+Find generic allocator/runtime ownership gaps. Do not chase only this one crash. Think in terms of loader/runtime contract.
+
+Inspect:
+- src/shim/libsystem_shim.c
+- src/shim/libsystem_shim.ver
+- src/resolver.c
+- src/machgate.c
+- scripts/build-libcxx.sh
+- scripts/run-macho-docker.sh
+- .github/workflows/release.yml
+- tests/test_libsystem_shim.sh
+- docs/CATCH2_STATIC_INIT_EXTERNAL_LOOP.md
+- build-libcxx/lib/libc++.so.1 and build-libcxx/lib/libc++abi.so.1 if present
+
+Questions to answer:
+1. What allocation/free paths can still allocate outside MachGate's ledger?
+2. What paths can free inside MachGate a pointer allocated elsewhere?
+3. What Darwin libmalloc/malloc-zone symbols or struct fields are missing or ABI-risky?
+4. What C++ operator new/delete spellings are still missing?
+5. Can mapped libc++/libc++abi still bind allocation symbols to host libstdc++/libgcc/glibc instead of libsystem_shim?
+6. Are there guest Darwin _libc_default_* callback slots we do not initialize?
+7. What tests should be added to catch this class with public/local fixtures?
+
+Return format:
+- High-confidence findings with file/function evidence.
+- Missing symbol/callback table.
+- Generic fix plan in priority order.
+- Tests to add.
+- Commands used.
+
+Do not edit files. Do not commit. Do not use Docker unless needed for read-only nm/readelf checks. Keep the answer concise but evidence-backed.
+

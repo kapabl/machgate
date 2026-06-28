@@ -1,0 +1,29 @@
+You are in /home/kapablanka/repos/machgate. Read-only audit.
+
+MachGate runs ARM64 macOS Mach-O CLI binaries on ARM64 Linux. A private large C++ test binary now finishes 707 static constructors and reaches main, then aborts in its memory tracker:
+
+Memory.cpp(884), trackDeallocate, rest=0, size=72.
+
+This is likely an allocator/runtime ownership contract problem. Audit the repo for generic issues, not one-off crash repairs.
+
+Look at:
+- src/shim/libsystem_shim.c
+- src/shim/libsystem_shim.ver
+- src/resolver.c
+- scripts/build-libcxx.sh
+- scripts/run-macho-docker.sh
+- .github/workflows/release.yml
+- tests/test_libsystem_shim.sh
+- build-libcxx/lib/libc++.so.1 and libc++abi.so.1 if present
+
+Find:
+- allocation paths outside MachGate ledger
+- free paths for non-MachGate allocations
+- missing C++ operator new/delete variants
+- missing Darwin malloc/libmalloc/malloc-zone APIs
+- _libc_default_* callback gaps
+- packaging or dynamic linker ordering problems
+- tests needed to catch the class
+
+Output a concise evidence-backed report. Do not edit files.
+

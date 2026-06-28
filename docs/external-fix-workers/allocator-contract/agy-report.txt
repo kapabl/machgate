@@ -1,0 +1,61 @@
+### MachGate Allocator & Runtime Ownership Audit Report
+
+This report documents the root causes of memory tracker aborts (specifically `Memory.cpp(884), trackDeallocate, rest=0, size=72`) when running C++ Mach-O binaries under MachGate.
+
+---
+
+### **1. Allocation Paths Outside MachGate Ledger**
+*   **Host ELF Library Allocations (e.g. `libc++.so.1`):**
+    Dynamic libraries mapped in `dylib_map.conf` to native ELF libraries (like [libc++.so.1](file:///home/kapablanka/repos/machgate/build-libcxx/lib/libc++.so.1) and [libc++abi.so.1](file:///home/kapablanka/repos/machgate/build-libcxx/lib/libc++abi.so.1)) are loaded via standard Linux dynamic loading ([resolver.c:L1727](file:///home/kapablanka/repos/machgate/src/resolver.c#L1727)). Because the host executable `machgate` links against `libc.so.6` (glibc) at startup, glibc's symbols (`malloc`/`free`) occupy the front of the global search scope. Consequently, any internal allocations within native ELF libraries bypass `libsystem_shim.so`'s overridden `malloc` and are allocated directly from glibc's heap.
+*   **Zone Interposition Bypass:**
+    If the guest binary registers a custom allocator zone using `malloc_zone_register` or overrides the default zone returned by `malloc_default_zone`, all calls to `malloc_zone_malloc` ([libsystem_shim.c:L11327](file:///home/kapablanka/repos/machgate/src/shim/libsystem_shim.c#L11327)) completely ignore the `zone` parameter and route directly to [shim_malloc_impl](file:///home/kapablanka/repos/machgate/src/shim/libsystem_shim.c#L10991) (which resolves to glibc's malloc). This violates the Darwin memory allocator contract where allocations must be forwarded to the zone's target function pointers (e.g., `zone->malloc`).
+
+---
+
+### **2. Free Paths for Non-MachGate Allocations**
+*   **Untracked Deallocations in `shim_free_impl`:**
+    When a pointer allocated outside the ledger (e.g. by `libc++.so.1` static constructors or bypassed zone allocators) is passed back to [shim_free_impl](file:///home/kapablanka/repos/machgate/src/shim/libsystem_shim.c#L11024), [lookup_allocation_size](file:///home/kapablanka/repos/machgate/src/shim/libsystem_shim.c#L10917) returns `0` (untracked). While glibc's `free` safely reclaims it, any guest-side memory tracker (e.g., `Memory.cpp`) wrapping `operator delete` or `free` will intercept the deallocation and fail to locate the pointer in its tracked ledger, resulting in the `rest=0` abort.
+
+---
+
+### **3. Missing C++ Operator New/Delete Variants**
+*   **C++20 Destroying Delete:**
+    The C++20 destroying delete variants are missing from the resolver hooks ([is_operator_delete_symbol](file:///home/kapablanka/repos/machgate/src/resolver.c#L88-L102)) and the linker export list ([libsystem_shim.ver](file:///home/kapablanka/repos/machgate/src/shim/libsystem_shim.ver)):
+    *   `_ZdlPvSt19destroying_delete_t` (`operator delete(void*, std::destroying_delete_t)`)
+    *   `_ZdlPvmSt19destroying_delete_t` (`operator delete(void*, unsigned long, std::destroying_delete_t)`)
+    *   Aligned variants like `_ZdlPvSt19destroying_delete_tSt11align_val_t`.
+
+---
+
+### **4. Missing Darwin malloc/libmalloc/malloc-zone APIs**
+*   **Missing API Functions:**
+    *   `malloc_zone_from_ptr(const void *ptr)` (used by C++ exception runtimes and standard allocators to verify pointers) is completely unimplemented.
+    *   `malloc_get_all_zones` and `malloc_zone_unregister` are missing.
+*   **Export Gaps:**
+    While zone APIs such as `malloc_zone_malloc`, `malloc_zone_realloc`, and `malloc_zone_free` are defined globally in [libsystem_shim.c](file:///home/kapablanka/repos/machgate/src/shim/libsystem_shim.c#L11327), they are **not exported** in [libsystem_shim.ver](file:///home/kapablanka/repos/machgate/src/shim/libsystem_shim.ver). Any guest or library binding referencing them will fail to resolve them at load time.
+
+---
+
+### **5. `_libc_default_*` Callback Gaps**
+*   **No Export in Shim:**
+    The `_libc_default_*` pointers (e.g., `_libc_default_malloc`, `_libc_default_free`, etc.) are not defined or exported by [libsystem_shim.c](file:///home/kapablanka/repos/machgate/src/shim/libsystem_shim.c).
+*   **Unpatched Dynamic Libraries:**
+    [fixup_darwin_libc_allocator_defaults](file:///home/kapablanka/repos/machgate/src/machgate.c#L1558) only searches and patches the main executable Mach Header (`lr->mh`). Any `_libc_default_*` symbols defined or utilized by dynamically loaded Mach-O libraries (via [dylib_loader.c](file:///home/kapablanka/repos/machgate/src/dylib_loader.c)) remain unpatched.
+
+---
+
+### **6. Packaging & Dynamic Linker Ordering Problems**
+*   **Symbol Preemption Order:**
+    Because `libsystem_shim.so` is loaded dynamically later via `dlopen(..., RTLD_GLOBAL)` rather than pre-loaded (e.g. via `LD_PRELOAD`), symbols like `malloc` and `free` inside native ELF dynamic libraries mapped in the resolver resolve directly to glibc's implementation instead of `libsystem_shim.so`. This breaks allocator consistency across the guest-host runtime boundary.
+
+---
+
+### **7. Recommended Tests**
+To catch and prevent this class of issues, the following tests should be implemented in [tests/test_libsystem_shim.sh](file:///home/kapablanka/repos/machgate/tests/test_libsystem_shim.sh):
+
+1.  **Guest-Host Interop Allocation Test:**
+    A test that allocates memory inside a native host ELF library (e.g., returning a `std::string` or `std::shared_ptr` from an ELF `.so` compiled with host g++) and frees it in a guest Mach-O binary (and vice versa) to ensure consistent tracking.
+2.  **Zone Interposition Verification Test:**
+    A guest Mach-O test that registers a custom `malloc_zone` using `malloc_zone_register`, performs allocations via `malloc` and `malloc_zone_malloc`, and asserts that the custom zone's allocator hooks are executing.
+3.  **C++ Exception Lifetime Test:**
+    A test that throws and catches C++ exceptions containing dynamically allocated sub-objects (like `std::string` members) across the guest-host library boundaries to verify exception lifetime allocations (`__cxa_allocate_exception` / `__cxa_free_exception`) work correctly.

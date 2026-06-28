@@ -11176,6 +11176,21 @@ void* machgate_shim_valloc(size_t size)
 	return machgate_shim_memalign(page_size, size);
 }
 
+void* memalign(size_t alignment, size_t size)
+{
+	return machgate_shim_memalign(alignment, size);
+}
+
+void* aligned_alloc(size_t alignment, size_t size)
+{
+	return machgate_shim_memalign(alignment, size);
+}
+
+void* valloc(size_t size)
+{
+	return machgate_shim_valloc(size);
+}
+
 size_t machgate_shim_malloc_size(const void* ptr)
 {
 	return malloc_size(ptr);
@@ -11342,19 +11357,19 @@ void malloc_zone_free(void* zone, void* ptr)
 	shim_free_impl(ptr);
 }
 
-static size_t malloc_zone_size(void* zone, const void* ptr)
+size_t malloc_zone_size(void* zone, const void* ptr)
 {
 	(void)zone;
 	return malloc_size(ptr);
 }
 
-static void* malloc_zone_calloc(void* zone, size_t count, size_t size)
+void* malloc_zone_calloc(void* zone, size_t count, size_t size)
 {
 	(void)zone;
 	return shim_calloc_impl(count, size);
 }
 
-static void* malloc_zone_valloc(void* zone, size_t size)
+void* malloc_zone_valloc(void* zone, size_t size)
 {
 	(void)zone;
 	size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
@@ -11367,13 +11382,13 @@ static void* malloc_zone_valloc(void* zone, size_t size)
 	return result;
 }
 
-static void malloc_zone_destroy(void* zone)
+void malloc_zone_destroy(void* zone)
 {
 	(void)zone;
 }
 
-static unsigned malloc_zone_batch_malloc(void* zone, size_t size,
-                                         void** results, unsigned count)
+unsigned malloc_zone_batch_malloc(void* zone, size_t size,
+                                  void** results, unsigned count)
 {
 	unsigned index;
 
@@ -11386,8 +11401,8 @@ static unsigned malloc_zone_batch_malloc(void* zone, size_t size,
 	return index;
 }
 
-static void malloc_zone_batch_free(void* zone, void** pointers,
-                                   unsigned count)
+void malloc_zone_batch_free(void* zone, void** pointers,
+                            unsigned count)
 {
 	(void)zone;
 	for (unsigned index = 0; index < count; index++)
@@ -11406,7 +11421,7 @@ void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
 	return result;
 }
 
-static void malloc_zone_free_definite_size(void* zone, void* ptr, size_t size)
+void malloc_zone_free_definite_size(void* zone, void* ptr, size_t size)
 {
 	(void)size;
 	malloc_zone_free(zone, ptr);
@@ -11419,15 +11434,17 @@ size_t malloc_zone_pressure_relief(void* zone, size_t goal)
 	return 0;
 }
 
-static int malloc_zone_claimed_address(void* zone, void* ptr)
+int malloc_zone_claimed_address(void* zone, void* ptr)
 {
+	size_t size;
+
 	(void)zone;
 	(void)ptr;
-	return 0;
+	return lookup_allocation_size(ptr, &size);
 }
 
-static void* malloc_zone_malloc_with_options(void* zone, size_t alignment,
-                                             size_t size, unsigned options)
+void* malloc_zone_malloc_with_options(void* zone, size_t alignment,
+                                      size_t size, unsigned options)
 {
 	(void)options;
 	if (alignment)
@@ -11497,14 +11514,33 @@ void* malloc_create_zone(size_t start_size, unsigned int flags)
 	return &default_malloc_zone;
 }
 
+void malloc_destroy_zone(void* zone)
+{
+	malloc_zone_destroy(zone);
+}
+
 size_t malloc_good_size(size_t size)
 {
 	return size;
 }
 
+const char* malloc_get_zone_name(void* zone)
+{
+	struct machgate_malloc_zone* machgate_zone = zone;
+
+	if (!machgate_zone)
+		machgate_zone = &default_malloc_zone;
+	return machgate_zone->zone_name;
+}
+
 void* malloc_logger = NULL;
 
 void malloc_zone_register(void* zone)
+{
+	(void)zone;
+}
+
+void malloc_zone_unregister(void* zone)
 {
 	(void)zone;
 }
@@ -11515,6 +11551,33 @@ void malloc_set_zone_name(void* zone, const char* name)
 	if (!machgate_zone)
 		return;
 	machgate_zone->zone_name = name;
+}
+
+void* malloc_zone_from_ptr(const void* ptr)
+{
+	size_t size;
+
+	if (!ptr)
+		return NULL;
+	if (lookup_allocation_size(ptr, &size))
+		return &default_malloc_zone;
+	if (malloc_usable_size((void*)ptr) > 0)
+		return &default_malloc_zone;
+	return NULL;
+}
+
+unsigned malloc_num_zones = 1;
+void* malloc_zones[] = { &default_malloc_zone };
+
+int malloc_get_all_zones(void* task, void* reader, void*** zones, unsigned* count)
+{
+	(void)task;
+	(void)reader;
+	if (zones)
+		*zones = malloc_zones;
+	if (count)
+		*count = malloc_num_zones;
+	return 0;
 }
 
 size_t malloc_size(const void* ptr)

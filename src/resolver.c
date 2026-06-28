@@ -69,36 +69,60 @@ static void zeroing_operator_delete(void *ptr)
 		free(ptr);
 }
 
+static const char *normalize_cxx_operator_symbol(const char *sym_name)
+{
+	if (sym_name && sym_name[0] == '_' && sym_name[1] == '_')
+		return sym_name + 1;
+	return sym_name;
+}
+
 static int is_operator_new_symbol(const char *sym_name)
 {
-	return strcmp(sym_name, "__Znwm") == 0 ||
-	       strcmp(sym_name, "__Znam") == 0 ||
-	       strcmp(sym_name, "__ZnwmRKSt9nothrow_t") == 0 ||
-	       strcmp(sym_name, "__ZnamRKSt9nothrow_t") == 0;
+	const char *name = normalize_cxx_operator_symbol(sym_name);
+
+	return strcmp(name, "_Znwm") == 0 ||
+	       strcmp(name, "_Znam") == 0 ||
+	       strcmp(name, "_ZnwmRKSt9nothrow_t") == 0 ||
+	       strcmp(name, "_ZnamRKSt9nothrow_t") == 0;
 }
 
 static int is_operator_new_aligned_symbol(const char *sym_name)
 {
-	return strcmp(sym_name, "__ZnwmSt11align_val_t") == 0 ||
-	       strcmp(sym_name, "__ZnamSt11align_val_t") == 0 ||
-	       strcmp(sym_name, "__ZnwmSt11align_val_tRKSt9nothrow_t") == 0 ||
-	       strcmp(sym_name, "__ZnamSt11align_val_tRKSt9nothrow_t") == 0;
+	const char *name = normalize_cxx_operator_symbol(sym_name);
+
+	return strcmp(name, "_ZnwmSt11align_val_t") == 0 ||
+	       strcmp(name, "_ZnamSt11align_val_t") == 0 ||
+	       strcmp(name, "_ZnwmSt11align_val_tRKSt9nothrow_t") == 0 ||
+	       strcmp(name, "_ZnamSt11align_val_tRKSt9nothrow_t") == 0;
 }
 
 static int is_operator_delete_symbol(const char *sym_name)
 {
-	return strcmp(sym_name, "__ZdlPv") == 0 ||
-	       strcmp(sym_name, "__ZdaPv") == 0 ||
-	       strcmp(sym_name, "__ZdlPvm") == 0 ||
-	       strcmp(sym_name, "__ZdaPvm") == 0 ||
-	       strcmp(sym_name, "__ZdlPvRKSt9nothrow_t") == 0 ||
-	       strcmp(sym_name, "__ZdaPvRKSt9nothrow_t") == 0 ||
-	       strcmp(sym_name, "__ZdlPvSt11align_val_t") == 0 ||
-	       strcmp(sym_name, "__ZdaPvSt11align_val_t") == 0 ||
-	       strcmp(sym_name, "__ZdlPvmSt11align_val_t") == 0 ||
-	       strcmp(sym_name, "__ZdaPvmSt11align_val_t") == 0 ||
-	       strcmp(sym_name, "__ZdlPvSt11align_val_tRKSt9nothrow_t") == 0 ||
-	       strcmp(sym_name, "__ZdaPvSt11align_val_tRKSt9nothrow_t") == 0;
+	const char *name = normalize_cxx_operator_symbol(sym_name);
+
+	return strcmp(name, "_ZdlPv") == 0 ||
+	       strcmp(name, "_ZdaPv") == 0 ||
+	       strcmp(name, "_ZdlPvm") == 0 ||
+	       strcmp(name, "_ZdaPvm") == 0 ||
+	       strcmp(name, "_ZdlPvRKSt9nothrow_t") == 0 ||
+	       strcmp(name, "_ZdaPvRKSt9nothrow_t") == 0 ||
+	       strcmp(name, "_ZdlPvSt11align_val_t") == 0 ||
+	       strcmp(name, "_ZdaPvSt11align_val_t") == 0 ||
+	       strcmp(name, "_ZdlPvmSt11align_val_t") == 0 ||
+	       strcmp(name, "_ZdaPvmSt11align_val_t") == 0 ||
+	       strcmp(name, "_ZdlPvSt11align_val_tRKSt9nothrow_t") == 0 ||
+	       strcmp(name, "_ZdaPvSt11align_val_tRKSt9nothrow_t") == 0;
+}
+
+static uintptr_t resolve_cxx_operator_symbol(const char *sym_name)
+{
+	if (is_operator_new_symbol(sym_name))
+		return (uintptr_t)zeroing_operator_new;
+	if (is_operator_new_aligned_symbol(sym_name))
+		return (uintptr_t)zeroing_operator_new_aligned;
+	if (is_operator_delete_symbol(sym_name))
+		return (uintptr_t)zeroing_operator_delete;
+	return 0;
 }
 
 /* ---- LuaJIT profiler hooks ----
@@ -629,6 +653,45 @@ static int is_darwin_runtime_symbol(const char* lookup_name)
 	       strcmp(lookup_name, "sigaltstack") == 0;
 }
 
+static int is_darwin_allocator_symbol(const char* lookup_name)
+{
+	return strcmp(lookup_name, "malloc") == 0 ||
+	       strcmp(lookup_name, "free") == 0 ||
+	       strcmp(lookup_name, "calloc") == 0 ||
+	       strcmp(lookup_name, "realloc") == 0 ||
+	       strcmp(lookup_name, "posix_memalign") == 0 ||
+	       strcmp(lookup_name, "memalign") == 0 ||
+	       strcmp(lookup_name, "aligned_alloc") == 0 ||
+	       strcmp(lookup_name, "valloc") == 0 ||
+	       strcmp(lookup_name, "malloc_size") == 0 ||
+	       strcmp(lookup_name, "malloc_good_size") == 0 ||
+	       strcmp(lookup_name, "malloc_default_zone") == 0 ||
+	       strcmp(lookup_name, "malloc_create_zone") == 0 ||
+	       strcmp(lookup_name, "malloc_destroy_zone") == 0 ||
+	       strcmp(lookup_name, "malloc_set_zone_name") == 0 ||
+	       strcmp(lookup_name, "malloc_get_zone_name") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_from_ptr") == 0 ||
+	       strcmp(lookup_name, "malloc_get_all_zones") == 0 ||
+	       strcmp(lookup_name, "malloc_num_zones") == 0 ||
+	       strcmp(lookup_name, "malloc_zones") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_malloc") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_calloc") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_valloc") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_realloc") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_free") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_destroy") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_size") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_batch_malloc") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_batch_free") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_memalign") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_free_definite_size") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_pressure_relief") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_claimed_address") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_malloc_with_options") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_register") == 0 ||
+	       strcmp(lookup_name, "malloc_zone_unregister") == 0;
+}
+
 static void* lookup_libsystem_symbol(struct resolver_state* rs,
                                      const char* lookup_name,
                                      const struct dylib_entry** provider)
@@ -654,7 +717,7 @@ static void* lookup_flat_symbol(struct resolver_state* rs,
                                 const char** source_kind,
                                 const char** source_path)
 {
-	if (is_darwin_runtime_symbol(lookup_name)) {
+	if (is_darwin_runtime_symbol(lookup_name) || is_darwin_allocator_symbol(lookup_name)) {
 		const struct dylib_entry* provider = NULL;
 		void* addr = lookup_libsystem_symbol(rs, lookup_name, &provider);
 		if (addr) {
@@ -1895,7 +1958,13 @@ static void resolver_complete_deferred(void)
 
 		const char* source_kind = "mapped dylib handle";
 		const char* source_path = de->so_path;
-		void* addr = dlsym(de->handle, lookup);
+		void* addr = (void*)resolve_cxx_operator_symbol(lookup);
+		if (addr) {
+			source_kind = "machgate c++ allocator hook";
+			source_path = "libsystem_shim";
+		}
+		if (!addr)
+			addr = dlsym(de->handle, lookup);
 		if (!addr && strncmp(lookup, "_ZN", 3) == 0)
 			addr = try_mangling_variants(de->handle, lookup);
 		if (!addr) {

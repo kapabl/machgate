@@ -70,10 +70,36 @@ assert buf.raw == b'\\xDE\\xAD\\xBE\\xEF' * 4, f'memset_pattern4 failed: {buf.ra
 
 lib.posix_memalign.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t]
 lib.posix_memalign.restype = ctypes.c_int
+lib.memalign.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
+lib.memalign.restype = ctypes.c_void_p
+lib.aligned_alloc.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
+lib.aligned_alloc.restype = ctypes.c_void_p
+lib.valloc.argtypes = [ctypes.c_size_t]
+lib.valloc.restype = ctypes.c_void_p
 lib.machgate_shim_memalign.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
 lib.machgate_shim_memalign.restype = ctypes.c_void_p
 lib.malloc_zone_memalign.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
 lib.malloc_zone_memalign.restype = ctypes.c_void_p
+lib.malloc_default_zone.restype = ctypes.c_void_p
+lib.malloc_create_zone.argtypes = [ctypes.c_size_t, ctypes.c_uint]
+lib.malloc_create_zone.restype = ctypes.c_void_p
+lib.malloc_get_zone_name.argtypes = [ctypes.c_void_p]
+lib.malloc_get_zone_name.restype = ctypes.c_char_p
+lib.malloc_zone_from_ptr.argtypes = [ctypes.c_void_p]
+lib.malloc_zone_from_ptr.restype = ctypes.c_void_p
+lib.malloc_zone_malloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.malloc_zone_malloc.restype = ctypes.c_void_p
+lib.malloc_zone_calloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
+lib.malloc_zone_calloc.restype = ctypes.c_void_p
+lib.malloc_zone_realloc.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+lib.malloc_zone_realloc.restype = ctypes.c_void_p
+lib.malloc_zone_free.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+lib.malloc_zone_size.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+lib.malloc_zone_size.restype = ctypes.c_size_t
+lib.malloc_zone_valloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.malloc_zone_valloc.restype = ctypes.c_void_p
+lib.malloc_zone_claimed_address.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+lib.malloc_zone_claimed_address.restype = ctypes.c_int
 lib.malloc.argtypes = [ctypes.c_size_t]
 lib.malloc.restype = ctypes.c_void_p
 lib.calloc.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
@@ -122,11 +148,55 @@ assert lib.malloc_size(memalign_ptr) >= 72, 'malloc_size returned too little for
 lib.free(memalign_ptr)
 assert lib.malloc_size(memalign_ptr) == 0, 'malloc_size did not clear after memalign free'
 
+direct_memalign_ptr = lib.memalign(64, 72)
+assert direct_memalign_ptr and direct_memalign_ptr % 64 == 0, f'direct memalign returned unaligned pointer {direct_memalign_ptr:#x}'
+assert lib.malloc_size(direct_memalign_ptr) >= 72, 'malloc_size returned too little for direct memalign allocation'
+lib.free(direct_memalign_ptr)
+assert lib.malloc_size(direct_memalign_ptr) == 0, 'malloc_size did not clear after direct memalign free'
+
+direct_aligned_ptr = lib.aligned_alloc(64, 72)
+assert direct_aligned_ptr and direct_aligned_ptr % 64 == 0, f'aligned_alloc returned unaligned pointer {direct_aligned_ptr:#x}'
+assert lib.malloc_size(direct_aligned_ptr) >= 72, 'malloc_size returned too little for aligned_alloc allocation'
+lib.free(direct_aligned_ptr)
+assert lib.malloc_size(direct_aligned_ptr) == 0, 'malloc_size did not clear after aligned_alloc free'
+
+valloc_ptr = lib.valloc(72)
+assert valloc_ptr, 'valloc failed'
+assert lib.malloc_size(valloc_ptr) >= 72, 'malloc_size returned too little for valloc allocation'
+lib.free(valloc_ptr)
+assert lib.malloc_size(valloc_ptr) == 0, 'malloc_size did not clear after valloc free'
+
 zone_memalign_ptr = lib.malloc_zone_memalign(None, 64, 72)
 assert zone_memalign_ptr and zone_memalign_ptr % 64 == 0, f'malloc_zone_memalign returned unaligned pointer {zone_memalign_ptr:#x}'
 assert lib.malloc_size(zone_memalign_ptr) >= 72, 'malloc_size returned too little for malloc_zone_memalign allocation'
 lib.free(zone_memalign_ptr)
 assert lib.malloc_size(zone_memalign_ptr) == 0, 'malloc_size did not clear after malloc_zone_memalign free'
+
+default_zone = lib.malloc_default_zone()
+assert default_zone, 'malloc_default_zone returned NULL'
+assert lib.malloc_create_zone(0, 0) == default_zone, 'malloc_create_zone did not return the default zone'
+assert lib.malloc_get_zone_name(default_zone), 'malloc_get_zone_name returned NULL'
+
+zone_ptr = lib.malloc_zone_malloc(default_zone, 72)
+assert zone_ptr, 'malloc_zone_malloc failed'
+assert lib.malloc_zone_size(default_zone, zone_ptr) >= 72, 'malloc_zone_size returned too little'
+assert lib.malloc_zone_from_ptr(zone_ptr) == default_zone, 'malloc_zone_from_ptr did not return default zone'
+assert lib.malloc_zone_claimed_address(default_zone, zone_ptr) == 1, 'malloc_zone_claimed_address did not claim live allocation'
+zone_realloc_ptr = lib.malloc_zone_realloc(default_zone, zone_ptr, 144)
+assert zone_realloc_ptr, 'malloc_zone_realloc failed'
+assert lib.malloc_zone_size(default_zone, zone_realloc_ptr) >= 144, 'malloc_zone_size returned too little after realloc'
+lib.malloc_zone_free(default_zone, zone_realloc_ptr)
+assert lib.malloc_zone_size(default_zone, zone_realloc_ptr) == 0, 'malloc_zone_size did not clear after zone free'
+
+zone_calloc_ptr = lib.malloc_zone_calloc(default_zone, 2, 36)
+assert zone_calloc_ptr, 'malloc_zone_calloc failed'
+assert lib.malloc_zone_size(default_zone, zone_calloc_ptr) >= 72, 'malloc_zone_size returned too little for zone calloc'
+lib.malloc_zone_free(default_zone, zone_calloc_ptr)
+
+zone_valloc_ptr = lib.malloc_zone_valloc(default_zone, 72)
+assert zone_valloc_ptr, 'malloc_zone_valloc failed'
+assert lib.malloc_zone_size(default_zone, zone_valloc_ptr) >= 72, 'malloc_zone_size returned too little for zone valloc'
+lib.malloc_zone_free(default_zone, zone_valloc_ptr)
 
 new_ptr = operator_new(72)
 assert new_ptr, 'operator new failed'

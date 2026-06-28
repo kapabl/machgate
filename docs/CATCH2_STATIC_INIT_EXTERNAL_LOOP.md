@@ -1186,3 +1186,69 @@ Validation:
   `29 / 29`
 - ARM64 `nm -D build-arm64/libsystem_shim.so` shows exported `_Znwm`,
   `_ZdlPvm`, and aligned operator forms
+
+## v0.3.28 Allocator Contract Follow-Up
+
+The `v0.3.27` private run still completes all static constructors and reaches
+`_main`, but aborts in the guest memory tracker:
+
+```text
+machgate: mod_init progress 707/707
+machgate: __mod_init_func constructors complete
+machgate: calling _main at 0x10094754c (argc=1)
+Memory.cpp(884) ASSERTION FAILED: rest >= size && rest <= kMaxHeapSize
+Function: trackDeallocate
+Message: rest=0, size=72
+```
+
+This moves the problem out of constructor ordering. The remaining failure shape
+is an allocator ownership mismatch after guest code starts executing.
+
+Independent audits from internal agents plus Grok and Agy agreed on the same
+generic gaps:
+
+- mapped Apple-ABI `libc++.so.1` and `libc++abi.so.1` can allocate through
+  native ELF symbols before Mach-O guest bindings reach the shim
+- flat Mach-O lookup preferred the host `RTLD_DEFAULT` path for allocator-like
+  symbols unless they were already resolved by ordinal
+- deferred binds did not use the C++ operator allocation hook path
+- several Darwin libmalloc and malloc-zone symbols existed only as internal
+  shim callbacks, so guest imports could fail or fall back incorrectly
+- direct `memalign`, `aligned_alloc`, and `valloc` symbols were not exported as
+  first-class Darwin allocator entry points
+
+Accepted fix:
+
+- normalize C++ operator symbol names so both Mach-O spellings (`__Znwm`) and
+  ELF/dlsym spellings (`_Znwm`) route through the same MachGate allocation hooks
+- use the operator hook path when completing deferred binds
+- make flat lookup prefer the mapped libSystem shim for Darwin allocator and
+  malloc-zone symbols before trying `RTLD_DEFAULT`
+- export direct `memalign`, `aligned_alloc`, and `valloc` and route them through
+  the private shim allocation helpers
+- export the minimal Darwin malloc-zone query/control surface:
+  `malloc_size`, `malloc_default_zone`, `malloc_create_zone`,
+  `malloc_destroy_zone`, `malloc_set_zone_name`, `malloc_get_zone_name`,
+  `malloc_zone_from_ptr`, `malloc_get_all_zones`, `malloc_num_zones`,
+  `malloc_zones`, and the default zone callback functions
+- add `tests/test_allocator_export_surface.sh` so release builds fail if the
+  allocator ABI surface is not exported as versioned `GLIBC_2.17` symbols
+- extend `tests/test_libsystem_shim.sh` to exercise direct alignment
+  allocation and malloc-zone allocation, size, from-ptr, claimed-address,
+  realloc, calloc, and valloc paths
+
+Validation:
+
+- native `BUILD_DIR=/home/kapablanka/repos/machgate/build bash tests/test_libsystem_shim.sh`
+  passes
+- native `BUILD_DIR=/home/kapablanka/repos/machgate/build bash tests/test_allocator_export_surface.sh`
+  passes
+- ARM64 Docker
+  `BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh` passes `30 / 30`
+
+Remaining private validation:
+
+- rerun the private `Core.UnitTest` with the next release tarball
+- if it still aborts with `rest=0, size=72`, run with
+  `MACHGATE_TRACE_ALLOC=1 MACHGATE_TRACE_ALLOC_SIZE=72 MACHGATE_TRACE_SIGNALS=1`
+  and compare whether the failing 72-byte path is now visible in shim traces
