@@ -11093,13 +11093,10 @@ static int lookup_allocation_size(const void* ptr, size_t* size_out)
 
 static size_t recorded_allocation_size(void* ptr, size_t requested_size)
 {
-	size_t usable_size = malloc_usable_size(ptr);
-
-	if (usable_size > requested_size)
-		return usable_size;
+	(void)ptr;
 	if (requested_size > 0)
 		return requested_size;
-	return usable_size ? usable_size : 1;
+	return 1;
 }
 
 static void forget_allocation(const void* ptr)
@@ -11900,21 +11897,7 @@ void malloc_destroy_zone(void* zone)
 
 size_t malloc_good_size(size_t size)
 {
-	void* ptr;
-	size_t result;
-
-	if (size == 0)
-		return 0;
-	if (!real_malloc || !real_free)
-		resolve_real_funcs();
-	if (!real_malloc || !real_free)
-		return size;
-	ptr = real_malloc(size);
-	if (!ptr)
-		return size;
-	result = malloc_usable_size(ptr);
-	real_free(ptr);
-	return result >= size ? result : size;
+	return size;
 }
 
 const char* malloc_get_zone_name(void* zone)
