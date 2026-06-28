@@ -63,6 +63,7 @@ static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, 
 static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
 static void fixup_darwin_pthread_data(struct load_results* lr);
 static void fixup_darwin_libc_allocator_defaults(struct load_results* lr);
+static void configure_guest_cxx_allocator_hooks(struct load_results* lr);
 static void setup_tlv_image(struct load_results* lr);
 static int native_prot(int prot);
 static void setup_space(struct load_results* lr, bool is_64_bit);
@@ -1074,6 +1075,7 @@ int main(int argc, char** argv, char** envp)
 		if (machgate_load_results.mh) {
 			fixup_darwin_pthread_data(&machgate_load_results);
 			fixup_darwin_libc_allocator_defaults(&machgate_load_results);
+			configure_guest_cxx_allocator_hooks(&machgate_load_results);
 			setup_tlv_image(&machgate_load_results);
 			eh_frame_register_macho((void*)machgate_load_results.mh,
 			                        machgate_load_results.slide);
@@ -1091,6 +1093,7 @@ int main(int argc, char** argv, char** envp)
 	if (machgate_load_results.mh && !cfg.dylib_map) {
 		fixup_darwin_pthread_data(&machgate_load_results);
 		fixup_darwin_libc_allocator_defaults(&machgate_load_results);
+		configure_guest_cxx_allocator_hooks(&machgate_load_results);
 		setup_tlv_image(&machgate_load_results);
 		eh_frame_register_macho((void*)machgate_load_results.mh,
 		                        machgate_load_results.slide);
@@ -1581,6 +1584,105 @@ static void fixup_darwin_libc_allocator_defaults(struct load_results* lr)
 	if (fixed > 0)
 		fprintf(stderr, "machgate: initialized %d Darwin libc allocator defaults\n",
 		        fixed);
+}
+
+static uintptr_t lookup_guest_symbol(struct load_results* lr,
+                                     const char* const* names,
+                                     size_t count)
+{
+	for (size_t index = 0; index < count; index++) {
+		uintptr_t result = resolver_lookup_symbol((void*)lr->mh, lr->slide,
+		                                          names[index]);
+		if (result)
+			return result;
+		if (names[index][0] == '_' && names[index][1] == '_') {
+			result = resolver_lookup_symbol((void*)lr->mh, lr->slide,
+			                                names[index] + 1);
+			if (result)
+				return result;
+		}
+	}
+	return 0;
+}
+
+static uintptr_t lookup_guest_symbol_name(struct load_results* lr,
+                                          const char* name)
+{
+	const char* names[] = { name };
+
+	return lookup_guest_symbol(lr, names, 1);
+}
+
+static void configure_guest_cxx_allocator_hooks(struct load_results* lr)
+{
+	typedef void (*set_guest_cxx_allocators_fn)(void*, void*, void*, void*,
+	                                           void*, void*, void*, void*,
+	                                           void*, void*, void*, void*);
+	static const char* operator_new_names[] = {
+		"__Znwm",
+		"__ZN3RBX6Memory20allocateOrReturnNullEm",
+	};
+	static const char* operator_new_array_names[] = {
+		"__Znam",
+		"__ZN3RBX6Memory20allocateOrReturnNullEm",
+	};
+	static const char* operator_delete_names[] = {
+		"__ZdlPv",
+		"__ZN3RBX6Memory10deallocateEPv",
+	};
+	static const char* operator_delete_array_names[] = {
+		"__ZdaPv",
+		"__ZN3RBX6Memory10deallocateEPv",
+	};
+	set_guest_cxx_allocators_fn setter =
+	    (set_guest_cxx_allocators_fn)dlsym(RTLD_DEFAULT,
+	                                       "machgate_shim_set_guest_cxx_allocators");
+	if (!setter)
+		return;
+
+	uintptr_t operator_new = lookup_guest_symbol(
+	    lr, operator_new_names,
+	    sizeof(operator_new_names) / sizeof(operator_new_names[0]));
+	uintptr_t operator_new_array = lookup_guest_symbol(
+	    lr, operator_new_array_names,
+	    sizeof(operator_new_array_names) / sizeof(operator_new_array_names[0]));
+	uintptr_t operator_new_aligned =
+	    lookup_guest_symbol_name(lr, "__ZnwmSt11align_val_t");
+	uintptr_t operator_new_array_aligned =
+	    lookup_guest_symbol_name(lr, "__ZnamSt11align_val_t");
+	uintptr_t operator_delete = lookup_guest_symbol(
+	    lr, operator_delete_names,
+	    sizeof(operator_delete_names) / sizeof(operator_delete_names[0]));
+	uintptr_t operator_delete_array = lookup_guest_symbol(
+	    lr, operator_delete_array_names,
+	    sizeof(operator_delete_array_names) / sizeof(operator_delete_array_names[0]));
+	uintptr_t operator_delete_sized =
+	    lookup_guest_symbol_name(lr, "__ZdlPvm");
+	uintptr_t operator_delete_array_sized =
+	    lookup_guest_symbol_name(lr, "__ZdaPvm");
+	uintptr_t operator_delete_aligned =
+	    lookup_guest_symbol_name(lr, "__ZdlPvSt11align_val_t");
+	uintptr_t operator_delete_array_aligned =
+	    lookup_guest_symbol_name(lr, "__ZdaPvSt11align_val_t");
+	uintptr_t operator_delete_sized_aligned =
+	    lookup_guest_symbol_name(lr, "__ZdlPvmSt11align_val_t");
+	uintptr_t operator_delete_array_sized_aligned =
+	    lookup_guest_symbol_name(lr, "__ZdaPvmSt11align_val_t");
+
+	setter((void*)operator_new, (void*)operator_new_array,
+	       (void*)operator_new_aligned, (void*)operator_new_array_aligned,
+	       (void*)operator_delete, (void*)operator_delete_array,
+	       (void*)operator_delete_sized, (void*)operator_delete_array_sized,
+	       (void*)operator_delete_aligned, (void*)operator_delete_array_aligned,
+	       (void*)operator_delete_sized_aligned,
+	       (void*)operator_delete_array_sized_aligned);
+
+	if (operator_new || operator_delete) {
+		fprintf(stderr,
+		        "machgate: guest C++ allocator bridge new=%p delete=%p new[]=%p delete[]=%p\n",
+		        (void*)operator_new, (void*)operator_delete,
+		        (void*)operator_new_array, (void*)operator_delete_array);
+	}
 }
 
 /*

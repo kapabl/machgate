@@ -46,6 +46,21 @@ check_library()
             exit 1
         fi
     done
+
+    for symbol in machgate_shim_guest_operator_new machgate_shim_guest_operator_delete; do
+        if ! nm -D --undefined-only "$path" | awk -v symbol="$symbol" '
+            {
+                name = $NF
+                sub(/@.*/, "", name)
+                if (name == symbol)
+                    found = 1
+            }
+            END { exit !found }
+        '; then
+            echo "$path is not linked through $symbol" >&2
+            exit 1
+        fi
+    done
 }
 
 check_library libc++.so.1.0

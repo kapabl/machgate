@@ -27,6 +27,17 @@ for symbol in \
     malloc_zone_free_definite_size malloc_zone_pressure_relief \
     malloc_zone_claimed_address malloc_zone_malloc_with_options \
     malloc_zone_register malloc_zone_unregister \
+    machgate_shim_set_guest_cxx_allocators \
+    machgate_shim_guest_operator_new machgate_shim_guest_operator_new_array \
+    machgate_shim_guest_operator_new_aligned \
+    machgate_shim_guest_operator_new_array_aligned \
+    machgate_shim_guest_operator_delete machgate_shim_guest_operator_delete_array \
+    machgate_shim_guest_operator_delete_sized \
+    machgate_shim_guest_operator_delete_array_sized \
+    machgate_shim_guest_operator_delete_aligned \
+    machgate_shim_guest_operator_delete_array_aligned \
+    machgate_shim_guest_operator_delete_sized_aligned \
+    machgate_shim_guest_operator_delete_array_sized_aligned \
     _Znwm _Znam _ZnwmRKSt9nothrow_t _ZnamRKSt9nothrow_t \
     _ZnwmSt11align_val_t _ZnamSt11align_val_t \
     _ZnwmSt11align_val_tRKSt9nothrow_t _ZnamSt11align_val_tRKSt9nothrow_t \
