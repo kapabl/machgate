@@ -1024,3 +1024,43 @@ scripts/run-macho-docker.sh /path/to/Core.UnitTest
 
 The runner now passes every `MACHGATE_TRACE_*` variable through dynamically and
 maps `libc++.1.dylib` when `MACHGATE_LIBCXX` is set.
+
+## v0.3.21 Private Run Follow-Up
+
+The private `Core.UnitTest` run with `v0.3.21` reached a new milestone:
+
+- all `707 / 707` `__mod_init_func` static constructors completed
+- MachGate changed directory to `/input`
+- MachGate called `_main`
+- the LC_MAIN ABI stack/argv/envp/apple vectors were visible and coherent
+
+The remaining failure moved out of loader initialization and into guest runtime
+allocator accounting:
+
+```text
+Memory.cpp(884) ASSERTION FAILED: rest >= size && rest <= kMaxHeapSize
+Function: trackDeallocate
+Message: rest=0, size=72, kMaxHeapSize=9223372036854775807
+```
+
+Interpretation:
+
+- This is no longer the `mod_init[3/707]` libc++ tree initialization crash.
+- The binary is now executing its own runtime code in `_main`.
+- The allocator surface is still incomplete: Darwin code expects
+  `malloc_size(ptr)` and the malloc-zone callbacks to report a valid allocation
+  size for pointers allocated through the shim.
+
+Accepted fix direction:
+
+- Keep treating this as a loader/runtime contract issue, not a
+  private-binary-specific repair.
+- Track MachGate-owned allocation sizes inside `libsystem_shim`.
+- Apply the tracking uniformly across `malloc`, `calloc`, `realloc`,
+  `posix_memalign`, `memalign`, and `valloc`.
+- Make `malloc_size(ptr)` return the recorded size for live shim allocations and
+  `0` after those pointers are freed.
+
+The direct regression test is `tests/test_libsystem_shim.sh`, which now checks
+that `malloc_size` reports nonzero sizes for normal, aligned, and reallocated
+shim allocations and returns `0` after free.

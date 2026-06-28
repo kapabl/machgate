@@ -10812,10 +10812,112 @@ static real_calloc_fn  real_calloc  = NULL;
 static real_realloc_fn real_realloc = NULL;
 static real_posix_memalign_fn real_posix_memalign = NULL;
 
-/* Bootstrap: dlsym itself may call malloc, so we need a tiny fallback
- * allocator for the very first calls before dlsym resolves. */
 static char bootstrap_buf[4096];
 static int bootstrap_pos = 0;
+
+#define MACHGATE_ALLOCATION_TABLE_SIZE 16384
+
+struct machgate_allocation_record {
+	void* ptr;
+	size_t size;
+};
+
+static struct machgate_allocation_record allocation_records[MACHGATE_ALLOCATION_TABLE_SIZE];
+
+static size_t allocation_record_index(const void* ptr)
+{
+	uintptr_t value = (uintptr_t)ptr;
+
+	value >>= 4;
+	value ^= value >> 17;
+	value ^= value >> 31;
+	return value & (MACHGATE_ALLOCATION_TABLE_SIZE - 1);
+}
+
+static void record_allocation(void* ptr, size_t size)
+{
+	size_t index;
+	struct machgate_allocation_record* reusable_record = NULL;
+
+	if (!ptr)
+		return;
+
+	index = allocation_record_index(ptr);
+	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
+		struct machgate_allocation_record* record =
+		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
+
+		if (record->ptr == ptr) {
+			record->ptr = ptr;
+			record->size = size;
+			return;
+		}
+		if (record->ptr && record->size == 0 && !reusable_record)
+			reusable_record = record;
+		if (!record->ptr) {
+			if (reusable_record)
+				record = reusable_record;
+			record->ptr = ptr;
+			record->size = size;
+			return;
+		}
+	}
+}
+
+static int lookup_allocation_size(const void* ptr, size_t* size_out)
+{
+	size_t index;
+
+	if (!ptr)
+		return 0;
+
+	index = allocation_record_index(ptr);
+	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
+		const struct machgate_allocation_record* record =
+		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
+
+		if (!record->ptr)
+			return 0;
+		if (record->ptr == ptr) {
+			*size_out = record->size;
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static size_t recorded_allocation_size(void* ptr, size_t requested_size)
+{
+	size_t usable_size = malloc_usable_size(ptr);
+
+	if (usable_size > requested_size)
+		return usable_size;
+	if (requested_size > 0)
+		return requested_size;
+	return usable_size ? usable_size : 1;
+}
+
+static void forget_allocation(const void* ptr)
+{
+	size_t index;
+
+	if (!ptr)
+		return;
+
+	index = allocation_record_index(ptr);
+	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
+		struct machgate_allocation_record* record =
+		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
+
+		if (!record->ptr)
+			return;
+		if (record->ptr == ptr) {
+			record->size = 0;
+			return;
+		}
+	}
+}
 
 static void resolve_real_funcs(void)
 {
@@ -10833,22 +10935,25 @@ void *shim_malloc(size_t size)
 {
 	if (!real_malloc) {
 		resolve_real_funcs();
-		if (!real_malloc) {
-			/* Bootstrap: return zeroed memory from static buffer */
-			int aligned = (bootstrap_pos + 15) & ~15;
-			if (aligned + (int)size <= (int)sizeof(bootstrap_buf)) {
-				void *p = bootstrap_buf + aligned;
-				memset(p, 0, size);
-				bootstrap_pos = aligned + size;
-				return p;
+			if (!real_malloc) {
+				/* Bootstrap: return zeroed memory from static buffer */
+				int aligned = (bootstrap_pos + 15) & ~15;
+				if (aligned + (int)size <= (int)sizeof(bootstrap_buf)) {
+					void *p = bootstrap_buf + aligned;
+					memset(p, 0, size);
+					bootstrap_pos = aligned + size;
+					record_allocation(p, size ? size : 1);
+					return p;
+				}
+				return NULL;
 			}
-			return NULL;
 		}
-	}
 	/* macOS malloc returns zeroed pages — zero-init for compatibility. */
 	void *p = real_malloc(size);
-	if (p)
+	if (p) {
 		memset(p, 0, size);
+		record_allocation(p, recorded_allocation_size(p, size));
+	}
 	return p;
 }
 
@@ -10856,6 +10961,7 @@ void shim_free(void *ptr) __asm__("free");
 void shim_free(void *ptr)
 {
 	if (!ptr) return;
+	forget_allocation(ptr);
 	/* Don't free bootstrap allocations */
 	if ((char *)ptr >= bootstrap_buf &&
 	    (char *)ptr < bootstrap_buf + sizeof(bootstrap_buf))
@@ -10882,15 +10988,35 @@ void *shim_calloc(size_t nmemb, size_t size)
 		}
 	}
 	void *p = real_calloc(nmemb, size);
+	if (p)
+		record_allocation(p, recorded_allocation_size(p, nmemb * size));
 	return p;
 }
 
 void *shim_realloc(void *ptr, size_t size) __asm__("realloc");
 void *shim_realloc(void *ptr, size_t size)
 {
+	size_t old_size = 0;
+
+	if (ptr && (char *)ptr >= bootstrap_buf &&
+	    (char *)ptr < bootstrap_buf + sizeof(bootstrap_buf)) {
+		lookup_allocation_size(ptr, &old_size);
+		void* new_ptr = shim_malloc(size);
+		if (!new_ptr && size != 0)
+			return NULL;
+		if (new_ptr && old_size)
+			memcpy(new_ptr, ptr, old_size < size ? old_size : size);
+		forget_allocation(ptr);
+		return new_ptr;
+	}
+
 	if (!real_realloc) resolve_real_funcs();
 	if (!real_realloc) return NULL;
 	void *new_ptr = real_realloc(ptr, size);
+	if (new_ptr || size == 0)
+		forget_allocation(ptr);
+	if (new_ptr)
+		record_allocation(new_ptr, recorded_allocation_size(new_ptr, size));
 	return new_ptr;
 }
 
@@ -10905,7 +11031,10 @@ int shim_posix_memalign(void **memptr, size_t alignment, size_t size)
 		resolve_real_funcs();
 	if (!real_posix_memalign)
 		return ENOMEM;
-	return real_posix_memalign(memptr, alignment, size);
+	int result = real_posix_memalign(memptr, alignment, size);
+	if (result == 0)
+		record_allocation(*memptr, recorded_allocation_size(*memptr, size));
+	return result;
 }
 
 size_t malloc_size(const void* ptr);
@@ -11159,7 +11288,11 @@ void malloc_set_zone_name(void* zone, const char* name)
 
 size_t malloc_size(const void* ptr)
 {
+	size_t size = 0;
+
 	if (!ptr)
 		return 0;
+	if (lookup_allocation_size(ptr, &size))
+		return size;
 	return malloc_usable_size((void*)ptr);
 }

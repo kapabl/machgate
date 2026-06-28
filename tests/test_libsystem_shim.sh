@@ -70,11 +70,37 @@ assert buf.raw == b'\\xDE\\xAD\\xBE\\xEF' * 4, f'memset_pattern4 failed: {buf.ra
 
 lib.posix_memalign.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t]
 lib.posix_memalign.restype = ctypes.c_int
+lib.malloc.argtypes = [ctypes.c_size_t]
+lib.malloc.restype = ctypes.c_void_p
+lib.calloc.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
+lib.calloc.restype = ctypes.c_void_p
+lib.realloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.realloc.restype = ctypes.c_void_p
 lib.free.argtypes = [ctypes.c_void_p]
+lib.malloc_size.argtypes = [ctypes.c_void_p]
+lib.malloc_size.restype = ctypes.c_size_t
+
+heap_ptr = lib.malloc(72)
+assert heap_ptr, 'malloc failed'
+assert lib.malloc_size(heap_ptr) >= 72, 'malloc_size returned too little for malloc allocation'
+lib.free(heap_ptr)
+assert lib.malloc_size(heap_ptr) == 0, 'malloc_size did not clear after free'
+
+calloc_ptr = lib.calloc(3, 17)
+assert calloc_ptr, 'calloc failed'
+assert lib.malloc_size(calloc_ptr) >= 51, 'malloc_size returned too little for calloc allocation'
+realloc_ptr = lib.realloc(calloc_ptr, 123)
+assert realloc_ptr, 'realloc failed'
+assert lib.malloc_size(realloc_ptr) >= 123, 'malloc_size returned too little after realloc'
+lib.free(realloc_ptr)
+assert lib.malloc_size(realloc_ptr) == 0, 'malloc_size did not clear after realloc/free'
+
 aligned = ctypes.c_void_p()
 assert lib.posix_memalign(ctypes.byref(aligned), 64, 129) == 0, 'posix_memalign failed'
 assert aligned.value and aligned.value % 64 == 0, f'posix_memalign returned unaligned pointer {aligned.value:#x}'
+assert lib.malloc_size(aligned) >= 129, 'malloc_size returned too little for aligned allocation'
 lib.free(aligned)
+assert lib.malloc_size(aligned) == 0, 'malloc_size did not clear after aligned free'
 
 # Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates
 # names such as auto_start_dbg through std::isalnum, which reaches ___maskrune.
