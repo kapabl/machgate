@@ -1252,3 +1252,43 @@ Remaining private validation:
 - if it still aborts with `rest=0, size=72`, run with
   `MACHGATE_TRACE_ALLOC=1 MACHGATE_TRACE_ALLOC_SIZE=72 MACHGATE_TRACE_SIGNALS=1`
   and compare whether the failing 72-byte path is now visible in shim traces
+
+## v0.3.29 Guest Operator Allocation Follow-Up
+
+The `v0.3.28` private run still completes all static constructors and reaches
+`_main`, then aborts in `Memory.cpp(884) trackDeallocate` with
+`rest=0, size=72`.
+
+The new hypothesis is stricter than the `v0.3.28` allocator export fix:
+
+- some C++ binaries define their own global `operator new/delete` in the main
+  Mach-O executable
+- those operators can be backed by the program's own memory tracker
+- MachGate's resolver was intercepting imported C++ operator symbols before it
+  checked whether the main executable defined the same symbol
+- that can allocate through the shim while deallocating through the guest
+  tracker, which matches `trackDeallocate(rest=0)`
+
+Accepted fix:
+
+- normalize C++ operator symbols as before, but resolve the main executable's
+  own symbol table first
+- use MachGate's zeroing/shim allocator hook only when the guest Mach-O does not
+  define the requested C++ operator
+- apply the same rule to chained fixups, LC_DYLD_INFO binds, and deferred binds
+- preserve trace binding source labels so `MACHGATE_TRACE_BINDINGS=1` can show
+  whether a C++ operator bind used `main executable` or
+  `machgate c++ allocator hook`
+
+Validation:
+
+- native allocator export and shim tests pass
+- ARM64 Docker `BUILD_DIR=/work/build-arm64 bash tests/run_tests.sh` passes
+  `30 / 30`
+
+Expected private validation:
+
+- rerun `Core.UnitTest` with `v0.3.29`
+- if it still fails, rerun with
+  `MACHGATE_TRACE_BINDINGS=1 MACHGATE_TRACE_ALLOC=1 MACHGATE_TRACE_ALLOC_SIZE=72`
+  and inspect `*_Znwm`, `*_Znam`, `*_Zdl*` binding source lines
