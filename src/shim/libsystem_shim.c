@@ -8874,7 +8874,7 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		        (void*)trace_ucontext_reg(ucontext, 6),
 		        (void*)trace_ucontext_reg(ucontext, 7),
 		        (void*)trace_ucontext_reg(ucontext, 8),
-			        (void*)trace_ucontext_reg(ucontext, 16));
+		        (void*)trace_ucontext_reg(ucontext, 16));
 		fprintf(stderr,
 		        "libsystem_shim: guest regs x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p\n",
 		        (void*)trace_ucontext_reg(ucontext, 19),
@@ -8887,13 +8887,13 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		        (void*)trace_ucontext_reg(ucontext, 26),
 		        (void*)trace_ucontext_reg(ucontext, 27),
 		        (void*)trace_ucontext_reg(ucontext, 28));
+		trace_signal_faulting_load_context(pc, ucontext);
+		trace_signal_tree_insert_context(pc, ucontext);
 		trace_guest_address_context("signal.pc", pc);
 		trace_guest_address_context("signal.lr", lr);
 		if (lr >= 4)
 			trace_guest_address_context("signal.lr-4", lr - 4);
 		trace_signal_register_context(ucontext);
-		trace_signal_faulting_load_context(pc, ucontext);
-		trace_signal_tree_insert_context(pc, ucontext);
 	}
 
 	if (signum > 0 && signum < _NSIG) {
