@@ -11212,7 +11212,7 @@ static real_posix_memalign_fn real_posix_memalign = NULL;
 static char bootstrap_buf[4096];
 static int bootstrap_pos = 0;
 
-#define MACHGATE_ALLOCATION_TABLE_SIZE 16384
+#define MACHGATE_ALLOCATION_TABLE_SIZE 262144
 
 struct machgate_allocation_record {
 	void* ptr;
@@ -11262,6 +11262,14 @@ static void record_allocation_with_zone(void* ptr, size_t size, void* zone)
 			return;
 		}
 	}
+	if (reusable_record) {
+		reusable_record->ptr = ptr;
+		reusable_record->size = size;
+		reusable_record->zone = zone;
+		return;
+	}
+	fprintf(stderr, "libsystem_shim: WARNING: allocation ledger full, dropping ptr=%p size=%zu zone=%p\n",
+	        ptr, size, zone);
 }
 
 static void record_allocation(void* ptr, size_t size)
@@ -11311,7 +11319,6 @@ static size_t recorded_allocation_size(void* ptr, size_t requested_size)
 static void forget_allocation(const void* ptr)
 {
 	size_t index;
-	struct machgate_allocation_record* reusable_record = NULL;
 
 	if (!ptr)
 		return;
@@ -11321,16 +11328,8 @@ static void forget_allocation(const void* ptr)
 		struct machgate_allocation_record* record =
 		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
 
-		if (record->ptr && record->size == 0 && !reusable_record)
-			reusable_record = record;
-		if (!record->ptr) {
-			if (reusable_record)
-				record = reusable_record;
-			record->ptr = (void*)ptr;
-			record->size = 0;
-			record->zone = NULL;
+		if (!record->ptr)
 			return;
-		}
 		if (record->ptr == ptr) {
 			record->size = 0;
 			record->zone = NULL;
@@ -12186,11 +12185,8 @@ size_t malloc_size(const void* ptr)
 
 	if (!ptr)
 		return 0;
-	if (lookup_allocation_size(ptr, &size)) {
-		if (size == 0 && shim_alloc_trace_enabled())
-			fprintf(stderr, "libsystem_shim: malloc_size zero tracked-freed ptr=%p\n", ptr);
+	if (lookup_allocation_size(ptr, &size) && size != 0)
 		return size;
-	}
 	result = malloc_usable_size((void*)ptr);
 	if (result == 0 && shim_alloc_trace_enabled())
 		fprintf(stderr, "libsystem_shim: malloc_size zero foreign ptr=%p\n", ptr);

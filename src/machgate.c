@@ -1540,18 +1540,18 @@ static int fixup_darwin_allocator_slot(struct load_results* lr,
 	}
 
 	uintptr_t current = *(uintptr_t*)slot;
-	if (current) {
+	if (current == (uintptr_t)replacement) {
 		if (machgate_verbose)
-			fprintf(stderr, "machgate: Darwin allocator default %s already 0x%lx\n",
-			        slot_name, current);
+			fprintf(stderr, "machgate: Darwin allocator default %s already %p\n",
+			        slot_name, (void*)current);
 		return 0;
 	}
 
 	if (!write_pointer_slot(slot, (uintptr_t)replacement))
 		return 0;
 
-	fprintf(stderr, "machgate: Darwin allocator default %s -> %p\n",
-	        slot_name, replacement);
+	fprintf(stderr, "machgate: Darwin allocator default %s 0x%lx -> %p\n",
+	        slot_name, current, replacement);
 	return 1;
 }
 

@@ -141,7 +141,6 @@ heap_ptr = lib.malloc(72)
 assert heap_ptr, 'malloc failed'
 assert lib.malloc_size(heap_ptr) >= 72, 'malloc_size returned too little for malloc allocation'
 lib.free(heap_ptr)
-assert lib.malloc_size(heap_ptr) == 0, 'malloc_size did not clear after free'
 
 calloc_ptr = lib.calloc(3, 17)
 assert calloc_ptr, 'calloc failed'
@@ -150,44 +149,37 @@ realloc_ptr = lib.realloc(calloc_ptr, 123)
 assert realloc_ptr, 'realloc failed'
 assert lib.malloc_size(realloc_ptr) >= 123, 'malloc_size returned too little after realloc'
 lib.free(realloc_ptr)
-assert lib.malloc_size(realloc_ptr) == 0, 'malloc_size did not clear after realloc/free'
 
 aligned = ctypes.c_void_p()
 assert lib.posix_memalign(ctypes.byref(aligned), 64, 129) == 0, 'posix_memalign failed'
 assert aligned.value and aligned.value % 64 == 0, f'posix_memalign returned unaligned pointer {aligned.value:#x}'
 assert lib.malloc_size(aligned) >= 129, 'malloc_size returned too little for aligned allocation'
 lib.free(aligned)
-assert lib.malloc_size(aligned) == 0, 'malloc_size did not clear after aligned free'
 
 memalign_ptr = lib.machgate_shim_memalign(64, 72)
 assert memalign_ptr and memalign_ptr % 64 == 0, f'memalign returned unaligned pointer {memalign_ptr:#x}'
 assert lib.malloc_size(memalign_ptr) >= 72, 'malloc_size returned too little for memalign allocation'
 lib.free(memalign_ptr)
-assert lib.malloc_size(memalign_ptr) == 0, 'malloc_size did not clear after memalign free'
 
 direct_memalign_ptr = lib.memalign(64, 72)
 assert direct_memalign_ptr and direct_memalign_ptr % 64 == 0, f'direct memalign returned unaligned pointer {direct_memalign_ptr:#x}'
 assert lib.malloc_size(direct_memalign_ptr) >= 72, 'malloc_size returned too little for direct memalign allocation'
 lib.free(direct_memalign_ptr)
-assert lib.malloc_size(direct_memalign_ptr) == 0, 'malloc_size did not clear after direct memalign free'
 
 direct_aligned_ptr = lib.aligned_alloc(64, 72)
 assert direct_aligned_ptr and direct_aligned_ptr % 64 == 0, f'aligned_alloc returned unaligned pointer {direct_aligned_ptr:#x}'
 assert lib.malloc_size(direct_aligned_ptr) >= 72, 'malloc_size returned too little for aligned_alloc allocation'
 lib.free(direct_aligned_ptr)
-assert lib.malloc_size(direct_aligned_ptr) == 0, 'malloc_size did not clear after aligned_alloc free'
 
 valloc_ptr = lib.valloc(72)
 assert valloc_ptr, 'valloc failed'
 assert lib.malloc_size(valloc_ptr) >= 72, 'malloc_size returned too little for valloc allocation'
 lib.free(valloc_ptr)
-assert lib.malloc_size(valloc_ptr) == 0, 'malloc_size did not clear after valloc free'
 
 zone_memalign_ptr = lib.malloc_zone_memalign(None, 64, 72)
 assert zone_memalign_ptr and zone_memalign_ptr % 64 == 0, f'malloc_zone_memalign returned unaligned pointer {zone_memalign_ptr:#x}'
 assert lib.malloc_size(zone_memalign_ptr) >= 72, 'malloc_size returned too little for malloc_zone_memalign allocation'
 lib.free(zone_memalign_ptr)
-assert lib.malloc_size(zone_memalign_ptr) == 0, 'malloc_size did not clear after malloc_zone_memalign free'
 
 default_zone = lib.malloc_default_zone()
 assert default_zone, 'malloc_default_zone returned NULL'
@@ -203,7 +195,6 @@ zone_realloc_ptr = lib.malloc_zone_realloc(default_zone, zone_ptr, 144)
 assert zone_realloc_ptr, 'malloc_zone_realloc failed'
 assert lib.malloc_zone_size(default_zone, zone_realloc_ptr) >= 144, 'malloc_zone_size returned too little after realloc'
 lib.malloc_zone_free(default_zone, zone_realloc_ptr)
-assert lib.malloc_zone_size(default_zone, zone_realloc_ptr) == 0, 'malloc_zone_size did not clear after zone free'
 
 zone_calloc_ptr = lib.malloc_zone_calloc(default_zone, 2, 36)
 assert zone_calloc_ptr, 'malloc_zone_calloc failed'
@@ -225,6 +216,18 @@ host_libc.realloc.restype = ctypes.c_void_p
 host_libc.free.argtypes = [ctypes.c_void_p]
 host_libc.posix_memalign.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t]
 host_libc.posix_memalign.restype = ctypes.c_int
+
+shim_reuse_ptrs = [lib.malloc(72) for _ in range(64)]
+for ptr in shim_reuse_ptrs:
+    assert ptr, 'reuse-prime malloc failed'
+    lib.free(ptr)
+host_reuse_ptrs = [host_libc.malloc(72) for _ in range(64)]
+reused_ptrs = set(shim_reuse_ptrs) & set(host_reuse_ptrs)
+assert reused_ptrs, 'host allocator did not reuse any shim-freed addresses'
+for ptr in reused_ptrs:
+    assert lib.malloc_size(ptr) >= 72, f'malloc_size returned zero for reused live address {ptr:#x}'
+for ptr in host_reuse_ptrs:
+    host_libc.free(ptr)
 
 ZONE_SIZE = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p)
 ZONE_MALLOC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)
@@ -368,13 +371,23 @@ custom_zone_ptr = ctypes.cast(ctypes.byref(custom_zone), ctypes.c_void_p)
 lib.malloc_zone_register(custom_zone_ptr)
 assert lib.malloc_get_zone_name(custom_zone_ptr) == b'custom test zone', 'custom zone name not preserved'
 
+stress_free_start = custom_counts['free']
+stress_ptrs = [lib.malloc_zone_malloc(custom_zone_ptr, 72) for _ in range(20000)]
+assert all(stress_ptrs), 'custom zone stress allocation failed'
+for ptr in stress_ptrs:
+    assert lib.malloc_zone_size(custom_zone_ptr, ptr) == 72, 'custom zone stress size was not preserved'
+for ptr in stress_ptrs:
+    lib.malloc_zone_free(None, ptr)
+assert custom_counts['free'] == stress_free_start + len(stress_ptrs), 'custom zone ownership was lost under allocation-table pressure'
+
+custom_malloc_start = custom_counts['malloc']
 custom_ptr = lib.malloc_zone_malloc(custom_zone_ptr, 72)
-assert custom_ptr and custom_counts['malloc'] == 1, 'custom malloc zone callback was not used'
+assert custom_ptr and custom_counts['malloc'] == custom_malloc_start + 1, 'custom malloc zone callback was not used'
 assert lib.malloc_zone_size(custom_zone_ptr, custom_ptr) == 72, 'custom zone size callback was not used'
 assert lib.malloc_zone_from_ptr(custom_ptr) == custom_zone_ptr.value, 'custom zone ownership was not recorded'
 assert lib.malloc_zone_claimed_address(custom_zone_ptr, custom_ptr) == 1, 'custom zone did not claim allocation'
 lib.malloc_zone_free(None, custom_ptr)
-assert custom_counts['free'] == 1, 'custom zone free callback was not used through recorded ownership'
+assert custom_counts['free'] == stress_free_start + len(stress_ptrs) + 1, 'custom zone free callback was not used through recorded ownership'
 
 custom_ptr = lib.malloc_zone_calloc(custom_zone_ptr, 2, 36)
 assert custom_ptr and custom_counts['calloc'] == 1, 'custom calloc zone callback was not used'
@@ -393,13 +406,11 @@ new_ptr = operator_new(72)
 assert new_ptr, 'operator new failed'
 assert lib.malloc_size(new_ptr) >= 72, 'malloc_size returned too little for operator new allocation'
 operator_delete_sized(new_ptr, 72)
-assert lib.malloc_size(new_ptr) == 0, 'malloc_size did not clear after sized operator delete'
 
 aligned_new_ptr = operator_new_aligned(72, 64)
 assert aligned_new_ptr and aligned_new_ptr % 64 == 0, f'aligned operator new returned unaligned pointer {aligned_new_ptr:#x}'
 assert lib.malloc_size(aligned_new_ptr) >= 72, 'malloc_size returned too little for aligned operator new allocation'
 operator_delete_aligned_sized(aligned_new_ptr, 72, 64)
-assert lib.malloc_size(aligned_new_ptr) == 0, 'malloc_size did not clear after sized aligned operator delete'
 
 # Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates
 # names such as auto_start_dbg through std::isalnum, which reaches ___maskrune.
