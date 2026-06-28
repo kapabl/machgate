@@ -6967,6 +6967,15 @@ static void trace_signal_register_context(void* ucontext)
 	}
 	if (trace_ucontext_reg(ucontext, 8))
 		trace_guest_address_context("signal.x8", trace_ucontext_reg(ucontext, 8));
+	for (int reg = 19; reg <= 28; reg++) {
+		char label[32];
+		uintptr_t value = trace_ucontext_reg(ucontext, reg);
+
+		if (!value)
+			continue;
+		snprintf(label, sizeof(label), "signal.x%d", reg);
+		trace_guest_address_context(label, value);
+	}
 }
 
 static void trace_signal_tree_insert_context(uintptr_t pc, void* ucontext)
@@ -10899,6 +10908,9 @@ int shim_posix_memalign(void **memptr, size_t alignment, size_t size)
 	return real_posix_memalign(memptr, alignment, size);
 }
 
+size_t malloc_size(const void* ptr);
+size_t malloc_good_size(size_t size);
+
 void* machgate_shim_malloc(size_t size)
 {
 	return shim_malloc(size);
@@ -10919,6 +10931,39 @@ void machgate_shim_free(void* ptr)
 	shim_free(ptr);
 }
 
+int machgate_shim_posix_memalign(void** memptr, size_t alignment, size_t size)
+{
+	return shim_posix_memalign(memptr, alignment, size);
+}
+
+void* machgate_shim_memalign(size_t alignment, size_t size)
+{
+	void* result = NULL;
+
+	if (shim_posix_memalign(&result, alignment, size) != 0)
+		return NULL;
+	return result;
+}
+
+void* machgate_shim_valloc(size_t size)
+{
+	size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+
+	if (page_size == 0)
+		page_size = 4096;
+	return machgate_shim_memalign(page_size, size);
+}
+
+size_t machgate_shim_malloc_size(const void* ptr)
+{
+	return malloc_size(ptr);
+}
+
+size_t machgate_shim_malloc_good_size(size_t size)
+{
+	return malloc_good_size(size);
+}
+
 void* malloc_zone_malloc(void* zone, size_t size)
 {
 	(void)zone;
@@ -10936,8 +10981,6 @@ void malloc_zone_free(void* zone, void* ptr)
 	(void)zone;
 	shim_free(ptr);
 }
-
-size_t malloc_size(const void* ptr);
 
 static size_t malloc_zone_size(void* zone, const void* ptr)
 {

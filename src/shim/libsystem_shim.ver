@@ -392,6 +392,11 @@ GLIBC_2.17 {
         machgate_shim_calloc;
         machgate_shim_realloc;
         machgate_shim_free;
+        machgate_shim_posix_memalign;
+        machgate_shim_memalign;
+        machgate_shim_valloc;
+        machgate_shim_malloc_size;
+        machgate_shim_malloc_good_size;
         __cxa_atexit;
         __cxa_finalize;
         __cxa_guard_acquire;
