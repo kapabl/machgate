@@ -70,6 +70,8 @@ assert buf.raw == b'\\xDE\\xAD\\xBE\\xEF' * 4, f'memset_pattern4 failed: {buf.ra
 
 lib.posix_memalign.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t]
 lib.posix_memalign.restype = ctypes.c_int
+lib.machgate_shim_memalign.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
+lib.machgate_shim_memalign.restype = ctypes.c_void_p
 lib.malloc.argtypes = [ctypes.c_size_t]
 lib.malloc.restype = ctypes.c_void_p
 lib.calloc.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
@@ -101,6 +103,12 @@ assert aligned.value and aligned.value % 64 == 0, f'posix_memalign returned unal
 assert lib.malloc_size(aligned) >= 129, 'malloc_size returned too little for aligned allocation'
 lib.free(aligned)
 assert lib.malloc_size(aligned) == 0, 'malloc_size did not clear after aligned free'
+
+memalign_ptr = lib.machgate_shim_memalign(64, 72)
+assert memalign_ptr and memalign_ptr % 64 == 0, f'memalign returned unaligned pointer {memalign_ptr:#x}'
+assert lib.malloc_size(memalign_ptr) >= 72, 'malloc_size returned too little for memalign allocation'
+lib.free(memalign_ptr)
+assert lib.malloc_size(memalign_ptr) == 0, 'malloc_size did not clear after memalign free'
 
 # Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates
 # names such as auto_start_dbg through std::isalnum, which reaches ___maskrune.

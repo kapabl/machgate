@@ -1064,3 +1064,32 @@ Accepted fix direction:
 The direct regression test is `tests/test_libsystem_shim.sh`, which now checks
 that `malloc_size` reports nonzero sizes for normal, aligned, and reallocated
 shim allocations and returns `0` after free.
+
+## v0.3.23 Private Run Follow-Up
+
+The `v0.3.23` private run confirmed the initializer progress logging fix:
+
+```text
+machgate: mod_init[707/707] index=706 at 0x100947a30
+machgate: __mod_init_func constructors complete
+machgate: calling _main at 0x10094754c
+```
+
+The remaining failure is still the post-`_main` allocator accounting assert:
+
+```text
+Memory.cpp(884) ASSERTION FAILED: rest >= size && rest <= kMaxHeapSize
+Message: rest=0, size=72
+```
+
+Next accepted fix:
+
+- Correct the Darwin allocator default callback table so
+  `_libc_default_memalign` uses the `memalign(alignment, size) -> void*`
+  signature, not the incompatible
+  `posix_memalign(&ptr, alignment, size) -> int` signature.
+- Keep `_libc_default_posix_memalign` on the real `posix_memalign` callback.
+- Add explicit shim coverage for both ABI shapes.
+- Add opt-in `MACHGATE_TRACE_ALLOC=1` diagnostics that report whether a
+  zero-size `malloc_size(ptr)` result is for a tracked-freed pointer or a
+  foreign/untracked pointer.

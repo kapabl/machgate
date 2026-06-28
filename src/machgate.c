@@ -1546,7 +1546,7 @@ static void fixup_darwin_libc_allocator_defaults(struct load_results* lr)
 		{ "_libc_default_realloc", "machgate_shim_realloc" },
 		{ "_libc_default_free", "machgate_shim_free" },
 		{ "_libc_default_posix_memalign", "machgate_shim_posix_memalign" },
-		{ "_libc_default_memalign", "machgate_shim_posix_memalign" },
+		{ "_libc_default_memalign", "machgate_shim_memalign" },
 		{ "_libc_default_aligned_alloc", "machgate_shim_memalign" },
 		{ "_libc_default_valloc", "machgate_shim_valloc" },
 		{ "_libc_default_malloc_size", "machgate_shim_malloc_size" },

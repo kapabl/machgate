@@ -58,6 +58,7 @@ static int shim_trace_enabled(void);
 static int shim_cxx_init_trace_enabled(void);
 static int shim_delta_vm_trace_enabled(void);
 static int shim_wait_trace_enabled(void);
+static int shim_alloc_trace_enabled(void);
 static int shim_host_sigchld_handler_enabled(void);
 static FILE* shim_open_trace_file(void);
 static void shim_fd_trace_log(const char* format, ...);
@@ -7006,6 +7007,12 @@ static int shim_wait_trace_enabled(void)
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
+static int shim_alloc_trace_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_ALLOC");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
 static int shim_host_sigchld_handler_enabled(void)
 {
 	const char* value = getenv("MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER");
@@ -10901,6 +10908,7 @@ static size_t recorded_allocation_size(void* ptr, size_t requested_size)
 static void forget_allocation(const void* ptr)
 {
 	size_t index;
+	struct machgate_allocation_record* reusable_record = NULL;
 
 	if (!ptr)
 		return;
@@ -10910,8 +10918,15 @@ static void forget_allocation(const void* ptr)
 		struct machgate_allocation_record* record =
 		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
 
-		if (!record->ptr)
+		if (record->ptr && record->size == 0 && !reusable_record)
+			reusable_record = record;
+		if (!record->ptr) {
+			if (reusable_record)
+				record = reusable_record;
+			record->ptr = (void*)ptr;
+			record->size = 0;
 			return;
+		}
 		if (record->ptr == ptr) {
 			record->size = 0;
 			return;
@@ -10935,19 +10950,19 @@ void *shim_malloc(size_t size)
 {
 	if (!real_malloc) {
 		resolve_real_funcs();
-			if (!real_malloc) {
-				/* Bootstrap: return zeroed memory from static buffer */
-				int aligned = (bootstrap_pos + 15) & ~15;
-				if (aligned + (int)size <= (int)sizeof(bootstrap_buf)) {
-					void *p = bootstrap_buf + aligned;
-					memset(p, 0, size);
-					bootstrap_pos = aligned + size;
-					record_allocation(p, size ? size : 1);
-					return p;
-				}
-				return NULL;
+		if (!real_malloc) {
+			/* Bootstrap: return zeroed memory from static buffer */
+			int aligned = (bootstrap_pos + 15) & ~15;
+			if (aligned + (int)size <= (int)sizeof(bootstrap_buf)) {
+				void *p = bootstrap_buf + aligned;
+				memset(p, 0, size);
+				bootstrap_pos = aligned + size;
+				record_allocation(p, size ? size : 1);
+				return p;
 			}
+			return NULL;
 		}
+	}
 	/* macOS malloc returns zeroed pages — zero-init for compatibility. */
 	void *p = real_malloc(size);
 	if (p) {
@@ -11289,10 +11304,17 @@ void malloc_set_zone_name(void* zone, const char* name)
 size_t malloc_size(const void* ptr)
 {
 	size_t size = 0;
+	size_t result;
 
 	if (!ptr)
 		return 0;
-	if (lookup_allocation_size(ptr, &size))
+	if (lookup_allocation_size(ptr, &size)) {
+		if (size == 0 && shim_alloc_trace_enabled())
+			fprintf(stderr, "libsystem_shim: malloc_size zero tracked-freed ptr=%p\n", ptr);
 		return size;
-	return malloc_usable_size((void*)ptr);
+	}
+	result = malloc_usable_size((void*)ptr);
+	if (result == 0 && shim_alloc_trace_enabled())
+		fprintf(stderr, "libsystem_shim: malloc_size zero foreign ptr=%p\n", ptr);
+	return result;
 }
