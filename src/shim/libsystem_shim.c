@@ -7270,6 +7270,30 @@ static size_t shim_alloc_trace_size(void)
 }
 
 #define MACHGATE_ALLOC_EVENT_RING_SIZE 128
+#define MACHGATE_ALLOC_EVENT_DEFAULT_DUMP_LIMIT 16
+
+static int shim_alloc_recent_full_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_ALLOC_RECENT_FULL");
+	return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static size_t shim_alloc_recent_limit(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_ALLOC_RECENT_LIMIT");
+	char* end = NULL;
+	unsigned long long limit;
+
+	if (!value || !*value)
+		return MACHGATE_ALLOC_EVENT_DEFAULT_DUMP_LIMIT;
+	errno = 0;
+	limit = strtoull(value, &end, 0);
+	if (errno || end == value)
+		return MACHGATE_ALLOC_EVENT_DEFAULT_DUMP_LIMIT;
+	if (limit > MACHGATE_ALLOC_EVENT_RING_SIZE)
+		return MACHGATE_ALLOC_EVENT_RING_SIZE;
+	return (size_t)limit;
+}
 
 struct machgate_alloc_event {
 	const char* op;
@@ -7343,18 +7367,25 @@ static void shim_dump_related_alloc_event(unsigned long seq,
 static void shim_dump_recent_alloc_events(const char* reason, const void* ptr)
 {
 	unsigned long start;
+	size_t limit = shim_alloc_recent_limit();
+	int full_dump = shim_alloc_recent_full_enabled() ||
+	    shim_alloc_trace_full_enabled();
+	int symbolize_callers = full_dump;
 
 	if (!shim_alloc_signal_dump_enabled() &&
 	    !shim_alloc_mismatch_trace_enabled())
 		return;
 	if (alloc_event_seq == 0)
 		return;
+	if (limit == 0 && !full_dump)
+		return;
 
 	fprintf(stderr,
 	        "libsystem_shim: alloc recent-events reason=%s ptr=%p seq=%lu\n",
 	        reason ? reason : "(none)", ptr, alloc_event_seq);
-	start = alloc_event_seq > MACHGATE_ALLOC_EVENT_RING_SIZE ?
-	    alloc_event_seq - MACHGATE_ALLOC_EVENT_RING_SIZE : 0;
+	if (full_dump || limit > MACHGATE_ALLOC_EVENT_RING_SIZE)
+		limit = MACHGATE_ALLOC_EVENT_RING_SIZE;
+	start = alloc_event_seq > limit ? alloc_event_seq - limit : 0;
 	for (unsigned long seq = start; seq < alloc_event_seq; seq++) {
 		const struct machgate_alloc_event* event =
 		    &alloc_event_ring[seq % MACHGATE_ALLOC_EVENT_RING_SIZE];
@@ -7365,7 +7396,7 @@ static void shim_dump_recent_alloc_events(const char* reason, const void* ptr)
 		        seq, event->op, event->ptr, event->size, event->old_size,
 		        event->zone, event->caller, event->known);
 		shim_dump_related_alloc_event(seq, event, ptr);
-		if (event->caller)
+		if (symbolize_callers && event->caller)
 			trace_guest_address_context("alloc.caller", (uintptr_t)event->caller);
 	}
 }
