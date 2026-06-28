@@ -112,6 +112,8 @@ lib.realloc.restype = ctypes.c_void_p
 lib.free.argtypes = [ctypes.c_void_p]
 lib.malloc_size.argtypes = [ctypes.c_void_p]
 lib.malloc_size.restype = ctypes.c_size_t
+lib.malloc_good_size.argtypes = [ctypes.c_size_t]
+lib.malloc_good_size.restype = ctypes.c_size_t
 operator_new = getattr(lib, '_Znwm')
 operator_new.argtypes = [ctypes.c_size_t]
 operator_new.restype = ctypes.c_void_p
@@ -122,6 +124,18 @@ operator_delete_sized = getattr(lib, '_ZdlPvm')
 operator_delete_sized.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 operator_delete_aligned_sized = getattr(lib, '_ZdlPvmSt11align_val_t')
 operator_delete_aligned_sized.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
+
+for requested_size in [1, 17, 57, 73, 169, 281, 1681, 4097, 56713]:
+    good_size = lib.malloc_good_size(requested_size)
+    assert good_size >= requested_size, f'malloc_good_size({requested_size}) returned {good_size}'
+    sized_ptr = lib.malloc(requested_size)
+    assert sized_ptr, f'malloc({requested_size}) failed'
+    actual_size = lib.malloc_size(sized_ptr)
+    assert actual_size == good_size, (
+        f'malloc_good_size({requested_size})={good_size}, '
+        f'malloc_size(malloc({requested_size}))={actual_size}'
+    )
+    lib.free(sized_ptr)
 
 heap_ptr = lib.malloc(72)
 assert heap_ptr, 'malloc failed'

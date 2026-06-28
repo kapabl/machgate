@@ -11900,7 +11900,21 @@ void malloc_destroy_zone(void* zone)
 
 size_t malloc_good_size(size_t size)
 {
-	return size;
+	void* ptr;
+	size_t result;
+
+	if (size == 0)
+		return 0;
+	if (!real_malloc || !real_free)
+		resolve_real_funcs();
+	if (!real_malloc || !real_free)
+		return size;
+	ptr = real_malloc(size);
+	if (!ptr)
+		return size;
+	result = malloc_usable_size(ptr);
+	real_free(ptr);
+	return result >= size ? result : size;
 }
 
 const char* malloc_get_zone_name(void* zone)
