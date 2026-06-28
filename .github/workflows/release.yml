@@ -64,7 +64,8 @@ jobs:
               BUILD_DIR=/work/build-arm64-release bash tests/fixtures/build_fixtures.sh
               BUILD_DIR=/work/build-arm64-release bash tests/run_tests.sh
               DESTDIR=/work/package cmake --install build-arm64-release
-              scripts/build-libcxx.sh
+              MACHGATE_SHIM_LIB=/work/build-arm64-release/libsystem_shim.so scripts/build-libcxx.sh
+              MACHGATE_REQUIRE_LIBCXX_OVERLAY=1 LIBCXX_DIR=/work/build-libcxx/lib bash tests/test_libcxx_allocator_overlay.sh
               cp -a build-libcxx/lib/libc++.so* /work/package/opt/machgate/lib/
               cp -a build-libcxx/lib/libc++abi.so* /work/package/opt/machgate/lib/
               if compgen -G "/usr/lib/aarch64-linux-gnu/libatomic.so.1*" >/dev/null; then

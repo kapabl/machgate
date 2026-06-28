@@ -23,6 +23,8 @@ cd "$(dirname "$0")/.."
 
 BUILD_DIR=build-libcxx
 SRC_DIR=extern/llvm-project
+OVERLAY_SRC=scripts/libcxx_allocator_overlay.c
+SHIM_LIB="${MACHGATE_SHIM_LIB:-}"
 
 if [ ! -d "$SRC_DIR/libcxx" ]; then
     echo "Error: $SRC_DIR/libcxx not found. Run: git submodule update --init extern/llvm-project"
@@ -57,6 +59,48 @@ fi
 
 echo "Configuring Apple-ABI libc++ build..."
 
+if [ -f "$BUILD_DIR/CMakeCache.txt" ] &&
+   ! grep -q "CMAKE_HOME_DIRECTORY:INTERNAL=$PWD/$SRC_DIR/runtimes" "$BUILD_DIR/CMakeCache.txt"; then
+    echo "Removing stale $BUILD_DIR CMake cache from a different checkout path"
+    rm -rf "$BUILD_DIR"
+fi
+
+mkdir -p "$BUILD_DIR"
+OVERLAY_OBJ="$PWD/$BUILD_DIR/machgate_libcxx_allocator_overlay.o"
+"$CC_TO_USE" -fPIC -O2 -c "$OVERLAY_SRC" -o "$OVERLAY_OBJ"
+
+if [ -z "$SHIM_LIB" ]; then
+    for candidate in \
+        "$PWD/build/libsystem_shim.so" \
+        "$PWD/build-arm64-release/libsystem_shim.so" \
+        "$PWD/build-arm64/libsystem_shim.so"; do
+        if [ -f "$candidate" ]; then
+            SHIM_LIB="$candidate"
+            break
+        fi
+    done
+fi
+if [ ! -f "$SHIM_LIB" ]; then
+    echo "Error: libsystem_shim.so not found. Build MachGate first or set MACHGATE_SHIM_LIB=/path/to/libsystem_shim.so" >&2
+    exit 1
+fi
+
+WRAP_SYMBOLS=(
+    malloc free calloc realloc posix_memalign memalign aligned_alloc valloc
+    _Znwm _Znam _ZnwmRKSt9nothrow_t _ZnamRKSt9nothrow_t
+    _ZnwmSt11align_val_t _ZnamSt11align_val_t
+    _ZnwmSt11align_val_tRKSt9nothrow_t _ZnamSt11align_val_tRKSt9nothrow_t
+    _ZdlPv _ZdaPv _ZdlPvm _ZdaPvm
+    _ZdlPvRKSt9nothrow_t _ZdaPvRKSt9nothrow_t
+    _ZdlPvSt11align_val_t _ZdaPvSt11align_val_t
+    _ZdlPvmSt11align_val_t _ZdaPvmSt11align_val_t
+    _ZdlPvSt11align_val_tRKSt9nothrow_t _ZdaPvSt11align_val_tRKSt9nothrow_t
+)
+WRAP_LINK_FLAGS="$OVERLAY_OBJ -L$(dirname "$SHIM_LIB") -lsystem_shim"
+for symbol in "${WRAP_SYMBOLS[@]}"; do
+    WRAP_LINK_FLAGS+=" -Wl,--wrap=${symbol}"
+done
+
 cmake -G Ninja -S "$SRC_DIR/runtimes" -B "$BUILD_DIR" \
     -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
     -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
@@ -71,7 +115,8 @@ cmake -G Ninja -S "$SRC_DIR/runtimes" -B "$BUILD_DIR" \
     -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
     -DLIBCXXABI_ENABLE_SHARED=ON \
     -DLIBCXXABI_ENABLE_STATIC=OFF \
-    -DLIBCXXABI_INCLUDE_TESTS=OFF
+    -DLIBCXXABI_INCLUDE_TESTS=OFF \
+    -DCMAKE_SHARED_LINKER_FLAGS="$WRAP_LINK_FLAGS"
 
 echo ""
 echo "Building Apple-ABI libc++..."

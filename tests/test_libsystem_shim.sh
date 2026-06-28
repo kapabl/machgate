@@ -100,6 +100,9 @@ lib.malloc_zone_valloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 lib.malloc_zone_valloc.restype = ctypes.c_void_p
 lib.malloc_zone_claimed_address.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 lib.malloc_zone_claimed_address.restype = ctypes.c_int
+lib.malloc_zone_register.argtypes = [ctypes.c_void_p]
+lib.malloc_zone_unregister.argtypes = [ctypes.c_void_p]
+lib.malloc_zone_free_definite_size.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
 lib.malloc.argtypes = [ctypes.c_size_t]
 lib.malloc.restype = ctypes.c_void_p
 lib.calloc.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
@@ -197,6 +200,180 @@ zone_valloc_ptr = lib.malloc_zone_valloc(default_zone, 72)
 assert zone_valloc_ptr, 'malloc_zone_valloc failed'
 assert lib.malloc_zone_size(default_zone, zone_valloc_ptr) >= 72, 'malloc_zone_size returned too little for zone valloc'
 lib.malloc_zone_free(default_zone, zone_valloc_ptr)
+
+host_libc = ctypes.CDLL('libc.so.6')
+host_libc.malloc.argtypes = [ctypes.c_size_t]
+host_libc.malloc.restype = ctypes.c_void_p
+host_libc.calloc.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
+host_libc.calloc.restype = ctypes.c_void_p
+host_libc.realloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+host_libc.realloc.restype = ctypes.c_void_p
+host_libc.free.argtypes = [ctypes.c_void_p]
+host_libc.posix_memalign.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t]
+host_libc.posix_memalign.restype = ctypes.c_int
+
+ZONE_SIZE = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p)
+ZONE_MALLOC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)
+ZONE_CALLOC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t)
+ZONE_VALLOC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)
+ZONE_FREE = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
+ZONE_REALLOC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)
+ZONE_DESTROY = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+ZONE_BATCH_MALLOC = ctypes.CFUNCTYPE(ctypes.c_uint, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint)
+ZONE_BATCH_FREE = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint)
+ZONE_MEMALIGN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t)
+ZONE_FREE_DEFINITE_SIZE = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)
+ZONE_PRESSURE_RELIEF = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t)
+ZONE_CLAIMED_ADDRESS = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+ZONE_MALLOC_WITH_OPTIONS = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_uint)
+
+class CustomMallocZone(ctypes.Structure):
+    _fields_ = [
+        ('reserved1', ctypes.c_void_p),
+        ('reserved2', ctypes.c_void_p),
+        ('size', ZONE_SIZE),
+        ('malloc', ZONE_MALLOC),
+        ('calloc', ZONE_CALLOC),
+        ('valloc', ZONE_VALLOC),
+        ('free', ZONE_FREE),
+        ('realloc', ZONE_REALLOC),
+        ('destroy', ZONE_DESTROY),
+        ('zone_name', ctypes.c_char_p),
+        ('batch_malloc', ZONE_BATCH_MALLOC),
+        ('batch_free', ZONE_BATCH_FREE),
+        ('introspect', ctypes.c_void_p),
+        ('version', ctypes.c_uint),
+        ('memalign', ZONE_MEMALIGN),
+        ('free_definite_size', ZONE_FREE_DEFINITE_SIZE),
+        ('pressure_relief', ZONE_PRESSURE_RELIEF),
+        ('claimed_address', ZONE_CLAIMED_ADDRESS),
+        ('try_free_default', ZONE_FREE),
+        ('malloc_with_options', ZONE_MALLOC_WITH_OPTIONS),
+        ('aligned_malloc', ZONE_MEMALIGN),
+    ]
+
+custom_sizes = {}
+custom_counts = {'malloc': 0, 'calloc': 0, 'realloc': 0, 'free': 0, 'free_definite_size': 0, 'memalign': 0}
+
+@ZONE_SIZE
+def custom_size(zone, ptr):
+    return custom_sizes.get(ptr, 0)
+
+@ZONE_MALLOC
+def custom_malloc(zone, size):
+    custom_counts['malloc'] += 1
+    ptr = host_libc.malloc(size)
+    if ptr:
+        custom_sizes[ptr] = size
+    return ptr
+
+@ZONE_CALLOC
+def custom_calloc(zone, count, size):
+    custom_counts['calloc'] += 1
+    total = count * size
+    ptr = host_libc.calloc(count, size)
+    if ptr:
+        custom_sizes[ptr] = total
+    return ptr
+
+@ZONE_VALLOC
+def custom_valloc(zone, size):
+    return custom_malloc(zone, size)
+
+@ZONE_FREE
+def custom_free(zone, ptr):
+    custom_counts['free'] += 1
+    custom_sizes.pop(ptr, None)
+    host_libc.free(ptr)
+
+@ZONE_REALLOC
+def custom_realloc(zone, ptr, size):
+    custom_counts['realloc'] += 1
+    custom_sizes.pop(ptr, None)
+    new_ptr = host_libc.realloc(ptr, size)
+    if new_ptr:
+        custom_sizes[new_ptr] = size
+    return new_ptr
+
+@ZONE_DESTROY
+def custom_destroy(zone):
+    pass
+
+@ZONE_BATCH_MALLOC
+def custom_batch_malloc(zone, size, results, count):
+    allocated = 0
+    for index in range(count):
+        ptr = custom_malloc(zone, size)
+        if not ptr:
+            break
+        results[index] = ptr
+        allocated += 1
+    return allocated
+
+@ZONE_BATCH_FREE
+def custom_batch_free(zone, pointers, count):
+    for index in range(count):
+        custom_free(zone, pointers[index])
+
+@ZONE_MEMALIGN
+def custom_memalign(zone, alignment, size):
+    custom_counts['memalign'] += 1
+    raw = ctypes.c_void_p()
+    if host_libc.posix_memalign(ctypes.byref(raw), alignment, size) != 0:
+        return None
+    custom_sizes[raw.value] = size
+    return raw.value
+
+@ZONE_FREE_DEFINITE_SIZE
+def custom_free_definite_size(zone, ptr, size):
+    custom_counts['free_definite_size'] += 1
+    custom_free(zone, ptr)
+
+@ZONE_PRESSURE_RELIEF
+def custom_pressure_relief(zone, goal):
+    return 0
+
+@ZONE_CLAIMED_ADDRESS
+def custom_claimed_address(zone, ptr):
+    return 1 if ptr in custom_sizes else 0
+
+@ZONE_MALLOC_WITH_OPTIONS
+def custom_malloc_with_options(zone, alignment, size, options):
+    if alignment:
+        return custom_memalign(zone, alignment, size)
+    return custom_malloc(zone, size)
+
+custom_zone = CustomMallocZone(
+    None, None, custom_size, custom_malloc, custom_calloc, custom_valloc,
+    custom_free, custom_realloc, custom_destroy, b'custom test zone',
+    custom_batch_malloc, custom_batch_free, None, 9, custom_memalign,
+    custom_free_definite_size, custom_pressure_relief, custom_claimed_address,
+    custom_free, custom_malloc_with_options, custom_memalign)
+custom_zone_ptr = ctypes.cast(ctypes.byref(custom_zone), ctypes.c_void_p)
+
+lib.malloc_zone_register(custom_zone_ptr)
+assert lib.malloc_get_zone_name(custom_zone_ptr) == b'custom test zone', 'custom zone name not preserved'
+
+custom_ptr = lib.malloc_zone_malloc(custom_zone_ptr, 72)
+assert custom_ptr and custom_counts['malloc'] == 1, 'custom malloc zone callback was not used'
+assert lib.malloc_zone_size(custom_zone_ptr, custom_ptr) == 72, 'custom zone size callback was not used'
+assert lib.malloc_zone_from_ptr(custom_ptr) == custom_zone_ptr.value, 'custom zone ownership was not recorded'
+assert lib.malloc_zone_claimed_address(custom_zone_ptr, custom_ptr) == 1, 'custom zone did not claim allocation'
+lib.malloc_zone_free(None, custom_ptr)
+assert custom_counts['free'] == 1, 'custom zone free callback was not used through recorded ownership'
+
+custom_ptr = lib.malloc_zone_calloc(custom_zone_ptr, 2, 36)
+assert custom_ptr and custom_counts['calloc'] == 1, 'custom calloc zone callback was not used'
+custom_ptr = lib.malloc_zone_realloc(None, custom_ptr, 144)
+assert custom_ptr and custom_counts['realloc'] == 1, 'custom realloc zone callback was not used through recorded ownership'
+lib.malloc_zone_free_definite_size(None, custom_ptr, 144)
+assert custom_counts['free_definite_size'] == 1, 'custom free_definite_size callback was not used'
+
+custom_aligned_ptr = lib.malloc_zone_memalign(custom_zone_ptr, 64, 72)
+assert custom_aligned_ptr and custom_aligned_ptr % 64 == 0, 'custom memalign zone callback failed'
+assert custom_counts['memalign'] >= 1, 'custom memalign zone callback was not used'
+lib.malloc_zone_unregister(custom_zone_ptr)
+lib.malloc_zone_free(custom_zone_ptr, custom_aligned_ptr)
 
 new_ptr = operator_new(72)
 assert new_ptr, 'operator new failed'

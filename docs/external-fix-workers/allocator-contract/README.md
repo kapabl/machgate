@@ -24,8 +24,8 @@ Reports are written next to this file and under `/tmp/machgate-agent-reports/all
 
 ## Applied result
 
-The first completed implementation pass fixed the generic allocator ABI gaps
-identified by the audits:
+The implementation passes fixed the generic allocator ABI gaps identified by the
+audits:
 
 - direct `memalign`, `aligned_alloc`, and `valloc` now enter the shim ledger
 - flat Mach-O allocator lookup prefers mapped libSystem instead of host
@@ -33,16 +33,26 @@ identified by the audits:
 - deferred C++ operator binds use the same MachGate allocation hooks as normal
   binds
 - Darwin malloc-zone query and callback symbols are exported explicitly
+- custom Darwin malloc zones dispatch through their callbacks instead of being
+  treated as the default host allocator
+- the shim allocation ledger records zone ownership so `malloc_zone_from_ptr`
+  and default-zone frees can route custom-zone allocations back to the owner
+- the packaged Apple-ABI `libc++.so.1` and `libc++abi.so.1` use a scoped
+  allocator overlay, so their internal ELF allocation and C++ operator
+  new/delete paths route through `libsystem_shim.so`
 - `tests/test_allocator_export_surface.sh` verifies the versioned export
   surface
 - `tests/test_libsystem_shim.sh` now exercises malloc-zone allocation and query
   paths
+- `tests/test_libcxx_allocator_overlay.sh` verifies the packaged libc++ and
+  libc++abi do not retain direct allocator/operator references to host glibc
 
 Verification completed:
 
 - native shim tests pass
 - native allocator export test passes
-- ARM64 Docker suite passes `30 / 30`
+- native libc++ allocator overlay test passes
+- ARM64 Docker suite passes `31 / 31`
 
 Next external validation target: private `Core.UnitTest` with the next release
 tarball.

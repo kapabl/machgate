@@ -10870,6 +10870,7 @@ static int bootstrap_pos = 0;
 struct machgate_allocation_record {
 	void* ptr;
 	size_t size;
+	void* zone;
 };
 
 static struct machgate_allocation_record allocation_records[MACHGATE_ALLOCATION_TABLE_SIZE];
@@ -10884,7 +10885,7 @@ static size_t allocation_record_index(const void* ptr)
 	return value & (MACHGATE_ALLOCATION_TABLE_SIZE - 1);
 }
 
-static void record_allocation(void* ptr, size_t size)
+static void record_allocation_with_zone(void* ptr, size_t size, void* zone)
 {
 	size_t index;
 	struct machgate_allocation_record* reusable_record = NULL;
@@ -10900,6 +10901,7 @@ static void record_allocation(void* ptr, size_t size)
 		if (record->ptr == ptr) {
 			record->ptr = ptr;
 			record->size = size;
+			record->zone = zone;
 			return;
 		}
 		if (record->ptr && record->size == 0 && !reusable_record)
@@ -10909,12 +10911,18 @@ static void record_allocation(void* ptr, size_t size)
 				record = reusable_record;
 			record->ptr = ptr;
 			record->size = size;
+			record->zone = zone;
 			return;
 		}
 	}
 }
 
-static int lookup_allocation_size(const void* ptr, size_t* size_out)
+static void record_allocation(void* ptr, size_t size)
+{
+	record_allocation_with_zone(ptr, size, NULL);
+}
+
+static int lookup_allocation(const void* ptr, size_t* size_out, void** zone_out)
 {
 	size_t index;
 
@@ -10929,12 +10937,20 @@ static int lookup_allocation_size(const void* ptr, size_t* size_out)
 		if (!record->ptr)
 			return 0;
 		if (record->ptr == ptr) {
-			*size_out = record->size;
+			if (size_out)
+				*size_out = record->size;
+			if (zone_out)
+				*zone_out = record->zone;
 			return 1;
 		}
 	}
 
 	return 0;
+}
+
+static int lookup_allocation_size(const void* ptr, size_t* size_out)
+{
+	return lookup_allocation(ptr, size_out, NULL);
 }
 
 static size_t recorded_allocation_size(void* ptr, size_t requested_size)
@@ -10968,10 +10984,12 @@ static void forget_allocation(const void* ptr)
 				record = reusable_record;
 			record->ptr = (void*)ptr;
 			record->size = 0;
+			record->zone = NULL;
 			return;
 		}
 		if (record->ptr == ptr) {
 			record->size = 0;
+			record->zone = NULL;
 			return;
 		}
 	}
@@ -11339,119 +11357,6 @@ void machgate_operator_delete_array_aligned_nothrow(void* ptr, size_t alignment,
 	shim_free_impl(ptr);
 }
 
-void* malloc_zone_malloc(void* zone, size_t size)
-{
-	(void)zone;
-	return shim_malloc_impl(size);
-}
-
-void* malloc_zone_realloc(void* zone, void* ptr, size_t size)
-{
-	(void)zone;
-	return shim_realloc_impl(ptr, size);
-}
-
-void malloc_zone_free(void* zone, void* ptr)
-{
-	(void)zone;
-	shim_free_impl(ptr);
-}
-
-size_t malloc_zone_size(void* zone, const void* ptr)
-{
-	(void)zone;
-	return malloc_size(ptr);
-}
-
-void* malloc_zone_calloc(void* zone, size_t count, size_t size)
-{
-	(void)zone;
-	return shim_calloc_impl(count, size);
-}
-
-void* malloc_zone_valloc(void* zone, size_t size)
-{
-	(void)zone;
-	size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
-	void* result = NULL;
-
-	if (page_size == 0)
-		page_size = 4096;
-	if (shim_posix_memalign_impl(&result, page_size, size) != 0)
-		return NULL;
-	return result;
-}
-
-void malloc_zone_destroy(void* zone)
-{
-	(void)zone;
-}
-
-unsigned malloc_zone_batch_malloc(void* zone, size_t size,
-                                  void** results, unsigned count)
-{
-	unsigned index;
-
-	(void)zone;
-	for (index = 0; index < count; index++) {
-		results[index] = shim_malloc_impl(size);
-		if (!results[index])
-			break;
-	}
-	return index;
-}
-
-void malloc_zone_batch_free(void* zone, void** pointers,
-                            unsigned count)
-{
-	(void)zone;
-	for (unsigned index = 0; index < count; index++)
-		shim_free_impl(pointers[index]);
-}
-
-void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
-{
-	void* result = NULL;
-
-	(void)zone;
-	if (alignment < sizeof(void*))
-		alignment = sizeof(void*);
-	if (shim_posix_memalign_impl(&result, alignment, size) != 0)
-		return NULL;
-	return result;
-}
-
-void malloc_zone_free_definite_size(void* zone, void* ptr, size_t size)
-{
-	(void)size;
-	malloc_zone_free(zone, ptr);
-}
-
-size_t malloc_zone_pressure_relief(void* zone, size_t goal)
-{
-	(void)zone;
-	(void)goal;
-	return 0;
-}
-
-int malloc_zone_claimed_address(void* zone, void* ptr)
-{
-	size_t size;
-
-	(void)zone;
-	(void)ptr;
-	return lookup_allocation_size(ptr, &size);
-}
-
-void* malloc_zone_malloc_with_options(void* zone, size_t alignment,
-                                      size_t size, unsigned options)
-{
-	(void)options;
-	if (alignment)
-		return malloc_zone_memalign(zone, alignment, size);
-	return malloc_zone_malloc(zone, size);
-}
-
 struct machgate_malloc_zone {
 	void* reserved1;
 	void* reserved2;
@@ -11477,6 +11382,288 @@ struct machgate_malloc_zone {
 	                             unsigned options);
 	void* (*aligned_malloc)(void* zone, size_t alignment, size_t size);
 };
+
+static struct machgate_malloc_zone default_malloc_zone;
+
+#define MACHGATE_MALLOC_ZONE_CAPACITY 64
+
+unsigned malloc_num_zones = 1;
+void* malloc_zones[MACHGATE_MALLOC_ZONE_CAPACITY] = { &default_malloc_zone };
+
+static int is_default_malloc_zone(void* zone)
+{
+	return !zone || zone == &default_malloc_zone;
+}
+
+static struct machgate_malloc_zone* custom_malloc_zone(void* zone)
+{
+	if (is_default_malloc_zone(zone))
+		return NULL;
+	return (struct machgate_malloc_zone*)zone;
+}
+
+static void* allocation_recorded_zone(const void* ptr)
+{
+	size_t size = 0;
+	void* zone = NULL;
+
+	if (lookup_allocation(ptr, &size, &zone) && size != 0)
+		return zone;
+	return NULL;
+}
+
+static void* effective_malloc_zone(void* zone, const void* ptr)
+{
+	void* recorded_zone;
+
+	if (!is_default_malloc_zone(zone))
+		return zone;
+	recorded_zone = allocation_recorded_zone(ptr);
+	if (recorded_zone)
+		return recorded_zone;
+	return zone;
+}
+
+static size_t zone_recorded_size(struct machgate_malloc_zone* zone, void* zone_arg,
+                                 const void* ptr, size_t fallback_size)
+{
+	size_t result = 0;
+
+	if (zone && zone->size)
+		result = zone->size(zone_arg, ptr);
+	if (result)
+		return result;
+	if (fallback_size)
+		return fallback_size;
+	return 1;
+}
+
+size_t malloc_zone_size(void* zone, const void* ptr);
+void malloc_zone_free(void* zone, void* ptr);
+
+void* malloc_zone_malloc(void* zone, size_t size)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+	if (machgate_zone && machgate_zone->malloc) {
+		void* result = machgate_zone->malloc(zone, size);
+		if (result) {
+			record_allocation_with_zone(result,
+			                            zone_recorded_size(machgate_zone, zone, result, size),
+			                            zone);
+			shim_trace_alloc_event("malloc_zone_malloc", result, size, 0);
+		}
+		return result;
+	}
+	return shim_malloc_impl(size);
+}
+
+void* malloc_zone_realloc(void* zone, void* ptr, size_t size)
+{
+	void* effective_zone = effective_malloc_zone(zone, ptr);
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(effective_zone);
+	if (machgate_zone && machgate_zone->realloc) {
+		size_t old_size = malloc_zone_size(effective_zone, ptr);
+		void* result = machgate_zone->realloc(effective_zone, ptr, size);
+		if (result || size == 0)
+			forget_allocation(ptr);
+		if (result) {
+			record_allocation_with_zone(result,
+			                            zone_recorded_size(machgate_zone, effective_zone, result, size),
+			                            effective_zone);
+			shim_trace_alloc_event("malloc_zone_realloc", result, size, old_size);
+		}
+		return result;
+	}
+	return shim_realloc_impl(ptr, size);
+}
+
+void malloc_zone_free(void* zone, void* ptr)
+{
+	void* effective_zone = effective_malloc_zone(zone, ptr);
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(effective_zone);
+	if (machgate_zone && machgate_zone->free) {
+		size_t old_size = malloc_zone_size(effective_zone, ptr);
+		shim_trace_alloc_event("malloc_zone_free", ptr, old_size, old_size);
+		forget_allocation(ptr);
+		machgate_zone->free(effective_zone, ptr);
+		return;
+	}
+	shim_free_impl(ptr);
+}
+
+size_t malloc_zone_size(void* zone, const void* ptr)
+{
+	void* effective_zone = effective_malloc_zone(zone, ptr);
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(effective_zone);
+	if (machgate_zone && machgate_zone->size)
+		return machgate_zone->size(effective_zone, ptr);
+	return malloc_size(ptr);
+}
+
+void* malloc_zone_calloc(void* zone, size_t count, size_t size)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+	if (machgate_zone && machgate_zone->calloc) {
+		size_t total = count * size;
+		void* result = machgate_zone->calloc(zone, count, size);
+		if (result) {
+			record_allocation_with_zone(result,
+			                            zone_recorded_size(machgate_zone, zone, result, total),
+			                            zone);
+			shim_trace_alloc_event("malloc_zone_calloc", result, total, 0);
+		}
+		return result;
+	}
+	return shim_calloc_impl(count, size);
+}
+
+void* malloc_zone_valloc(void* zone, size_t size)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+	if (machgate_zone && machgate_zone->valloc) {
+		void* result = machgate_zone->valloc(zone, size);
+		if (result) {
+			record_allocation_with_zone(result,
+			                            zone_recorded_size(machgate_zone, zone, result, size),
+			                            zone);
+			shim_trace_alloc_event("malloc_zone_valloc", result, size, 0);
+		}
+		return result;
+	}
+
+	size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+	void* result = NULL;
+
+	if (page_size == 0)
+		page_size = 4096;
+	if (shim_posix_memalign_impl(&result, page_size, size) != 0)
+		return NULL;
+	return result;
+}
+
+void malloc_zone_destroy(void* zone)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+	if (machgate_zone && machgate_zone->destroy)
+		machgate_zone->destroy(zone);
+}
+
+unsigned malloc_zone_batch_malloc(void* zone, size_t size,
+                                  void** results, unsigned count)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+	unsigned index;
+
+	if (machgate_zone && machgate_zone->batch_malloc) {
+		unsigned result = machgate_zone->batch_malloc(zone, size, results, count);
+		for (index = 0; index < result; index++) {
+			record_allocation_with_zone(results[index],
+			                            zone_recorded_size(machgate_zone, zone, results[index], size),
+			                            zone);
+			shim_trace_alloc_event("malloc_zone_batch_malloc", results[index], size, 0);
+		}
+		return result;
+	}
+
+	for (index = 0; index < count; index++) {
+		results[index] = shim_malloc_impl(size);
+		if (!results[index])
+			break;
+	}
+	return index;
+}
+
+void malloc_zone_batch_free(void* zone, void** pointers,
+                            unsigned count)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+
+	if (machgate_zone && machgate_zone->batch_free) {
+		for (unsigned index = 0; index < count; index++)
+			forget_allocation(pointers[index]);
+		machgate_zone->batch_free(zone, pointers, count);
+		return;
+	}
+
+	for (unsigned index = 0; index < count; index++)
+		malloc_zone_free(zone, pointers[index]);
+}
+
+void* malloc_zone_memalign(void* zone, size_t alignment, size_t size)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+	void* result = NULL;
+
+	if (alignment < sizeof(void*))
+		alignment = sizeof(void*);
+	if (machgate_zone && machgate_zone->memalign) {
+		result = machgate_zone->memalign(zone, alignment, size);
+		if (result) {
+			record_allocation_with_zone(result,
+			                            zone_recorded_size(machgate_zone, zone, result, size),
+			                            zone);
+			shim_trace_alloc_event("malloc_zone_memalign", result, size, alignment);
+		}
+		return result;
+	}
+	if (shim_posix_memalign_impl(&result, alignment, size) != 0)
+		return NULL;
+	return result;
+}
+
+void malloc_zone_free_definite_size(void* zone, void* ptr, size_t size)
+{
+	void* effective_zone = effective_malloc_zone(zone, ptr);
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(effective_zone);
+	if (machgate_zone && machgate_zone->free_definite_size) {
+		shim_trace_alloc_event("malloc_zone_free_definite_size", ptr, size, size);
+		forget_allocation(ptr);
+		machgate_zone->free_definite_size(effective_zone, ptr, size);
+		return;
+	}
+	malloc_zone_free(effective_zone, ptr);
+}
+
+size_t malloc_zone_pressure_relief(void* zone, size_t goal)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+	if (machgate_zone && machgate_zone->pressure_relief)
+		return machgate_zone->pressure_relief(zone, goal);
+	(void)goal;
+	return 0;
+}
+
+int malloc_zone_claimed_address(void* zone, void* ptr)
+{
+	void* recorded_zone = allocation_recorded_zone(ptr);
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+
+	if (recorded_zone)
+		return is_default_malloc_zone(zone) || recorded_zone == zone;
+	if (machgate_zone && machgate_zone->claimed_address)
+		return machgate_zone->claimed_address(zone, ptr);
+	return is_default_malloc_zone(zone) && malloc_usable_size(ptr) > 0;
+}
+
+void* malloc_zone_malloc_with_options(void* zone, size_t alignment,
+                                      size_t size, unsigned options)
+{
+	struct machgate_malloc_zone* machgate_zone = custom_malloc_zone(zone);
+	if (machgate_zone && machgate_zone->malloc_with_options) {
+		void* result = machgate_zone->malloc_with_options(zone, alignment, size, options);
+		if (result) {
+			record_allocation_with_zone(result,
+			                            zone_recorded_size(machgate_zone, zone, result, size),
+			                            zone);
+			shim_trace_alloc_event("malloc_zone_malloc_with_options", result, size, alignment);
+		}
+		return result;
+	}
+	(void)options;
+	if (alignment)
+		return malloc_zone_memalign(zone, alignment, size);
+	return malloc_zone_malloc(zone, size);
+}
 
 static struct machgate_malloc_zone default_malloc_zone = {
 	NULL,
@@ -11537,12 +11724,28 @@ void* malloc_logger = NULL;
 
 void malloc_zone_register(void* zone)
 {
-	(void)zone;
+	if (!zone)
+		return;
+	for (unsigned index = 0; index < malloc_num_zones; index++) {
+		if (malloc_zones[index] == zone)
+			return;
+	}
+	if (malloc_num_zones < MACHGATE_MALLOC_ZONE_CAPACITY)
+		malloc_zones[malloc_num_zones++] = zone;
 }
 
 void malloc_zone_unregister(void* zone)
 {
-	(void)zone;
+	if (!zone || zone == &default_malloc_zone)
+		return;
+	for (unsigned index = 0; index < malloc_num_zones; index++) {
+		if (malloc_zones[index] != zone)
+			continue;
+		for (unsigned next = index + 1; next < malloc_num_zones; next++)
+			malloc_zones[next - 1] = malloc_zones[next];
+		malloc_zones[--malloc_num_zones] = NULL;
+		return;
+	}
 }
 
 void malloc_set_zone_name(void* zone, const char* name)
@@ -11556,18 +11759,16 @@ void malloc_set_zone_name(void* zone, const char* name)
 void* malloc_zone_from_ptr(const void* ptr)
 {
 	size_t size;
+	void* zone = NULL;
 
 	if (!ptr)
 		return NULL;
-	if (lookup_allocation_size(ptr, &size))
-		return &default_malloc_zone;
+	if (lookup_allocation(ptr, &size, &zone) && size != 0)
+		return zone ? zone : &default_malloc_zone;
 	if (malloc_usable_size((void*)ptr) > 0)
 		return &default_malloc_zone;
 	return NULL;
 }
-
-unsigned malloc_num_zones = 1;
-void* malloc_zones[] = { &default_malloc_zone };
 
 int malloc_get_all_zones(void* task, void* reader, void*** zones, unsigned* count)
 {

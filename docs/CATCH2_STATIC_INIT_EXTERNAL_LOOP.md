@@ -1292,3 +1292,52 @@ Expected private validation:
 - if it still fails, rerun with
   `MACHGATE_TRACE_BINDINGS=1 MACHGATE_TRACE_ALLOC=1 MACHGATE_TRACE_ALLOC_SIZE=72`
   and inspect `*_Znwm`, `*_Znam`, `*_Zdl*` binding source lines
+
+## v0.3.30 Scoped libc++ Allocator Overlay Follow-Up
+
+The `v0.3.29` private run still completes all `707 / 707` static constructors
+and reaches `_main`, then aborts in the guest allocator tracker:
+
+```text
+Memory.cpp(884) ASSERTION FAILED: rest >= size && rest <= kMaxHeapSize
+Function: trackDeallocate
+Message: rest=0, size=72
+```
+
+That proves the old constructor-table and libc++ tree initialization failures are
+closed for this binary. The remaining failure is post-`_main` allocator
+ownership: some allocation still reaches a runtime path outside the same
+ownership model used by guest deallocation/accounting.
+
+Accepted fix:
+
+- Darwin malloc-zone APIs now preserve custom-zone ownership in the shim
+  allocation ledger.
+- `malloc_zone_malloc`, `calloc`, `realloc`, `memalign`, `valloc`,
+  `free_definite_size`, `batch_malloc`, `batch_free`, `size`, and
+  `malloc_zone_from_ptr` dispatch through custom zone callbacks when a guest or
+  mapped runtime supplies a non-default Darwin zone.
+- `malloc_zone_register` and `malloc_zone_unregister` maintain the exported
+  Darwin `malloc_zones` / `malloc_num_zones` surface.
+- The packaged Apple-ABI `libc++.so.1` and `libc++abi.so.1` are now linked with
+  a scoped allocator overlay. Their internal ELF `malloc`, `free`, `calloc`,
+  `realloc`, alignment allocation, `valloc`, and C++ operator new/delete calls
+  route through `libsystem_shim.so` instead of directly reaching host glibc.
+- The release workflow passes the exact ARM64 `libsystem_shim.so` to the libc++
+  build so the packaged overlay cannot bind against a stale local shim.
+
+Validation:
+
+- native `tests/test_libsystem_shim.sh` passes with custom-zone callback
+  coverage
+- native `tests/test_allocator_export_surface.sh` passes
+- native `tests/test_libcxx_allocator_overlay.sh` passes
+- ARM64 Docker validation passes `31 / 31`
+
+Expected private validation:
+
+- rerun `Core.UnitTest` with the next release tarball
+- if it still fails with `trackDeallocate(rest=0, size=72)`, rerun with
+  `MACHGATE_TRACE_ALLOC=1 MACHGATE_TRACE_ALLOC_SIZE=72 MACHGATE_TRACE_SIGNALS=1`
+  and inspect whether the 72-byte path is now visible through either the shim
+  ledger or the mapped libc++ overlay
