@@ -6060,6 +6060,8 @@ static int shim_errno_from_linux(int linux_errno)
 	switch (linux_errno) {
 	case EAGAIN:
 		return 35;
+	case ETIMEDOUT:
+		return 60;
 	default:
 		return linux_errno;
 	}
@@ -8347,9 +8349,12 @@ int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
 int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
                            const struct timespec *abstime)
 {
+	int result;
+
 	fixup_cond(cond);
 	fixup_mutex(mutex);
-	return real_pthread_cond_timedwait(cond, mutex, abstime);
+	result = real_pthread_cond_timedwait(cond, mutex, abstime);
+	return shim_errno_from_linux(result);
 }
 
 int pthread_cond_signal(pthread_cond_t *cond)

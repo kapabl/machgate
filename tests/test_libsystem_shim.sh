@@ -447,5 +447,27 @@ assert lib.pthread_once(ctypes.byref(once_state), once_init) == 0, 'pthread_once
 assert once_calls.value == 1, f'pthread_once init count={once_calls.value}, expected 1'
 assert once_state.value == 2, f'pthread_once state={once_state.value:#x}, expected done state 2'
 
+class Timespec(ctypes.Structure):
+    _fields_ = [('tv_sec', ctypes.c_long), ('tv_nsec', ctypes.c_long)]
+
+mutex = ctypes.create_string_buffer(64)
+cond = ctypes.create_string_buffer(64)
+deadline = Timespec(0, 0)
+lib.pthread_mutex_init.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+lib.pthread_mutex_lock.argtypes = [ctypes.c_void_p]
+lib.pthread_mutex_unlock.argtypes = [ctypes.c_void_p]
+lib.pthread_mutex_destroy.argtypes = [ctypes.c_void_p]
+lib.pthread_cond_init.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+lib.pthread_cond_timedwait.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(Timespec)]
+lib.pthread_cond_destroy.argtypes = [ctypes.c_void_p]
+assert lib.pthread_mutex_init(ctypes.byref(mutex), None) == 0, 'pthread_mutex_init failed'
+assert lib.pthread_cond_init(ctypes.byref(cond), None) == 0, 'pthread_cond_init failed'
+assert lib.pthread_mutex_lock(ctypes.byref(mutex)) == 0, 'pthread_mutex_lock failed'
+timedwait_result = lib.pthread_cond_timedwait(ctypes.byref(cond), ctypes.byref(mutex), ctypes.byref(deadline))
+assert lib.pthread_mutex_unlock(ctypes.byref(mutex)) == 0, 'pthread_mutex_unlock failed'
+assert lib.pthread_cond_destroy(ctypes.byref(cond)) == 0, 'pthread_cond_destroy failed'
+assert lib.pthread_mutex_destroy(ctypes.byref(mutex)) == 0, 'pthread_mutex_destroy failed'
+assert timedwait_result == 60, f'pthread_cond_timedwait returned {timedwait_result}, expected Darwin ETIMEDOUT 60'
+
 print('All libsystem_shim symbol tests passed')
 "
