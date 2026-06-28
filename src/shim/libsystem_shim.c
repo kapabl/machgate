@@ -59,6 +59,7 @@ static int shim_cxx_init_full_trace_enabled(void);
 static int shim_delta_vm_trace_enabled(void);
 static int shim_wait_trace_enabled(void);
 static int shim_alloc_trace_enabled(void);
+static int shim_alloc_mismatch_trace_enabled(void);
 static int shim_host_sigchld_handler_enabled(void);
 static FILE* shim_open_trace_file(void);
 static void shim_fd_trace_log(const char* format, ...);
@@ -71,6 +72,7 @@ static int translate_oflags(int darwin_flags);
 static void trace_guest_address_context(const char* label, uintptr_t address);
 static uintptr_t trace_ucontext_reg(void* ucontext, int reg);
 static void trace_signal_indirect_branch(uintptr_t call_site, void* ucontext);
+static void shim_dump_recent_alloc_events(const char* reason, const void* ptr);
 static pid_t machgate_shim_process_pid;
 static const char* shim_init_kind;
 static int shim_init_index = -1;
@@ -7025,6 +7027,14 @@ static int shim_alloc_trace_full_enabled(void)
 	                 strcmp(value, "verbose") == 0);
 }
 
+static int shim_alloc_mismatch_trace_enabled(void)
+{
+	const char* value = getenv("MACHGATE_TRACE_ALLOC_MISMATCH");
+	if (value && value[0] && strcmp(value, "0") != 0)
+		return 1;
+	return shim_alloc_trace_enabled();
+}
+
 static size_t shim_alloc_trace_size(void)
 {
 	const char* value = getenv("MACHGATE_TRACE_ALLOC_SIZE");
@@ -7040,10 +7050,71 @@ static size_t shim_alloc_trace_size(void)
 	return (size_t)size;
 }
 
+#define MACHGATE_ALLOC_EVENT_RING_SIZE 128
+
+struct machgate_alloc_event {
+	const char* op;
+	const void* ptr;
+	size_t size;
+	size_t old_size;
+	void* zone;
+	void* caller;
+	int known;
+};
+
+static struct machgate_alloc_event alloc_event_ring[MACHGATE_ALLOC_EVENT_RING_SIZE];
+static unsigned long alloc_event_seq;
+
+static void shim_record_alloc_event(const char* op, const void* ptr,
+                                    size_t size, size_t old_size, void* zone,
+                                    void* caller, int known)
+{
+	struct machgate_alloc_event* event =
+	    &alloc_event_ring[alloc_event_seq % MACHGATE_ALLOC_EVENT_RING_SIZE];
+
+	event->op = op;
+	event->ptr = ptr;
+	event->size = size;
+	event->old_size = old_size;
+	event->zone = zone;
+	event->caller = caller;
+	event->known = known;
+	alloc_event_seq++;
+}
+
+static void shim_dump_recent_alloc_events(const char* reason, const void* ptr)
+{
+	unsigned long start;
+
+	if (!shim_alloc_mismatch_trace_enabled())
+		return;
+
+	fprintf(stderr,
+	        "libsystem_shim: alloc recent-events reason=%s ptr=%p seq=%lu\n",
+	        reason ? reason : "(none)", ptr, alloc_event_seq);
+	start = alloc_event_seq > MACHGATE_ALLOC_EVENT_RING_SIZE ?
+	    alloc_event_seq - MACHGATE_ALLOC_EVENT_RING_SIZE : 0;
+	for (unsigned long seq = start; seq < alloc_event_seq; seq++) {
+		const struct machgate_alloc_event* event =
+		    &alloc_event_ring[seq % MACHGATE_ALLOC_EVENT_RING_SIZE];
+		if (!event->op)
+			continue;
+		fprintf(stderr,
+		        "libsystem_shim: alloc recent[%lu] op=%s ptr=%p size=%zu old_size=%zu zone=%p caller=%p known=%d\n",
+		        seq, event->op, event->ptr, event->size, event->old_size,
+		        event->zone, event->caller, event->known);
+		if (event->caller)
+			trace_guest_address_context("alloc.caller", (uintptr_t)event->caller);
+	}
+}
+
 static void shim_trace_alloc_event(const char* op, const void* ptr,
                                    size_t size, size_t old_size)
 {
 	size_t trace_size;
+	void* caller = __builtin_extract_return_addr(__builtin_return_address(0));
+
+	shim_record_alloc_event(op, ptr, size, old_size, NULL, caller, old_size != 0);
 
 	if (!shim_alloc_trace_enabled())
 		return;
@@ -7052,8 +7123,10 @@ static void shim_trace_alloc_event(const char* op, const void* ptr,
 	    (!trace_size || (size != trace_size && old_size != trace_size)))
 		return;
 	fprintf(stderr,
-	        "libsystem_shim: alloc %s ptr=%p size=%zu old_size=%zu\n",
-	        op, ptr, size, old_size);
+	        "libsystem_shim: alloc %s ptr=%p size=%zu old_size=%zu caller=%p\n",
+	        op, ptr, size, old_size, caller);
+	if (caller)
+		trace_guest_address_context("alloc.caller", (uintptr_t)caller);
 }
 
 static int shim_host_sigchld_handler_enabled(void)
@@ -10829,6 +10902,14 @@ void __assert_rtn(const char *func, const char *file, int line, const char *expr
 	__assert_fail(expr, file, (unsigned)line, func);
 }
 
+__attribute__((noreturn))
+void abort(void)
+{
+	shim_dump_recent_alloc_events("abort", NULL);
+	raise(SIGABRT);
+	_exit(134);
+}
+
 int timingsafe_bcmp(const void* buffer_a, const void* buffer_b, size_t length)
 {
 	const unsigned char* bytes_a = buffer_a;
@@ -11042,10 +11123,13 @@ void *shim_malloc(size_t size)
 static void shim_free_impl(void *ptr)
 {
 	size_t old_size = 0;
+	int known;
 
 	if (!ptr) return;
-	lookup_allocation_size(ptr, &old_size);
+	known = lookup_allocation_size(ptr, &old_size);
 	shim_trace_alloc_event("free", ptr, old_size, old_size);
+	if (!known)
+		shim_dump_recent_alloc_events("free-unknown-pointer", ptr);
 	forget_allocation(ptr);
 	/* Don't free bootstrap allocations */
 	if ((char *)ptr >= bootstrap_buf &&
@@ -11093,6 +11177,7 @@ void *shim_calloc(size_t nmemb, size_t size)
 static void *shim_realloc_impl(void *ptr, size_t size)
 {
 	size_t old_size = 0;
+	int known = 0;
 
 	if (ptr && (char *)ptr >= bootstrap_buf &&
 	    (char *)ptr < bootstrap_buf + sizeof(bootstrap_buf)) {
@@ -11106,6 +11191,11 @@ static void *shim_realloc_impl(void *ptr, size_t size)
 		return new_ptr;
 	}
 
+	if (ptr) {
+		known = lookup_allocation_size(ptr, &old_size);
+		if (!known)
+			shim_dump_recent_alloc_events("realloc-unknown-pointer", ptr);
+	}
 	if (!real_realloc) resolve_real_funcs();
 	if (!real_realloc) return NULL;
 	void *new_ptr = real_realloc(ptr, size);

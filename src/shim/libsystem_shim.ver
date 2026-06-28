@@ -158,6 +158,7 @@ GLIBC_2.17 {
         mach_port_insert_right;
         mach_port_set_attributes;
         mach_vm_map;
+        abort;
         malloc;
         free;
         calloc;

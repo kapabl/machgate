@@ -1337,7 +1337,20 @@ Validation:
 Expected private validation:
 
 - rerun `Core.UnitTest` with the next release tarball
-- if it still fails with `trackDeallocate(rest=0, size=72)`, rerun with
-  `MACHGATE_TRACE_ALLOC=1 MACHGATE_TRACE_ALLOC_SIZE=72 MACHGATE_TRACE_SIGNALS=1`
-  and inspect whether the 72-byte path is now visible through either the shim
-  ledger or the mapped libc++ overlay
+- if it still fails with `trackDeallocate(rest=0, size=72)`, rerun with the
+  generic provenance trace:
+
+```bash
+MACHGATE_TRACE_ALLOC_MISMATCH=1 \
+MACHGATE_TRACE_ALLOC=1 \
+MACHGATE_TRACE_ALLOC_SIZE=72 \
+MACHGATE_TRACE_SIGNALS=1 \
+MACHGATE_VERBOSE=1 \
+MACHGATE_TARBALL=/path/to/machgate-next-linux-arm64.tar.gz \
+scripts/run-macho-docker.sh /path/to/Core.UnitTest
+```
+
+`MACHGATE_TRACE_ALLOC_MISMATCH=1` is not size-specific. It dumps the recent
+allocator ring when an unknown-pointer free/realloc or guest `abort` happens.
+The size filter only keeps ordinary trace output small; the mismatch dump is
+intended to catch the same ownership bug for any allocation size.

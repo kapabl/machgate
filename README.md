@@ -353,6 +353,7 @@ Carbon = SKIP
 | `MACHGATE_TRACE_CXX_INIT` | `1` for compact C++ initializer progress; `full` for per-initializer guard and `__MergedGlobals` diagnostics |
 | `MACHGATE_TRACE_ALLOC` | Trace allocator ledger misses; use `2`, `all`, or `full` for every shim allocation event |
 | `MACHGATE_TRACE_ALLOC_SIZE` | With `MACHGATE_TRACE_ALLOC=1`, trace only allocation events matching this size |
+| `MACHGATE_TRACE_ALLOC_MISMATCH` | Dump recent allocator provenance on unknown-pointer free/realloc or guest abort |
 | `MACHGATE_LIBCXX` | Docker helper path to Apple-ABI `libc++.so.1` for `libc++.1.dylib` mapping |
 | `MACHGATE_EXTERNAL_MAP_LIBCXX` | Enable external-test libc++ mapping |
 | `MACHGATE_ENABLE_HOST_SIGCHLD_HANDLER` | Diagnostic opt-in for installing the host Linux SIGCHLD handler |
