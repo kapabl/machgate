@@ -13,30 +13,24 @@ concurrency:
 
 jobs:
   arm64-linux:
-    name: ARM64 Linux Docker/QEMU
-    runs-on: ubuntu-24.04
+    name: ARM64 Linux Docker
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Build ARM64 toolchain image
         run: |
           docker build \
-            --platform linux/arm64 \
             -t machgate-arm64-toolchain \
             -f .github/docker/arm64-toolchain.Dockerfile \
             .
 
       - name: Build and test ARM64 MachGate
         run: |
-          docker run --rm --platform linux/arm64 \
+          docker run --rm \
             -v "$PWD:/work" \
             -w /work \
             machgate-arm64-toolchain \

@@ -17,7 +17,7 @@ permissions:
 jobs:
   linux-arm64:
     name: Linux ARM64 release
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 75
 
     steps:
@@ -37,15 +37,9 @@ jobs:
             echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
           fi
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Build ARM64 toolchain image
         run: |
           docker build \
-            --platform linux/arm64 \
             -t machgate-arm64-toolchain \
             -f .github/docker/arm64-toolchain.Dockerfile \
             .
@@ -54,7 +48,7 @@ jobs:
         run: |
           rm -rf dist package
           mkdir -p dist package
-          docker run --rm --platform linux/arm64 \
+          docker run --rm \
             -v "$PWD:/work" \
             -w /work \
             machgate-arm64-toolchain \
