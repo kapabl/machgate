@@ -6963,6 +6963,26 @@ static void trace_signal_pointer_words(const char* label, uintptr_t address)
 	        (void*)(uintptr_t)words[3]);
 }
 
+static void trace_signal_pointer_words_wide(const char* label, uintptr_t address)
+{
+	uint64_t words[8] = {0};
+
+	if (!address)
+		return;
+	for (size_t i = 0; i < 8; i++) {
+		if (!trace_read_u64(address + i * 8, &words[i]))
+			return;
+	}
+
+	fprintf(stderr,
+	        "libsystem_shim: signal memory %s=%p [0]=%p [8]=%p [16]=%p [24]=%p [32]=%p [40]=%p [48]=%p [56]=%p\n",
+	        label, (void*)address,
+	        (void*)(uintptr_t)words[0], (void*)(uintptr_t)words[1],
+	        (void*)(uintptr_t)words[2], (void*)(uintptr_t)words[3],
+	        (void*)(uintptr_t)words[4], (void*)(uintptr_t)words[5],
+	        (void*)(uintptr_t)words[6], (void*)(uintptr_t)words[7]);
+}
+
 static void trace_signal_register_context(void* ucontext)
 {
 	for (int reg = 0; reg <= 2; reg++) {
@@ -6984,6 +7004,75 @@ static void trace_signal_register_context(void* ucontext)
 			continue;
 		snprintf(label, sizeof(label), "signal.x%d", reg);
 		trace_guest_address_context(label, value);
+	}
+}
+
+static int trace_decode_ldr_unsigned_64(uint32_t insn, int* rt, int* rn,
+                                        unsigned* offset)
+{
+	if ((insn & 0xffc00000u) != 0xf9400000u)
+		return 0;
+	*rt = (int)(insn & 0x1fu);
+	*rn = (int)((insn >> 5) & 0x1fu);
+	*offset = (unsigned)(((insn >> 10) & 0xfffu) * 8u);
+	return 1;
+}
+
+static void trace_signal_faulting_load_context(uintptr_t pc, void* ucontext)
+{
+	uint32_t insn = 0;
+	int rt = 0;
+	int rn = 0;
+	unsigned offset = 0;
+	uintptr_t base = 0;
+	uintptr_t effective = 0;
+
+	if (!pc)
+		return;
+	memcpy(&insn, (void*)pc, sizeof(insn));
+	if (!trace_decode_ldr_unsigned_64(insn, &rt, &rn, &offset))
+		return;
+
+	base = trace_ucontext_reg(ucontext, rn);
+	effective = base + offset;
+	fprintf(stderr,
+	        "libsystem_shim: signal faulting-load pc=%p insn=0x%08x ldr x%d,[x%d,#%u] base=%p effective=%p\n",
+	        (void*)pc, insn, rt, rn, offset, (void*)base,
+	        (void*)effective);
+	if (base)
+		trace_signal_pointer_words_wide("faulting-load.base", base);
+	if (effective && effective != base)
+		trace_guest_address_context("faulting-load.effective", effective);
+
+	if (pc >= 4) {
+		uint32_t previous = 0;
+		int previous_rt = 0;
+		int previous_rn = 0;
+		unsigned previous_offset = 0;
+		uintptr_t previous_base = 0;
+		uintptr_t previous_effective = 0;
+		uint64_t loaded = 0;
+
+		memcpy(&previous, (void*)(pc - 4), sizeof(previous));
+		if (trace_decode_ldr_unsigned_64(previous, &previous_rt,
+		                                 &previous_rn, &previous_offset) &&
+		    previous_rt == rn) {
+			previous_base = trace_ucontext_reg(ucontext, previous_rn);
+			previous_effective = previous_base + previous_offset;
+			if (previous_effective)
+				trace_read_u64(previous_effective, &loaded);
+			fprintf(stderr,
+			        "libsystem_shim: signal faulting-load source pc=%p insn=0x%08x ldr x%d,[x%d,#%u] base=%p effective=%p loaded=%p\n",
+			        (void*)(pc - 4), previous, previous_rt, previous_rn,
+			        previous_offset, (void*)previous_base,
+			        (void*)previous_effective, (void*)(uintptr_t)loaded);
+			if (previous_base)
+				trace_signal_pointer_words_wide("faulting-load.source-base",
+				                                previous_base);
+			if (previous_effective)
+				trace_guest_address_context("faulting-load.source-effective",
+				                            previous_effective);
+		}
 	}
 }
 
@@ -8692,6 +8781,7 @@ static void trace_signal_dispatcher(int signum, siginfo_t* info, void* ucontext)
 		if (lr >= 4)
 			trace_guest_address_context("signal.lr-4", lr - 4);
 		trace_signal_register_context(ucontext);
+		trace_signal_faulting_load_context(pc, ucontext);
 		trace_signal_tree_insert_context(pc, ucontext);
 	}
 
