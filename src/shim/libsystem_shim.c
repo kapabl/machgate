@@ -7128,6 +7128,7 @@ static void trace_signal_catch2_null_active_testcase(void* ucontext)
 
 	fprintf(stderr,
 	        "libsystem_shim: catch2 RunContext m_activeTestCase is null while handling assertion\n");
+	shim_dump_recent_alloc_events("catch2-null-active-testcase", NULL);
 	trace_signal_catch2_assertion_result("x1", result);
 	if (saved_result && saved_result != result)
 		trace_signal_catch2_assertion_result("x20", saved_result);
