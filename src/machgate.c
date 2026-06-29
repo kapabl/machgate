@@ -1620,19 +1620,15 @@ static void configure_guest_cxx_allocator_hooks(struct load_results* lr)
 	                                           void*, void*, void*, void*);
 	static const char* operator_new_names[] = {
 		"__Znwm",
-		"__ZN3RBX6Memory20allocateOrReturnNullEm",
 	};
 	static const char* operator_new_array_names[] = {
 		"__Znam",
-		"__ZN3RBX6Memory20allocateOrReturnNullEm",
 	};
 	static const char* operator_delete_names[] = {
 		"__ZdlPv",
-		"__ZN3RBX6Memory10deallocateEPv",
 	};
 	static const char* operator_delete_array_names[] = {
 		"__ZdaPv",
-		"__ZN3RBX6Memory10deallocateEPv",
 	};
 	set_guest_cxx_allocators_fn setter =
 	    (set_guest_cxx_allocators_fn)dlsym(RTLD_DEFAULT,

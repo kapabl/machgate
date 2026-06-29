@@ -23,7 +23,6 @@ check_library()
         nm -D --undefined-only "$path" |
             awk '
                 /@GLIBC/ && $NF ~ /(^|@)(malloc|free|calloc|realloc|posix_memalign|memalign|aligned_alloc|valloc)(@|$)/ { print }
-                $NF ~ /^(_Znwm|_Znam|_ZdlPv|_ZdaPv)/ { print }
             '
     )"
     if [ -n "$bad_refs" ]; then
@@ -47,8 +46,39 @@ check_library()
         fi
     done
 
-    for symbol in machgate_shim_guest_operator_new machgate_shim_guest_operator_delete; do
-        if ! nm -D --undefined-only "$path" | awk -v symbol="$symbol" '
+    local guest_refs
+    guest_refs="$(
+        nm -D --undefined-only "$path" |
+            awk '
+                {
+                    name = $NF
+                    sub(/@.*/, "", name)
+                    if (name ~ /^machgate_shim_guest_operator_/)
+                        print
+                }
+            '
+    )"
+    if [ -n "$guest_refs" ]; then
+        echo "$path must not route native libc++ allocation through guest C++ hooks:" >&2
+        echo "$guest_refs" >&2
+        exit 1
+    fi
+}
+
+check_overlay_object()
+{
+    local object="$ROOT/build-libcxx/machgate_libcxx_allocator_overlay.o"
+
+    if [ ! -f "$object" ]; then
+        if [ "${MACHGATE_REQUIRE_LIBCXX_OVERLAY:-0}" = "1" ]; then
+            echo "missing $object" >&2
+            exit 1
+        fi
+        return
+    fi
+
+    for symbol in __wrap__Znwm __wrap__ZdlPv machgate_shim_guest_operator_new machgate_shim_guest_operator_delete; do
+        if nm "$object" | awk -v symbol="$symbol" '
             {
                 name = $NF
                 sub(/@.*/, "", name)
@@ -57,11 +87,12 @@ check_library()
             }
             END { exit !found }
         '; then
-            echo "$path is not linked through $symbol" >&2
+            echo "$object unexpectedly references $symbol" >&2
             exit 1
         fi
     done
 }
 
+check_overlay_object
 check_library libc++.so.1.0
 check_library libc++abi.so.1.0
