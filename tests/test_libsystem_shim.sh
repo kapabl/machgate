@@ -469,5 +469,38 @@ assert lib.pthread_cond_destroy(ctypes.byref(cond)) == 0, 'pthread_cond_destroy 
 assert lib.pthread_mutex_destroy(ctypes.byref(mutex)) == 0, 'pthread_mutex_destroy failed'
 assert timedwait_result == 60, f'pthread_cond_timedwait returned {timedwait_result}, expected Darwin ETIMEDOUT 60'
 
+GUEST_NEW = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
+GUEST_DELETE = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+guest_delete_calls = ctypes.c_int(0)
+guest_new_backing = ctypes.c_void_p()
+guest_delete_observed_size = ctypes.c_size_t(0)
+
+@GUEST_NEW
+def fake_guest_new(size):
+    guest_new_backing.value = lib.malloc(size)
+    return guest_new_backing.value
+
+@GUEST_DELETE
+def fake_guest_delete(ptr):
+    guest_delete_calls.value += 1
+    guest_delete_observed_size.value = lib.malloc_size(ptr)
+
+lib.machgate_shim_set_guest_cxx_allocators.argtypes = [ctypes.c_void_p] * 12
+lib.machgate_shim_guest_operator_new.argtypes = [ctypes.c_size_t]
+lib.machgate_shim_guest_operator_new.restype = ctypes.c_void_p
+lib.machgate_shim_guest_operator_delete.argtypes = [ctypes.c_void_p]
+lib.machgate_shim_set_guest_cxx_allocators(
+    ctypes.cast(fake_guest_new, ctypes.c_void_p), None, None, None,
+    ctypes.cast(fake_guest_delete, ctypes.c_void_p), None, None, None,
+    None, None, None, None)
+
+guest_bridge_ptr = lib.machgate_shim_guest_operator_new(72)
+assert guest_bridge_ptr == guest_new_backing.value, 'guest C++ bridge did not return fake guest allocation'
+assert lib.malloc_size(guest_bridge_ptr) >= 72, 'malloc_size returned 0 or too small for live guest allocation'
+lib.machgate_shim_guest_operator_delete(guest_bridge_ptr)
+assert guest_delete_calls.value == 1, 'guest deleter was not called'
+assert guest_delete_observed_size.value >= 72, f'malloc_size inside guest deleter was {guest_delete_observed_size.value}, expected >= 72'
+lib.machgate_shim_set_guest_cxx_allocators(None, None, None, None, None, None, None, None, None, None, None, None)
+
 print('All libsystem_shim symbol tests passed')
 "

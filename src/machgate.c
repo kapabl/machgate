@@ -1075,7 +1075,9 @@ int main(int argc, char** argv, char** envp)
 		if (machgate_load_results.mh) {
 			fixup_darwin_pthread_data(&machgate_load_results);
 			fixup_darwin_libc_allocator_defaults(&machgate_load_results);
-			configure_guest_cxx_allocator_hooks(&machgate_load_results);
+			if (getenv_compat("MACHGATE_GUEST_CXX_ALLOCATOR_BRIDGE",
+			                  "MACHISMO_GUEST_CXX_ALLOCATOR_BRIDGE"))
+				configure_guest_cxx_allocator_hooks(&machgate_load_results);
 			setup_tlv_image(&machgate_load_results);
 			eh_frame_register_macho((void*)machgate_load_results.mh,
 			                        machgate_load_results.slide);
@@ -1093,7 +1095,9 @@ int main(int argc, char** argv, char** envp)
 	if (machgate_load_results.mh && !cfg.dylib_map) {
 		fixup_darwin_pthread_data(&machgate_load_results);
 		fixup_darwin_libc_allocator_defaults(&machgate_load_results);
-		configure_guest_cxx_allocator_hooks(&machgate_load_results);
+		if (getenv_compat("MACHGATE_GUEST_CXX_ALLOCATOR_BRIDGE",
+		                  "MACHISMO_GUEST_CXX_ALLOCATOR_BRIDGE"))
+			configure_guest_cxx_allocator_hooks(&machgate_load_results);
 		setup_tlv_image(&machgate_load_results);
 		eh_frame_register_macho((void*)machgate_load_results.mh,
 		                        machgate_load_results.slide);
@@ -1675,7 +1679,7 @@ static void configure_guest_cxx_allocator_hooks(struct load_results* lr)
 
 	if (operator_new || operator_delete) {
 		fprintf(stderr,
-		        "machgate: guest C++ allocator bridge new=%p delete=%p new[]=%p delete[]=%p\n",
+		        "machgate: guest C++ allocator bridge enabled new=%p delete=%p new[]=%p delete[]=%p\n",
 		        (void*)operator_new, (void*)operator_delete,
 		        (void*)operator_new_array, (void*)operator_delete_array);
 	}
