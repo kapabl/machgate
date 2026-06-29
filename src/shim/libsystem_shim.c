@@ -11474,35 +11474,6 @@ static int take_guest_cxx_allocation(const void* ptr)
 	return 0;
 }
 
-static int has_guest_cxx_allocation(const void* ptr)
-{
-	size_t index;
-
-	if (!ptr)
-		return 0;
-
-	index = allocation_record_index(ptr);
-	lock_allocation_records();
-	for (size_t probe = 0; probe < MACHGATE_ALLOCATION_TABLE_SIZE; probe++) {
-		struct machgate_allocation_record* record =
-		    &allocation_records[(index + probe) & (MACHGATE_ALLOCATION_TABLE_SIZE - 1)];
-
-		if (!record->ptr) {
-			unlock_allocation_records();
-			return 0;
-		}
-		if (record->ptr == ptr) {
-			int result = record->size != 0 &&
-			    (record->flags & MACHGATE_ALLOCATION_GUEST_CXX);
-			unlock_allocation_records();
-			return result;
-		}
-	}
-
-	unlock_allocation_records();
-	return 0;
-}
-
 static void resolve_real_funcs(void)
 {
 	if (real_malloc) return;
@@ -11806,60 +11777,6 @@ void machgate_shim_set_guest_cxx_allocators(void* operator_new_fn,
 	    (machgate_guest_operator_delete_sized_aligned_fn)operator_delete_array_sized_aligned_fn;
 }
 
-static int guest_cxx_delete_unavailable(void* ptr)
-{
-	shim_trace_alloc_event_at("guest-delete-unavailable", ptr, 0, 0,
-	                          MACHGATE_SHIM_CALLER(), 0);
-	shim_dump_recent_alloc_events("guest-delete-unavailable", ptr);
-	return 1;
-}
-
-static int call_guest_operator_delete(void* ptr, machgate_guest_operator_delete_fn deleter)
-{
-	if (!take_guest_cxx_allocation(ptr))
-		return 0;
-	guest_cxx_allocator_depth++;
-	deleter(ptr);
-	guest_cxx_allocator_depth--;
-	return 1;
-}
-
-static int call_guest_operator_delete_sized(void* ptr,
-                                            machgate_guest_operator_delete_sized_fn deleter,
-                                            size_t size)
-{
-	if (!take_guest_cxx_allocation(ptr))
-		return 0;
-	guest_cxx_allocator_depth++;
-	deleter(ptr, size);
-	guest_cxx_allocator_depth--;
-	return 1;
-}
-
-static int call_guest_operator_delete_aligned(void* ptr,
-                                              machgate_guest_operator_delete_aligned_fn deleter,
-                                              size_t alignment)
-{
-	if (!take_guest_cxx_allocation(ptr))
-		return 0;
-	guest_cxx_allocator_depth++;
-	deleter(ptr, alignment);
-	guest_cxx_allocator_depth--;
-	return 1;
-}
-
-static int call_guest_operator_delete_sized_aligned(
-    void* ptr, machgate_guest_operator_delete_sized_aligned_fn deleter,
-    size_t size, size_t alignment)
-{
-	if (!take_guest_cxx_allocation(ptr))
-		return 0;
-	guest_cxx_allocator_depth++;
-	deleter(ptr, size, alignment);
-	guest_cxx_allocator_depth--;
-	return 1;
-}
-
 void* machgate_shim_guest_operator_new(size_t size)
 {
 	if (guest_operator_new && !guest_cxx_allocator_depth) {
@@ -11910,12 +11827,11 @@ void* machgate_shim_guest_operator_new_array_aligned(size_t size, size_t alignme
 
 void machgate_shim_guest_operator_delete(void* ptr)
 {
-	if (ptr && has_guest_cxx_allocation(ptr)) {
-		if (guest_operator_delete) {
-			call_guest_operator_delete(ptr, guest_operator_delete);
-			return;
-		}
-		guest_cxx_delete_unavailable(ptr);
+	if (ptr && guest_operator_delete && !guest_cxx_allocator_depth &&
+	    take_guest_cxx_allocation(ptr)) {
+		guest_cxx_allocator_depth++;
+		guest_operator_delete(ptr);
+		guest_cxx_allocator_depth--;
 		return;
 	}
 	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
@@ -11923,16 +11839,11 @@ void machgate_shim_guest_operator_delete(void* ptr)
 
 void machgate_shim_guest_operator_delete_array(void* ptr)
 {
-	if (ptr && has_guest_cxx_allocation(ptr)) {
-		if (guest_operator_delete_array) {
-			call_guest_operator_delete(ptr, guest_operator_delete_array);
-			return;
-		}
-		if (guest_operator_delete) {
-			call_guest_operator_delete(ptr, guest_operator_delete);
-			return;
-		}
-		guest_cxx_delete_unavailable(ptr);
+	if (ptr && guest_operator_delete_array && !guest_cxx_allocator_depth &&
+	    take_guest_cxx_allocation(ptr)) {
+		guest_cxx_allocator_depth++;
+		guest_operator_delete_array(ptr);
+		guest_cxx_allocator_depth--;
 		return;
 	}
 	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
@@ -11940,17 +11851,15 @@ void machgate_shim_guest_operator_delete_array(void* ptr)
 
 void machgate_shim_guest_operator_delete_sized(void* ptr, size_t size)
 {
-	if (ptr && has_guest_cxx_allocation(ptr)) {
-		if (guest_operator_delete_sized) {
-			call_guest_operator_delete_sized(ptr, guest_operator_delete_sized,
-			                                size);
-			return;
-		}
-		if (guest_operator_delete) {
-			call_guest_operator_delete(ptr, guest_operator_delete);
-			return;
-		}
-		guest_cxx_delete_unavailable(ptr);
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
+		guest_cxx_allocator_depth++;
+		if (guest_operator_delete_sized)
+			guest_operator_delete_sized(ptr, size);
+		else if (guest_operator_delete)
+			guest_operator_delete(ptr);
+		else
+			shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
+		guest_cxx_allocator_depth--;
 		return;
 	}
 	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
@@ -11958,27 +11867,15 @@ void machgate_shim_guest_operator_delete_sized(void* ptr, size_t size)
 
 void machgate_shim_guest_operator_delete_array_sized(void* ptr, size_t size)
 {
-	if (ptr && has_guest_cxx_allocation(ptr)) {
-		if (guest_operator_delete_array_sized) {
-			call_guest_operator_delete_sized(ptr,
-			                                guest_operator_delete_array_sized,
-			                                size);
-			return;
-		}
-		if (guest_operator_delete_array) {
-			call_guest_operator_delete(ptr, guest_operator_delete_array);
-			return;
-		}
-		if (guest_operator_delete_sized) {
-			call_guest_operator_delete_sized(ptr, guest_operator_delete_sized,
-			                                size);
-			return;
-		}
-		if (guest_operator_delete) {
-			call_guest_operator_delete(ptr, guest_operator_delete);
-			return;
-		}
-		guest_cxx_delete_unavailable(ptr);
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
+		guest_cxx_allocator_depth++;
+		if (guest_operator_delete_array_sized)
+			guest_operator_delete_array_sized(ptr, size);
+		else if (guest_operator_delete_array)
+			guest_operator_delete_array(ptr);
+		else
+			shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
+		guest_cxx_allocator_depth--;
 		return;
 	}
 	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
@@ -11986,18 +11883,15 @@ void machgate_shim_guest_operator_delete_array_sized(void* ptr, size_t size)
 
 void machgate_shim_guest_operator_delete_aligned(void* ptr, size_t alignment)
 {
-	if (ptr && has_guest_cxx_allocation(ptr)) {
-		if (guest_operator_delete_aligned) {
-			call_guest_operator_delete_aligned(ptr,
-			                                  guest_operator_delete_aligned,
-			                                  alignment);
-			return;
-		}
-		if (guest_operator_delete) {
-			call_guest_operator_delete(ptr, guest_operator_delete);
-			return;
-		}
-		guest_cxx_delete_unavailable(ptr);
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
+		guest_cxx_allocator_depth++;
+		if (guest_operator_delete_aligned)
+			guest_operator_delete_aligned(ptr, alignment);
+		else if (guest_operator_delete)
+			guest_operator_delete(ptr);
+		else
+			shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
+		guest_cxx_allocator_depth--;
 		return;
 	}
 	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
@@ -12005,28 +11899,15 @@ void machgate_shim_guest_operator_delete_aligned(void* ptr, size_t alignment)
 
 void machgate_shim_guest_operator_delete_array_aligned(void* ptr, size_t alignment)
 {
-	if (ptr && has_guest_cxx_allocation(ptr)) {
-		if (guest_operator_delete_array_aligned) {
-			call_guest_operator_delete_aligned(ptr,
-			                                  guest_operator_delete_array_aligned,
-			                                  alignment);
-			return;
-		}
-		if (guest_operator_delete_array) {
-			call_guest_operator_delete(ptr, guest_operator_delete_array);
-			return;
-		}
-		if (guest_operator_delete_aligned) {
-			call_guest_operator_delete_aligned(ptr,
-			                                  guest_operator_delete_aligned,
-			                                  alignment);
-			return;
-		}
-		if (guest_operator_delete) {
-			call_guest_operator_delete(ptr, guest_operator_delete);
-			return;
-		}
-		guest_cxx_delete_unavailable(ptr);
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
+		guest_cxx_allocator_depth++;
+		if (guest_operator_delete_array_aligned)
+			guest_operator_delete_array_aligned(ptr, alignment);
+		else if (guest_operator_delete_array)
+			guest_operator_delete_array(ptr);
+		else
+			shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
+		guest_cxx_allocator_depth--;
 		return;
 	}
 	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
@@ -12035,28 +11916,19 @@ void machgate_shim_guest_operator_delete_array_aligned(void* ptr, size_t alignme
 void machgate_shim_guest_operator_delete_sized_aligned(void* ptr, size_t size,
                                                        size_t alignment)
 {
-	if (ptr && has_guest_cxx_allocation(ptr)) {
-		if (guest_operator_delete_sized_aligned) {
-			call_guest_operator_delete_sized_aligned(
-			    ptr, guest_operator_delete_sized_aligned, size, alignment);
-			return;
-		}
-		if (guest_operator_delete_aligned) {
-			call_guest_operator_delete_aligned(ptr,
-			                                  guest_operator_delete_aligned,
-			                                  alignment);
-			return;
-		}
-		if (guest_operator_delete_sized) {
-			call_guest_operator_delete_sized(ptr, guest_operator_delete_sized,
-			                                size);
-			return;
-		}
-		if (guest_operator_delete) {
-			call_guest_operator_delete(ptr, guest_operator_delete);
-			return;
-		}
-		guest_cxx_delete_unavailable(ptr);
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
+		guest_cxx_allocator_depth++;
+		if (guest_operator_delete_sized_aligned)
+			guest_operator_delete_sized_aligned(ptr, size, alignment);
+		else if (guest_operator_delete_aligned)
+			guest_operator_delete_aligned(ptr, alignment);
+		else if (guest_operator_delete_sized)
+			guest_operator_delete_sized(ptr, size);
+		else if (guest_operator_delete)
+			guest_operator_delete(ptr);
+		else
+			shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
+		guest_cxx_allocator_depth--;
 		return;
 	}
 	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
@@ -12066,47 +11938,19 @@ void machgate_shim_guest_operator_delete_array_sized_aligned(void* ptr,
                                                              size_t size,
                                                              size_t alignment)
 {
-	if (ptr && has_guest_cxx_allocation(ptr)) {
-		if (guest_operator_delete_array_sized_aligned) {
-			call_guest_operator_delete_sized_aligned(
-			    ptr, guest_operator_delete_array_sized_aligned, size, alignment);
-			return;
-		}
-		if (guest_operator_delete_array_aligned) {
-			call_guest_operator_delete_aligned(
-			    ptr, guest_operator_delete_array_aligned, alignment);
-			return;
-		}
-		if (guest_operator_delete_array_sized) {
-			call_guest_operator_delete_sized(
-			    ptr, guest_operator_delete_array_sized, size);
-			return;
-		}
-		if (guest_operator_delete_array) {
-			call_guest_operator_delete(ptr, guest_operator_delete_array);
-			return;
-		}
-		if (guest_operator_delete_sized_aligned) {
-			call_guest_operator_delete_sized_aligned(
-			    ptr, guest_operator_delete_sized_aligned, size, alignment);
-			return;
-		}
-		if (guest_operator_delete_aligned) {
-			call_guest_operator_delete_aligned(ptr,
-			                                  guest_operator_delete_aligned,
-			                                  alignment);
-			return;
-		}
-		if (guest_operator_delete_sized) {
-			call_guest_operator_delete_sized(ptr, guest_operator_delete_sized,
-			                                size);
-			return;
-		}
-		if (guest_operator_delete) {
-			call_guest_operator_delete(ptr, guest_operator_delete);
-			return;
-		}
-		guest_cxx_delete_unavailable(ptr);
+	if (ptr && !guest_cxx_allocator_depth && take_guest_cxx_allocation(ptr)) {
+		guest_cxx_allocator_depth++;
+		if (guest_operator_delete_array_sized_aligned)
+			guest_operator_delete_array_sized_aligned(ptr, size, alignment);
+		else if (guest_operator_delete_array_aligned)
+			guest_operator_delete_array_aligned(ptr, alignment);
+		else if (guest_operator_delete_array_sized)
+			guest_operator_delete_array_sized(ptr, size);
+		else if (guest_operator_delete_array)
+			guest_operator_delete_array(ptr);
+		else
+			shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
+		guest_cxx_allocator_depth--;
 		return;
 	}
 	shim_free_impl_at(ptr, MACHGATE_SHIM_CALLER());
