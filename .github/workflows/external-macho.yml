@@ -1,0 +1,51 @@
+name: External Mach-O CLI
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
+
+concurrency:
+  group: external-macho-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  external-arm64:
+    name: External ARM64 Mach-O CLI probes
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build ARM64 toolchain image
+        run: |
+          docker build \
+            -t machgate-arm64-toolchain \
+            -f .github/docker/arm64-toolchain.Dockerfile \
+            .
+
+      - name: Run external Mach-O probes
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            machgate-arm64-toolchain \
+            bash -lc '
+              set -euo pipefail
+              cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Debug
+              cmake --build build-arm64 --verbose -j1
+              MACHGATE_RUN_EXTERNAL=1 \
+                MACHGATE_SYSTEM_SHIM_LIB=/work/build-arm64/libsystem_shim.so \
+                BUILD_DIR=/work/build-arm64 \
+                bash tests/test_external_macho_cli.sh
+            '
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-macho-diagnostics
+          path: tests/external/logs/
+          if-no-files-found: ignore

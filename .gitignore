@@ -1,0 +1,56 @@
+# Build artifacts
+*.o
+.cache/
+.history/
+
+# CMake
+build/
+build-arm64/
+build-arm64-release/
+build-cleanroom/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+dist/
+package/
+
+# External library builds
+build-libcxx/
+
+# Test fixtures (built from source)
+tests/fixtures/darwin_exit42
+tests/fixtures/darwin_write_stdout
+tests/fixtures/darwin_read_close
+tests/fixtures/darwin_open_lseek
+tests/fixtures/darwin_fstat
+tests/fixtures/darwin_mmap_protect
+tests/fixtures/cpp_many_ctors
+tests/fixtures/guest_cxx_allocator_bridge
+tests/fixtures/dynamic_libsystem_call
+tests/fixtures/dynamic_chained_libsystem_call
+tests/fixtures/dynamic_mapped_provider
+tests/fixtures/mapped_provider_stub.dylib
+tests/fixtures/libsystem_fixture.dylib
+tests/fixtures/darwin_range_000_099
+tests/fixtures/darwin_range_100_199
+tests/fixtures/darwin_range_200_399
+tests/fixtures/darwin_range_400_plus
+tests/fixtures/darwin_execve_exit42
+tests/fixtures/range_*.copyfile
+tests/fixtures/range_*.done
+tests/fixtures/range_*.exchange_a
+tests/fixtures/range_*.exchange_b
+tests/fixtures/range_*.sendfile
+tests/fixtures/range_*.tmp
+tests/fixtures/fat_binary
+tests/fixtures/fat_stub_x86
+tests/fixtures/machgate_trampoline_target
+tests/fixtures/libmachgate_test_provider.so
+tests/external/cache/
+tests/external/work/
+tests/external/logs/
+
+# Generated caches
+__pycache__/
+scripts/__pycache__/

@@ -1,0 +1,826 @@
+#include "native_imports.h"
+
+#include "macho_defs.h"
+#include "native_provider_map.h"
+
+#include <dlfcn.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#define MACHGATE_MAX_IMPORT_SEGMENTS 128u
+#define MACHGATE_MAX_NATIVE_PROVIDERS 128u
+
+#define BIND_OPCODE_MASK 0xf0u
+#define BIND_IMMEDIATE_MASK 0x0fu
+#define BIND_OPCODE_DONE 0x00u
+#define BIND_OPCODE_SET_DYLIB_ORDINAL_IMM 0x10u
+#define BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB 0x20u
+#define BIND_OPCODE_SET_DYLIB_SPECIAL_IMM 0x30u
+#define BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM 0x40u
+#define BIND_OPCODE_SET_TYPE_IMM 0x50u
+#define BIND_OPCODE_SET_ADDEND_SLEB 0x60u
+#define BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x70u
+#define BIND_OPCODE_ADD_ADDR_ULEB 0x80u
+#define BIND_OPCODE_DO_BIND 0x90u
+#define BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB 0xa0u
+#define BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED 0xb0u
+#define BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB 0xc0u
+
+#define BIND_SYMBOL_FLAGS_WEAK_IMPORT 0x1u
+#define BIND_TYPE_POINTER 1u
+
+#define DYLD_CHAINED_IMPORT 1u
+#define DYLD_CHAINED_IMPORT_ADDEND 2u
+#define DYLD_CHAINED_IMPORT_ADDEND64 3u
+#define DYLD_CHAINED_PTR_64 2u
+#define DYLD_CHAINED_PTR_64_OFFSET 6u
+#define DYLD_CHAINED_PTR_START_NONE 0xffffu
+#define DYLD_CHAINED_PTR_START_MULTI 0x8000u
+#define DYLD_CHAINED_PTR_START_LAST 0x8000u
+
+struct chained_fixups_header {
+	uint32_t fixups_version;
+	uint32_t starts_offset;
+	uint32_t imports_offset;
+	uint32_t symbols_offset;
+	uint32_t imports_count;
+	uint32_t imports_format;
+	uint32_t symbols_format;
+};
+
+struct chained_starts_in_segment {
+	uint32_t size;
+	uint16_t page_size;
+	uint16_t pointer_format;
+	uint64_t segment_offset;
+	uint32_t max_valid_pointer;
+	uint16_t page_count;
+	uint16_t page_start[];
+};
+
+struct chained_import {
+	int provider_ordinal;
+	int weak_import;
+	int64_t addend;
+	const char* symbol;
+};
+
+struct import_segment {
+	uintptr_t address;
+	uint64_t size;
+	int protection;
+};
+
+struct native_provider {
+	const char* install_name;
+	void* handle;
+};
+
+struct import_context {
+	struct load_results* loaded;
+	struct dyld_info_command* dyld_info;
+	struct linkedit_data_command* chained_fixups;
+	struct import_segment segments[MACHGATE_MAX_IMPORT_SEGMENTS];
+	size_t segment_count;
+	struct native_provider providers[MACHGATE_MAX_NATIVE_PROVIDERS];
+	size_t provider_count;
+	long page_size;
+	char* error;
+	size_t error_size;
+};
+
+struct bind_state {
+	int provider_ordinal;
+	uint8_t segment_index;
+	uint8_t type;
+	uint8_t symbol_flags;
+	uint64_t segment_offset;
+	int64_t addend;
+	const char* symbol;
+};
+
+static int native_protection(int protection)
+{
+	int result = PROT_NONE;
+	if (protection & VM_PROT_READ)
+		result |= PROT_READ;
+	if (protection & VM_PROT_WRITE)
+		result |= PROT_WRITE;
+	if (protection & VM_PROT_EXECUTE)
+		result |= PROT_EXEC;
+	return result;
+}
+
+static void* address_for_file_offset(struct import_context* context,
+				     uint64_t file_offset,
+				     uint64_t required_size)
+{
+	struct mach_header_64* header = context->loaded->mh;
+	uint8_t* cursor = (uint8_t*)(header + 1);
+	for (uint32_t index = 0; index < header->ncmds; index++) {
+		struct load_command* command = (void*)cursor;
+		if (command->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* segment = (void*)command;
+			if (file_offset >= segment->fileoff &&
+			    file_offset - segment->fileoff <= segment->filesize &&
+			    required_size <= segment->filesize -
+			                     (file_offset - segment->fileoff)) {
+				return (void*)(uintptr_t)(segment->vmaddr +
+				                         context->loaded->slide +
+				                         file_offset - segment->fileoff);
+			}
+		}
+		cursor += command->cmdsize;
+	}
+	return NULL;
+}
+
+static int read_uleb128(const uint8_t** cursor, const uint8_t* end,
+			uint64_t* value)
+{
+	uint64_t result = 0;
+	unsigned shift = 0;
+	while (*cursor < end && shift < 64) {
+		uint8_t byte = *(*cursor)++;
+		if (shift == 63 && (byte & 0x7eu))
+			return -1;
+		result |= (uint64_t)(byte & 0x7fu) << shift;
+		if (!(byte & 0x80u)) {
+			*value = result;
+			return 0;
+		}
+		shift += 7;
+	}
+	return -1;
+}
+
+static int read_sleb128(const uint8_t** cursor, const uint8_t* end,
+			int64_t* value)
+{
+	uint64_t result = 0;
+	unsigned shift = 0;
+	uint8_t byte = 0;
+	while (*cursor < end && shift < 64) {
+		byte = *(*cursor)++;
+		result |= (uint64_t)(byte & 0x7fu) << shift;
+		shift += 7;
+		if (!(byte & 0x80u)) {
+			if (shift < 64 && (byte & 0x40u))
+				result |= UINT64_MAX << shift;
+			*value = (int64_t)result;
+			return 0;
+		}
+	}
+	return -1;
+}
+
+static int range_valid(uint64_t offset, uint64_t size, uint64_t limit)
+{
+	return offset <= limit && size <= limit - offset;
+}
+
+static int add_provider(struct import_context* context,
+			const struct dylib_command* command)
+{
+	if (context->provider_count == MACHGATE_MAX_NATIVE_PROVIDERS) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O has too many native dependencies");
+		return -1;
+	}
+	if (command->dylib.name_offset >= command->cmdsize) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O contains an invalid dylib name");
+		return -1;
+	}
+
+	const char* name = (const char*)command + command->dylib.name_offset;
+	size_t remaining = command->cmdsize - command->dylib.name_offset;
+	if (!memchr(name, '\0', remaining)) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O contains an unterminated dylib name");
+		return -1;
+	}
+
+	struct native_provider* provider =
+		&context->providers[context->provider_count++];
+	provider->install_name = name;
+	char path[PATH_MAX];
+	int mapping_result = machgate_native_provider_path(
+		name, path, sizeof(path), context->error, context->error_size);
+	if (mapping_result < 0)
+		return -1;
+	if (mapping_result == 0)
+		return 0;
+	provider->handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+	if (!provider->handle) {
+		snprintf(context->error, context->error_size,
+		         "could not load native provider for %s: %s", name,
+		         dlerror());
+		return -1;
+	}
+	return 0;
+}
+
+static int collect_load_commands(struct import_context* context)
+{
+	struct mach_header_64* header = context->loaded->mh;
+	uint8_t* cursor = (uint8_t*)(header + 1);
+	for (uint32_t index = 0; index < header->ncmds; index++) {
+		struct load_command* command = (void*)cursor;
+		if (command->cmd == LC_SEGMENT_64) {
+			if (context->segment_count == MACHGATE_MAX_IMPORT_SEGMENTS) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O has too many import segments");
+				return -1;
+			}
+			struct segment_command_64* segment = (void*)command;
+			struct import_segment* result =
+				&context->segments[context->segment_count++];
+			result->address = segment->vmaddr + context->loaded->slide;
+			result->size = segment->vmsize;
+			result->protection = native_protection(segment->initprot);
+		} else if (command->cmd == LC_DYLD_INFO_ONLY) {
+			if (command->cmdsize < sizeof(struct dyld_info_command)) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O has an invalid dyld info command");
+				return -1;
+			}
+			context->dyld_info = (void*)command;
+		} else if (command->cmd == LC_DYLD_CHAINED_FIXUPS) {
+			if (command->cmdsize < sizeof(struct linkedit_data_command)) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O has an invalid chained-fixups command");
+				return -1;
+			}
+			context->chained_fixups = (void*)command;
+		} else if (command->cmd == LC_LOAD_DYLIB ||
+		           command->cmd == LC_LOAD_WEAK_DYLIB ||
+		           command->cmd == LC_REEXPORT_DYLIB ||
+		           command->cmd == LC_LOAD_UPWARD_DYLIB) {
+			if (command->cmdsize < sizeof(struct dylib_command) ||
+			    add_provider(context, (void*)command) != 0)
+				return -1;
+		}
+		cursor += command->cmdsize;
+	}
+	return 0;
+}
+
+static void unresolved_stub_binder(void)
+{
+	_exit(127);
+}
+
+static void* find_symbol(struct import_context* context,
+			 struct bind_state* state)
+{
+	if (!state->symbol)
+		return NULL;
+	if (strcmp(state->symbol, "dyld_stub_binder") == 0)
+		return unresolved_stub_binder;
+
+	const char* native_name = state->symbol[0] == '_'
+		                          ? state->symbol + 1
+		                          : state->symbol;
+	void* handle = RTLD_DEFAULT;
+	if (state->provider_ordinal > 0) {
+		size_t index = (size_t)state->provider_ordinal - 1;
+		if (index >= context->provider_count)
+			return NULL;
+		handle = context->providers[index].handle;
+		if (!handle)
+			return NULL;
+	}
+	return dlsym(handle, native_name);
+}
+
+static int write_pointer(struct import_context* context,
+			 struct bind_state* state)
+{
+	if (state->type != BIND_TYPE_POINTER ||
+	    state->segment_index >= context->segment_count) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O uses an unsupported native bind type");
+		return -1;
+	}
+	struct import_segment* segment = &context->segments[state->segment_index];
+	if (state->segment_offset > segment->size ||
+	    sizeof(uintptr_t) > segment->size - state->segment_offset) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O native bind address is outside its segment");
+		return -1;
+	}
+
+	void* symbol = find_symbol(context, state);
+	if (!symbol && !(state->symbol_flags & BIND_SYMBOL_FLAGS_WEAK_IMPORT)) {
+		const char* provider = "flat namespace";
+		if (state->provider_ordinal > 0 &&
+		    (size_t)state->provider_ordinal <= context->provider_count) {
+			provider = context->providers[state->provider_ordinal - 1]
+			                   .install_name;
+		}
+		snprintf(context->error, context->error_size,
+		         "native symbol %s was not found for %s", state->symbol,
+		         provider);
+		return -1;
+	}
+
+	uintptr_t address = segment->address + state->segment_offset;
+	uintptr_t page = address & ~((uintptr_t)context->page_size - 1);
+	int restore_protection = segment->protection;
+	if (!(restore_protection & PROT_WRITE) &&
+	    mprotect((void*)page, (size_t)context->page_size,
+	             restore_protection | PROT_WRITE) != 0) {
+		snprintf(context->error, context->error_size,
+		         "could not make native bind address writable: %s",
+		         strerror(errno));
+		return -1;
+	}
+
+	uintptr_t value = (uintptr_t)symbol + state->addend;
+	memcpy((void*)address, &value, sizeof(value));
+	if (!(restore_protection & PROT_WRITE) &&
+	    mprotect((void*)page, (size_t)context->page_size,
+	             restore_protection) != 0) {
+		snprintf(context->error, context->error_size,
+		         "could not restore native bind protection: %s",
+		         strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+static int write_chained_pointer(struct import_context* context,
+				 struct import_segment* segment,
+				 uint64_t segment_offset, uintptr_t value)
+{
+	if (segment_offset > segment->size ||
+	    sizeof(value) > segment->size - segment_offset) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O chained pointer is outside its segment");
+		return -1;
+	}
+
+	uintptr_t address = segment->address + segment_offset;
+	uintptr_t page = address & ~((uintptr_t)context->page_size - 1);
+	if (!(segment->protection & PROT_WRITE) &&
+	    mprotect((void*)page, (size_t)context->page_size,
+	             segment->protection | PROT_WRITE) != 0) {
+		snprintf(context->error, context->error_size,
+		         "could not make chained pointer writable: %s",
+		         strerror(errno));
+		return -1;
+	}
+
+	memcpy((void*)address, &value, sizeof(value));
+	if (!(segment->protection & PROT_WRITE) &&
+	    mprotect((void*)page, (size_t)context->page_size,
+	             segment->protection) != 0) {
+		snprintf(context->error, context->error_size,
+		         "could not restore chained-pointer protection: %s",
+		         strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+static int add_offset(uint64_t* offset, uint64_t amount)
+{
+	if (amount > UINT64_MAX - *offset)
+		return -1;
+	*offset += amount;
+	return 0;
+}
+
+static int apply_bind_stream(struct import_context* context,
+			     uint32_t file_offset, uint32_t size,
+			     int lazy)
+{
+	if (!size)
+		return 0;
+	const uint8_t* cursor = address_for_file_offset(context, file_offset, size);
+	if (!cursor) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O native bind stream is not mapped");
+		return -1;
+	}
+	const uint8_t* end = cursor + size;
+	struct bind_state state = { .type = BIND_TYPE_POINTER };
+	int bind_count = 0;
+
+	while (cursor < end) {
+		uint8_t byte = *cursor++;
+		uint8_t opcode = byte & BIND_OPCODE_MASK;
+		uint8_t immediate = byte & BIND_IMMEDIATE_MASK;
+		uint64_t value;
+
+		switch (opcode) {
+		case BIND_OPCODE_DONE:
+			if (!lazy)
+				return bind_count;
+			memset(&state, 0, sizeof(state));
+			state.type = BIND_TYPE_POINTER;
+			break;
+		case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+			state.provider_ordinal = immediate;
+			break;
+		case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
+			if (read_uleb128(&cursor, end, &value) != 0 ||
+			    value > INT32_MAX)
+				goto invalid_stream;
+			state.provider_ordinal = (int)value;
+			break;
+		case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
+			state.provider_ordinal = immediate == 0
+				                         ? 0
+				                         : (int8_t)(0xf0u | immediate);
+			break;
+		case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: {
+			const uint8_t* terminator = memchr(cursor, '\0', end - cursor);
+			if (!terminator)
+				goto invalid_stream;
+			state.symbol_flags = immediate;
+			state.symbol = (const char*)cursor;
+			cursor = terminator + 1;
+			break;
+		}
+		case BIND_OPCODE_SET_TYPE_IMM:
+			state.type = immediate;
+			break;
+		case BIND_OPCODE_SET_ADDEND_SLEB:
+			if (read_sleb128(&cursor, end, &state.addend) != 0)
+				goto invalid_stream;
+			break;
+		case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+			if (read_uleb128(&cursor, end, &state.segment_offset) != 0)
+				goto invalid_stream;
+			state.segment_index = immediate;
+			break;
+		case BIND_OPCODE_ADD_ADDR_ULEB:
+			if (read_uleb128(&cursor, end, &value) != 0 ||
+			    add_offset(&state.segment_offset, value) != 0)
+				goto invalid_stream;
+			break;
+		case BIND_OPCODE_DO_BIND:
+			if (write_pointer(context, &state) != 0 ||
+			    add_offset(&state.segment_offset, sizeof(uintptr_t)) != 0)
+				return -1;
+			bind_count++;
+			break;
+		case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
+			if (write_pointer(context, &state) != 0 ||
+			    read_uleb128(&cursor, end, &value) != 0 ||
+			    add_offset(&state.segment_offset,
+			               sizeof(uintptr_t) + value) != 0)
+				return -1;
+			bind_count++;
+			break;
+		case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
+			if (write_pointer(context, &state) != 0 ||
+			    add_offset(&state.segment_offset,
+			               sizeof(uintptr_t) * (immediate + 1u)) != 0)
+				return -1;
+			bind_count++;
+			break;
+		case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB: {
+			uint64_t count;
+			uint64_t skip;
+			if (read_uleb128(&cursor, end, &count) != 0 ||
+			    read_uleb128(&cursor, end, &skip) != 0)
+				goto invalid_stream;
+			for (uint64_t index = 0; index < count; index++) {
+				if (write_pointer(context, &state) != 0 ||
+				    add_offset(&state.segment_offset,
+				               sizeof(uintptr_t) + skip) != 0)
+					return -1;
+				bind_count++;
+			}
+			break;
+		}
+		default:
+			goto invalid_stream;
+		}
+	}
+	return bind_count;
+
+invalid_stream:
+	snprintf(context->error, context->error_size,
+	         "Mach-O contains an invalid native bind stream");
+	return -1;
+}
+
+static size_t chained_import_size(uint32_t format)
+{
+	if (format == DYLD_CHAINED_IMPORT)
+		return sizeof(uint32_t);
+	if (format == DYLD_CHAINED_IMPORT_ADDEND)
+		return sizeof(uint32_t) + sizeof(int32_t);
+	if (format == DYLD_CHAINED_IMPORT_ADDEND64)
+		return sizeof(uint64_t) + sizeof(int64_t);
+	return 0;
+}
+
+static int read_chained_import(const uint8_t* fixups, size_t fixups_size,
+			       const struct chained_fixups_header* header,
+			       uint32_t import_index,
+			       struct chained_import* result)
+{
+	size_t entry_size = chained_import_size(header->imports_format);
+	uint64_t entry_offset = header->imports_offset +
+	                        (uint64_t)import_index * entry_size;
+	if (!entry_size || import_index >= header->imports_count ||
+	    !range_valid(entry_offset, entry_size, fixups_size) ||
+	    header->symbols_offset > fixups_size)
+		return -1;
+
+	memset(result, 0, sizeof(*result));
+	uint64_t name_offset;
+	if (header->imports_format == DYLD_CHAINED_IMPORT ||
+	    header->imports_format == DYLD_CHAINED_IMPORT_ADDEND) {
+		uint32_t word;
+		memcpy(&word, fixups + entry_offset, sizeof(word));
+		result->provider_ordinal = (int8_t)(word & 0xffu);
+		result->weak_import = (word >> 8) & 1u;
+		name_offset = word >> 9;
+		if (header->imports_format == DYLD_CHAINED_IMPORT_ADDEND) {
+			int32_t addend;
+			memcpy(&addend, fixups + entry_offset + sizeof(word),
+			       sizeof(addend));
+			result->addend = addend;
+		}
+	} else {
+		uint64_t word;
+		memcpy(&word, fixups + entry_offset, sizeof(word));
+		result->provider_ordinal = (int16_t)(word & 0xffffu);
+		result->weak_import = (word >> 16) & 1u;
+		name_offset = word >> 32;
+		memcpy(&result->addend,
+		       fixups + entry_offset + sizeof(word),
+		       sizeof(result->addend));
+	}
+
+	uint64_t symbol_offset = header->symbols_offset + name_offset;
+	if (symbol_offset >= fixups_size ||
+	    !memchr(fixups + symbol_offset, '\0', fixups_size - symbol_offset))
+		return -1;
+	result->symbol = (const char*)fixups + symbol_offset;
+	return 0;
+}
+
+static int resolve_chained_bind(struct import_context* context,
+				const struct chained_import* import,
+				int64_t pointer_addend,
+				uintptr_t* value)
+{
+	int64_t total_addend;
+	if (__builtin_add_overflow(import->addend, pointer_addend,
+	                           &total_addend)) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O chained import addend overflows");
+		return -1;
+	}
+	struct bind_state state = {
+		.provider_ordinal = import->provider_ordinal,
+		.type = BIND_TYPE_POINTER,
+		.symbol_flags = import->weak_import
+			                ? BIND_SYMBOL_FLAGS_WEAK_IMPORT
+			                : 0,
+		.addend = total_addend,
+		.symbol = import->symbol,
+	};
+	void* symbol = find_symbol(context, &state);
+	if (!symbol && !import->weak_import) {
+		const char* provider = "flat namespace";
+		if (import->provider_ordinal > 0 &&
+		    (size_t)import->provider_ordinal <= context->provider_count) {
+			provider = context->providers[import->provider_ordinal - 1]
+			                   .install_name;
+		}
+		snprintf(context->error, context->error_size,
+		         "native symbol %s was not found for %s", import->symbol,
+		         provider);
+		return -1;
+	}
+	*value = (uintptr_t)symbol + state.addend;
+	return 0;
+}
+
+static int apply_chained_page(struct import_context* context,
+			      const uint8_t* fixups, size_t fixups_size,
+			      const struct chained_fixups_header* header,
+			      struct import_segment* segment,
+			      uint16_t pointer_format, uint16_t page_size,
+			      uint16_t page_index, uint16_t start)
+{
+	uint64_t page_offset = (uint64_t)page_index * page_size;
+	uint64_t pointer_offset = page_offset + start;
+	for (;;) {
+		if (pointer_offset > segment->size ||
+		    sizeof(uint64_t) > segment->size - pointer_offset ||
+		    pointer_offset - page_offset >= page_size) {
+			snprintf(context->error, context->error_size,
+			         "Mach-O chained pointer leaves its page");
+			return -1;
+		}
+
+		uint64_t raw;
+		memcpy(&raw, (void*)(segment->address + pointer_offset),
+		       sizeof(raw));
+		uint16_t next = (raw >> 51) & 0xfffu;
+		uintptr_t value;
+		if (raw >> 63) {
+			uint32_t import_index = raw & 0xffffffu;
+			int64_t pointer_addend = (int8_t)((raw >> 24) & 0xffu);
+			struct chained_import import;
+			if (read_chained_import(fixups, fixups_size, header,
+			                        import_index, &import) != 0) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O contains an invalid chained import");
+				return -1;
+			}
+			if (resolve_chained_bind(context, &import, pointer_addend,
+			                         &value) != 0)
+				return -1;
+		} else {
+			uint64_t target = raw & ((UINT64_C(1) << 36) - 1);
+			if (pointer_format == DYLD_CHAINED_PTR_64) {
+				uint64_t high = (raw >> 36) & 0xffu;
+				value = (uintptr_t)(target | (high << 56)) +
+				        context->loaded->slide;
+			} else {
+				value = (uintptr_t)context->loaded->mh + target;
+			}
+		}
+		if (write_chained_pointer(context, segment, pointer_offset,
+		                          value) != 0)
+			return -1;
+		if (!next)
+			return 0;
+		if (add_offset(&pointer_offset, (uint64_t)next * 4u) != 0) {
+			snprintf(context->error, context->error_size,
+			         "Mach-O chained pointer offset overflows");
+			return -1;
+		}
+	}
+}
+
+static int apply_chained_segment(
+	struct import_context* context, const uint8_t* fixups, size_t fixups_size,
+	const struct chained_fixups_header* header, size_t segment_index,
+	const struct chained_starts_in_segment* starts, size_t starts_size)
+{
+	size_t starts_header_size =
+		offsetof(struct chained_starts_in_segment, page_start);
+	if (segment_index >= context->segment_count ||
+	    starts_size < starts_header_size ||
+	    starts->size > starts_size ||
+	    starts->page_count >
+		(starts->size - starts_header_size) / sizeof(uint16_t) ||
+	    (starts->pointer_format != DYLD_CHAINED_PTR_64 &&
+	     starts->pointer_format != DYLD_CHAINED_PTR_64_OFFSET) ||
+	    !starts->page_size) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O uses unsupported chained-fixup starts");
+		return -1;
+	}
+
+	struct import_segment* segment = &context->segments[segment_index];
+	for (uint16_t page_index = 0; page_index < starts->page_count;
+	     page_index++) {
+		uint16_t start = starts->page_start[page_index];
+		if (start == DYLD_CHAINED_PTR_START_NONE)
+			continue;
+		if (!(start & DYLD_CHAINED_PTR_START_MULTI)) {
+			if (apply_chained_page(context, fixups, fixups_size, header,
+			                       segment, starts->pointer_format,
+			                       starts->page_size, page_index, start) != 0)
+				return -1;
+			continue;
+		}
+
+		size_t overflow_index = start & ~DYLD_CHAINED_PTR_START_MULTI;
+		size_t total_starts =
+			(starts->size - starts_header_size) / sizeof(uint16_t);
+		for (;;) {
+			if (overflow_index >= total_starts) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O chained-fixup overflow index is invalid");
+				return -1;
+			}
+			uint16_t overflow_start = starts->page_start[overflow_index++];
+			if (apply_chained_page(
+				    context, fixups, fixups_size, header, segment,
+				    starts->pointer_format, starts->page_size, page_index,
+				    overflow_start & ~DYLD_CHAINED_PTR_START_LAST) != 0)
+				return -1;
+			if (overflow_start & DYLD_CHAINED_PTR_START_LAST)
+				break;
+		}
+	}
+	return 0;
+}
+
+static int apply_chained_fixups(struct import_context* context)
+{
+	if (!context->chained_fixups || !context->chained_fixups->datasize)
+		return 0;
+	size_t fixups_size = context->chained_fixups->datasize;
+	const uint8_t* fixups = address_for_file_offset(
+		context, context->chained_fixups->dataoff, fixups_size);
+	if (!fixups || fixups_size < sizeof(struct chained_fixups_header)) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O chained-fixups data is not mapped");
+		return -1;
+	}
+
+	const struct chained_fixups_header* header = (const void*)fixups;
+	if (header->fixups_version != 0 || header->symbols_format != 0 ||
+	    !chained_import_size(header->imports_format) ||
+	    !range_valid(header->starts_offset, sizeof(uint32_t), fixups_size)) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O uses unsupported chained-fixups metadata");
+		return -1;
+	}
+
+	const uint8_t* starts_data = fixups + header->starts_offset;
+	uint32_t segment_count;
+	memcpy(&segment_count, starts_data, sizeof(segment_count));
+	uint64_t offsets_size = (uint64_t)segment_count * sizeof(uint32_t);
+	if (segment_count > context->segment_count ||
+	    !range_valid(header->starts_offset + sizeof(uint32_t), offsets_size,
+	                 fixups_size)) {
+		snprintf(context->error, context->error_size,
+		         "Mach-O chained-fixups segment table is invalid");
+		return -1;
+	}
+	const uint32_t* segment_offsets =
+		(const void*)(starts_data + sizeof(uint32_t));
+	for (uint32_t index = 0; index < segment_count; index++) {
+		if (!segment_offsets[index])
+			continue;
+		uint64_t starts_offset =
+			(uint64_t)header->starts_offset + segment_offsets[index];
+		if (!range_valid(starts_offset,
+		                 offsetof(struct chained_starts_in_segment,
+		                          page_start),
+		                 fixups_size)) {
+			snprintf(context->error, context->error_size,
+			         "Mach-O chained segment starts are invalid");
+			return -1;
+		}
+		const struct chained_starts_in_segment* starts =
+			(const void*)(fixups + starts_offset);
+		if (apply_chained_segment(context, fixups, fixups_size, header,
+		                          index, starts,
+		                          fixups_size - starts_offset) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+int machgate_bind_native_imports(struct load_results* loaded, char* error,
+				 size_t error_size)
+{
+	struct import_context context;
+	memset(&context, 0, sizeof(context));
+	context.loaded = loaded;
+	context.error = error;
+	context.error_size = error_size;
+	context.page_size = sysconf(_SC_PAGESIZE);
+	if (context.page_size <= 0) {
+		snprintf(error, error_size, "could not determine host page size");
+		return -1;
+	}
+	if (collect_load_commands(&context) != 0)
+		return -1;
+	int bind_count = 0;
+	if (context.dyld_info) {
+		int result = apply_bind_stream(
+			&context, context.dyld_info->bind_off,
+			context.dyld_info->bind_size, 0);
+		if (result < 0)
+			return -1;
+		bind_count += result;
+		result = apply_bind_stream(
+			&context, context.dyld_info->weak_bind_off,
+			context.dyld_info->weak_bind_size, 0);
+		if (result < 0)
+			return -1;
+		bind_count += result;
+		result = apply_bind_stream(
+			&context, context.dyld_info->lazy_bind_off,
+			context.dyld_info->lazy_bind_size, 1);
+		if (result < 0)
+			return -1;
+		bind_count += result;
+	}
+	if (apply_chained_fixups(&context) != 0)
+		return -1;
+	return bind_count;
+}
