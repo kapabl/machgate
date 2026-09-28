@@ -1,5 +1,6 @@
 #include "native_imports.h"
 
+#include "guest_symbols.h"
 #include "macho_defs.h"
 #include "native_provider_map.h"
 
@@ -34,6 +35,11 @@
 
 #define BIND_SYMBOL_FLAGS_WEAK_IMPORT 0x1u
 #define BIND_TYPE_POINTER 1u
+
+#define BIND_SPECIAL_DYLIB_SELF 0
+#define BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE -1
+#define BIND_SPECIAL_DYLIB_FLAT_LOOKUP -2
+#define BIND_SPECIAL_DYLIB_WEAK_LOOKUP -3
 
 #define DYLD_CHAINED_IMPORT 1u
 #define DYLD_CHAINED_IMPORT_ADDEND 2u
@@ -72,6 +78,7 @@ struct chained_import {
 };
 
 struct import_segment {
+	const struct segment_command_64* command;
 	uintptr_t address;
 	uint64_t size;
 	int protection;
@@ -79,13 +86,16 @@ struct import_segment {
 
 struct native_provider {
 	const char* install_name;
+	enum machgate_provider_decision_kind decision;
 	void* handle;
 };
 
 struct import_context {
-	struct load_results* loaded;
+	struct machgate_guest_image* image;
 	struct dyld_info_command* dyld_info;
 	struct linkedit_data_command* chained_fixups;
+	struct symtab_command* symbol_table;
+	struct dysymtab_command* dynamic_symbol_table;
 	struct import_segment segments[MACHGATE_MAX_IMPORT_SEGMENTS];
 	size_t segment_count;
 	struct native_provider providers[MACHGATE_MAX_NATIVE_PROVIDERS];
@@ -121,7 +131,7 @@ static void* address_for_file_offset(struct import_context* context,
 				     uint64_t file_offset,
 				     uint64_t required_size)
 {
-	struct mach_header_64* header = context->loaded->mh;
+	struct mach_header_64* header = context->image->header;
 	uint8_t* cursor = (uint8_t*)(header + 1);
 	for (uint32_t index = 0; index < header->ncmds; index++) {
 		struct load_command* command = (void*)cursor;
@@ -132,7 +142,7 @@ static void* address_for_file_offset(struct import_context* context,
 			    required_size <= segment->filesize -
 			                     (file_offset - segment->fileoff)) {
 				return (void*)(uintptr_t)(segment->vmaddr +
-				                         context->loaded->slide +
+				                         context->image->slide +
 				                         file_offset - segment->fileoff);
 			}
 		}
@@ -211,11 +221,12 @@ static int add_provider(struct import_context* context,
 		&context->providers[context->provider_count++];
 	provider->install_name = name;
 	char path[PATH_MAX];
-	int mapping_result = machgate_native_provider_path(
-		name, path, sizeof(path), context->error, context->error_size);
-	if (mapping_result < 0)
+	if (machgate_native_provider_decision(
+		    name, &provider->decision, path, sizeof(path), context->error,
+		    context->error_size) != 0)
 		return -1;
-	if (mapping_result == 0)
+	if (provider->decision != MACHGATE_PROVIDER_MAP &&
+	    provider->decision != MACHGATE_PROVIDER_PARTIAL)
 		return 0;
 	provider->handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
 	if (!provider->handle) {
@@ -229,7 +240,7 @@ static int add_provider(struct import_context* context,
 
 static int collect_load_commands(struct import_context* context)
 {
-	struct mach_header_64* header = context->loaded->mh;
+	struct mach_header_64* header = context->image->header;
 	uint8_t* cursor = (uint8_t*)(header + 1);
 	for (uint32_t index = 0; index < header->ncmds; index++) {
 		struct load_command* command = (void*)cursor;
@@ -240,9 +251,22 @@ static int collect_load_commands(struct import_context* context)
 				return -1;
 			}
 			struct segment_command_64* segment = (void*)command;
+			if (command->cmdsize < sizeof(*segment)) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O has invalid import segment sections");
+				return -1;
+			}
+			uint64_t section_bytes =
+				(uint64_t)segment->nsects * sizeof(struct section_64);
+			if (section_bytes > command->cmdsize - sizeof(*segment)) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O has invalid import segment sections");
+				return -1;
+			}
 			struct import_segment* result =
 				&context->segments[context->segment_count++];
-			result->address = segment->vmaddr + context->loaded->slide;
+			result->command = segment;
+			result->address = segment->vmaddr + context->image->slide;
 			result->size = segment->vmsize;
 			result->protection = native_protection(segment->initprot);
 		} else if (command->cmd == LC_DYLD_INFO_ONLY) {
@@ -252,6 +276,20 @@ static int collect_load_commands(struct import_context* context)
 				return -1;
 			}
 			context->dyld_info = (void*)command;
+		} else if (command->cmd == LC_SYMTAB) {
+			if (command->cmdsize < sizeof(struct symtab_command)) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O has an invalid symbol-table command");
+				return -1;
+			}
+			context->symbol_table = (void*)command;
+		} else if (command->cmd == LC_DYSYMTAB) {
+			if (command->cmdsize < sizeof(struct dysymtab_command)) {
+				snprintf(context->error, context->error_size,
+				         "Mach-O has an invalid dynamic-symbol-table command");
+				return -1;
+			}
+			context->dynamic_symbol_table = (void*)command;
 		} else if (command->cmd == LC_DYLD_CHAINED_FIXUPS) {
 			if (command->cmdsize < sizeof(struct linkedit_data_command)) {
 				snprintf(context->error, context->error_size,
@@ -277,6 +315,68 @@ static void unresolved_stub_binder(void)
 	_exit(127);
 }
 
+static void compiler_clear_cache(void* start, void* end)
+{
+	__builtin___clear_cache(start, end);
+}
+
+static long double compiler_floattidf(__int128 value)
+{
+	return (long double)value;
+}
+
+static const char* normalized_native_name(const char* guest_name,
+	                                  char* storage,
+	                                  size_t storage_size)
+{
+	static const char* suffixes[] = {
+		"$DARWIN_EXTSN",
+		"$INODE64",
+		"$NOCANCEL",
+	};
+	const char* result = guest_name[0] == '_' ? guest_name + 1 : guest_name;
+	size_t result_length = strlen(result);
+
+	for (size_t index = 0; index < sizeof(suffixes) / sizeof(suffixes[0]);
+	     index++) {
+		size_t suffix_length = strlen(suffixes[index]);
+		if (result_length < suffix_length ||
+		    strcmp(result + result_length - suffix_length,
+		           suffixes[index]) != 0)
+			continue;
+		size_t base_length = result_length - suffix_length;
+		if (base_length + 1 > storage_size)
+			return result;
+		memcpy(storage, result, base_length);
+		storage[base_length] = '\0';
+		return storage;
+	}
+	return result;
+}
+
+static void* find_compiler_runtime_symbol(const char* native_name)
+{
+	if (strcmp(native_name, "__clear_cache") == 0)
+		return compiler_clear_cache;
+	if (strcmp(native_name, "__floattidf") == 0)
+		return compiler_floattidf;
+	return NULL;
+}
+
+static void* find_dependency_symbol(struct import_context* context,
+				    const char* native_name)
+{
+	for (size_t index = 0; index < context->provider_count; index++) {
+		void* handle = context->providers[index].handle;
+		if (!handle)
+			continue;
+		void* symbol = dlsym(handle, native_name);
+		if (symbol)
+			return symbol;
+	}
+	return NULL;
+}
+
 static void* find_symbol(struct import_context* context,
 			 struct bind_state* state)
 {
@@ -285,23 +385,192 @@ static void* find_symbol(struct import_context* context,
 	if (strcmp(state->symbol, "dyld_stub_binder") == 0)
 		return unresolved_stub_binder;
 
-	const char* native_name = state->symbol[0] == '_'
-		                          ? state->symbol + 1
-		                          : state->symbol;
-	void* handle = RTLD_DEFAULT;
+	char normalized_name[1024];
+	const char* native_name = normalized_native_name(
+		state->symbol, normalized_name, sizeof(normalized_name));
 	if (state->provider_ordinal > 0) {
 		size_t index = (size_t)state->provider_ordinal - 1;
 		if (index >= context->provider_count)
 			return NULL;
-		handle = context->providers[index].handle;
-		if (!handle)
-			return NULL;
+		struct native_provider* provider = &context->providers[index];
+		if (provider->handle) {
+			void* symbol = dlsym(provider->handle, native_name);
+			if (symbol)
+				return symbol;
+		}
+		if (provider->decision == MACHGATE_PROVIDER_MAP ||
+		    provider->decision == MACHGATE_PROVIDER_PARTIAL)
+			return find_compiler_runtime_symbol(native_name);
+		return NULL;
 	}
-	return dlsym(handle, native_name);
+
+	if (state->provider_ordinal == BIND_SPECIAL_DYLIB_SELF ||
+	    state->provider_ordinal == BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE ||
+	    state->provider_ordinal == BIND_SPECIAL_DYLIB_FLAT_LOOKUP ||
+	    state->provider_ordinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP) {
+		void* symbol = machgate_find_guest_definition(context->image,
+		                                                state->symbol);
+		if (symbol)
+			return symbol;
+	}
+	if (state->provider_ordinal != BIND_SPECIAL_DYLIB_FLAT_LOOKUP &&
+	    state->provider_ordinal != BIND_SPECIAL_DYLIB_WEAK_LOOKUP)
+		return NULL;
+
+	void* symbol = find_dependency_symbol(context, native_name);
+	if (symbol)
+		return symbol;
+	symbol = dlsym(RTLD_DEFAULT, native_name);
+	if (symbol)
+		return symbol;
+	return find_compiler_runtime_symbol(native_name);
+}
+
+enum unresolved_import_action {
+	UNRESOLVED_IMPORT_ERROR,
+	UNRESOLVED_IMPORT_ZERO,
+	UNRESOLVED_IMPORT_TRAP,
+};
+
+static int bind_targets_lazy_symbol_pointer(
+	struct import_context* context, const struct bind_state* state)
+{
+	if (state->segment_index >= context->segment_count)
+		return 0;
+
+	const struct segment_command_64* segment =
+		context->segments[state->segment_index].command;
+	if (!segment || state->segment_offset > UINT64_MAX - segment->vmaddr)
+		return 0;
+	uint64_t target = segment->vmaddr + state->segment_offset;
+	const struct section_64* sections = (const void*)(segment + 1);
+
+	for (uint32_t index = 0; index < segment->nsects; index++) {
+		const struct section_64* section = &sections[index];
+		if ((section->flags & SECTION_TYPE) != S_LAZY_SYMBOL_POINTERS ||
+		    target < section->addr)
+			continue;
+		uint64_t section_offset = target - section->addr;
+		if (section_offset <= section->size &&
+		    sizeof(uintptr_t) <= section->size - section_offset)
+			return 1;
+	}
+	return 0;
+}
+
+static int symbol_has_stub_entry(struct import_context* context,
+				 const char* symbol_name)
+{
+	const struct symtab_command* symbol_table = context->symbol_table;
+	const struct dysymtab_command* dynamic_symbol_table =
+		context->dynamic_symbol_table;
+	if (!symbol_name || !symbol_table || !dynamic_symbol_table)
+		return 0;
+
+	uint64_t symbol_bytes =
+		(uint64_t)symbol_table->nsyms * sizeof(struct nlist_64);
+	const struct nlist_64* symbols = address_for_file_offset(
+		context, symbol_table->symoff, symbol_bytes);
+	const char* strings = address_for_file_offset(
+		context, symbol_table->stroff, symbol_table->strsize);
+	uint64_t indirect_bytes =
+		(uint64_t)dynamic_symbol_table->nindirectsyms * sizeof(uint32_t);
+	const uint32_t* indirect_symbols = address_for_file_offset(
+		context, dynamic_symbol_table->indirectsymoff, indirect_bytes);
+	if (!symbols || !strings || !indirect_symbols)
+		return 0;
+
+	for (size_t segment_index = 0; segment_index < context->segment_count;
+	     segment_index++) {
+		const struct segment_command_64* segment =
+			context->segments[segment_index].command;
+		const struct section_64* sections = (const void*)(segment + 1);
+		for (uint32_t section_index = 0;
+		     section_index < segment->nsects; section_index++) {
+			const struct section_64* section = &sections[section_index];
+			if ((section->flags & SECTION_TYPE) != S_SYMBOL_STUBS ||
+			    !section->reserved2 ||
+			    section->size % section->reserved2 != 0)
+				continue;
+
+			uint64_t stub_count = section->size / section->reserved2;
+			if (section->reserved1 >
+				    dynamic_symbol_table->nindirectsyms ||
+			    stub_count > dynamic_symbol_table->nindirectsyms -
+			                         section->reserved1)
+				continue;
+
+			for (uint64_t stub_index = 0; stub_index < stub_count;
+			     stub_index++) {
+				uint32_t symbol_index = indirect_symbols[
+					section->reserved1 + stub_index];
+				if (symbol_index &
+				    (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS))
+					continue;
+				if (symbol_index >= symbol_table->nsyms)
+					continue;
+				uint32_t string_index = symbols[symbol_index].n_strx;
+				if (string_index >= symbol_table->strsize)
+					continue;
+				const char* candidate = strings + string_index;
+				if (!memchr(candidate, '\0',
+				            symbol_table->strsize - string_index))
+					continue;
+				if (strcmp(candidate, symbol_name) == 0)
+					return 1;
+			}
+		}
+	}
+	return 0;
+}
+
+static enum unresolved_import_action unresolved_import_action(
+	struct import_context* context, const struct bind_state* state, int lazy)
+{
+	int direct_function_target =
+		lazy || bind_targets_lazy_symbol_pointer(context, state);
+	int stubbed_function = symbol_has_stub_entry(context, state->symbol);
+	if (state->symbol_flags & BIND_SYMBOL_FLAGS_WEAK_IMPORT)
+		return UNRESOLVED_IMPORT_ZERO;
+	if (state->provider_ordinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP)
+		return UNRESOLVED_IMPORT_ZERO;
+	if (state->provider_ordinal > 0 &&
+	    (size_t)state->provider_ordinal <= context->provider_count) {
+		enum machgate_provider_decision_kind decision =
+			context->providers[state->provider_ordinal - 1].decision;
+		if (decision == MACHGATE_PROVIDER_SKIP)
+			return UNRESOLVED_IMPORT_ZERO;
+		if (decision == MACHGATE_PROVIDER_PARTIAL)
+			return direct_function_target || stubbed_function
+				       ? UNRESOLVED_IMPORT_TRAP
+				       : UNRESOLVED_IMPORT_ZERO;
+		if (decision == MACHGATE_PROVIDER_STUB)
+			return UNRESOLVED_IMPORT_TRAP;
+		if (decision == MACHGATE_PROVIDER_MAP && stubbed_function)
+			return UNRESOLVED_IMPORT_TRAP;
+	}
+	if (direct_function_target)
+		return UNRESOLVED_IMPORT_TRAP;
+	return UNRESOLVED_IMPORT_ERROR;
+}
+
+static const char* provider_description(struct import_context* context,
+					const struct bind_state* state)
+{
+	if (state->provider_ordinal > 0 &&
+	    (size_t)state->provider_ordinal <= context->provider_count)
+		return context->providers[state->provider_ordinal - 1].install_name;
+	if (state->provider_ordinal == BIND_SPECIAL_DYLIB_SELF)
+		return "guest image";
+	if (state->provider_ordinal == BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE)
+		return "main executable";
+	if (state->provider_ordinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP)
+		return "weak lookup";
+	return "flat namespace";
 }
 
 static int write_pointer(struct import_context* context,
-			 struct bind_state* state)
+			 struct bind_state* state, int lazy)
 {
 	if (state->type != BIND_TYPE_POINTER ||
 	    state->segment_index >= context->segment_count) {
@@ -318,17 +587,20 @@ static int write_pointer(struct import_context* context,
 	}
 
 	void* symbol = find_symbol(context, state);
-	if (!symbol && !(state->symbol_flags & BIND_SYMBOL_FLAGS_WEAK_IMPORT)) {
-		const char* provider = "flat namespace";
-		if (state->provider_ordinal > 0 &&
-		    (size_t)state->provider_ordinal <= context->provider_count) {
-			provider = context->providers[state->provider_ordinal - 1]
-			                   .install_name;
+	int bind_zero = 0;
+	if (!symbol) {
+		enum unresolved_import_action action =
+			unresolved_import_action(context, state, lazy);
+		if (action == UNRESOLVED_IMPORT_TRAP)
+			symbol = unresolved_stub_binder;
+		else if (action == UNRESOLVED_IMPORT_ZERO)
+			bind_zero = 1;
+		else if (action == UNRESOLVED_IMPORT_ERROR) {
+			snprintf(context->error, context->error_size,
+			         "native symbol %s was not found for %s", state->symbol,
+			         provider_description(context, state));
+			return -1;
 		}
-		snprintf(context->error, context->error_size,
-		         "native symbol %s was not found for %s", state->symbol,
-		         provider);
-		return -1;
 	}
 
 	uintptr_t address = segment->address + state->segment_offset;
@@ -343,7 +615,7 @@ static int write_pointer(struct import_context* context,
 		return -1;
 	}
 
-	uintptr_t value = (uintptr_t)symbol + state->addend;
+	uintptr_t value = bind_zero ? 0 : (uintptr_t)symbol + state->addend;
 	memcpy((void*)address, &value, sizeof(value));
 	if (!(restore_protection & PROT_WRITE) &&
 	    mprotect((void*)page, (size_t)context->page_size,
@@ -398,9 +670,14 @@ static int add_offset(uint64_t* offset, uint64_t amount)
 	return 0;
 }
 
+static void add_modular_bind_offset(uint64_t* offset, uint64_t amount)
+{
+	*offset += amount;
+}
+
 static int apply_bind_stream(struct import_context* context,
 			     uint32_t file_offset, uint32_t size,
-			     int lazy)
+			     int lazy, int weak_lookup)
 {
 	if (!size)
 		return 0;
@@ -411,7 +688,10 @@ static int apply_bind_stream(struct import_context* context,
 		return -1;
 	}
 	const uint8_t* end = cursor + size;
-	struct bind_state state = { .type = BIND_TYPE_POINTER };
+	struct bind_state state = {
+		.provider_ordinal = weak_lookup ? BIND_SPECIAL_DYLIB_WEAK_LOOKUP : 0,
+		.type = BIND_TYPE_POINTER,
+	};
 	int bind_count = 0;
 
 	while (cursor < end) {
@@ -425,6 +705,8 @@ static int apply_bind_stream(struct import_context* context,
 			if (!lazy)
 				return bind_count;
 			memset(&state, 0, sizeof(state));
+			state.provider_ordinal =
+				weak_lookup ? BIND_SPECIAL_DYLIB_WEAK_LOOKUP : 0;
 			state.type = BIND_TYPE_POINTER;
 			break;
 		case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
@@ -463,18 +745,18 @@ static int apply_bind_stream(struct import_context* context,
 			state.segment_index = immediate;
 			break;
 		case BIND_OPCODE_ADD_ADDR_ULEB:
-			if (read_uleb128(&cursor, end, &value) != 0 ||
-			    add_offset(&state.segment_offset, value) != 0)
+			if (read_uleb128(&cursor, end, &value) != 0)
 				goto invalid_stream;
+			add_modular_bind_offset(&state.segment_offset, value);
 			break;
 		case BIND_OPCODE_DO_BIND:
-			if (write_pointer(context, &state) != 0 ||
+			if (write_pointer(context, &state, lazy) != 0 ||
 			    add_offset(&state.segment_offset, sizeof(uintptr_t)) != 0)
 				return -1;
 			bind_count++;
 			break;
 		case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
-			if (write_pointer(context, &state) != 0 ||
+			if (write_pointer(context, &state, lazy) != 0 ||
 			    read_uleb128(&cursor, end, &value) != 0 ||
 			    add_offset(&state.segment_offset,
 			               sizeof(uintptr_t) + value) != 0)
@@ -482,7 +764,7 @@ static int apply_bind_stream(struct import_context* context,
 			bind_count++;
 			break;
 		case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
-			if (write_pointer(context, &state) != 0 ||
+			if (write_pointer(context, &state, lazy) != 0 ||
 			    add_offset(&state.segment_offset,
 			               sizeof(uintptr_t) * (immediate + 1u)) != 0)
 				return -1;
@@ -495,7 +777,7 @@ static int apply_bind_stream(struct import_context* context,
 			    read_uleb128(&cursor, end, &skip) != 0)
 				goto invalid_stream;
 			for (uint64_t index = 0; index < count; index++) {
-				if (write_pointer(context, &state) != 0 ||
+				if (write_pointer(context, &state, lazy) != 0 ||
 				    add_offset(&state.segment_offset,
 				               sizeof(uintptr_t) + skip) != 0)
 					return -1;
@@ -575,6 +857,7 @@ static int read_chained_import(const uint8_t* fixups, size_t fixups_size,
 
 static int resolve_chained_bind(struct import_context* context,
 				const struct chained_import* import,
+				uint8_t segment_index, uint64_t segment_offset,
 				int64_t pointer_addend,
 				uintptr_t* value)
 {
@@ -587,27 +870,32 @@ static int resolve_chained_bind(struct import_context* context,
 	}
 	struct bind_state state = {
 		.provider_ordinal = import->provider_ordinal,
+		.segment_index = segment_index,
 		.type = BIND_TYPE_POINTER,
 		.symbol_flags = import->weak_import
 			                ? BIND_SYMBOL_FLAGS_WEAK_IMPORT
 			                : 0,
 		.addend = total_addend,
+		.segment_offset = segment_offset,
 		.symbol = import->symbol,
 	};
 	void* symbol = find_symbol(context, &state);
-	if (!symbol && !import->weak_import) {
-		const char* provider = "flat namespace";
-		if (import->provider_ordinal > 0 &&
-		    (size_t)import->provider_ordinal <= context->provider_count) {
-			provider = context->providers[import->provider_ordinal - 1]
-			                   .install_name;
+	int bind_zero = 0;
+	if (!symbol) {
+		enum unresolved_import_action action =
+			unresolved_import_action(context, &state, 0);
+		if (action == UNRESOLVED_IMPORT_TRAP)
+			symbol = unresolved_stub_binder;
+		else if (action == UNRESOLVED_IMPORT_ZERO)
+			bind_zero = 1;
+		else if (action == UNRESOLVED_IMPORT_ERROR) {
+			snprintf(context->error, context->error_size,
+			         "native symbol %s was not found for %s", import->symbol,
+			         provider_description(context, &state));
+			return -1;
 		}
-		snprintf(context->error, context->error_size,
-		         "native symbol %s was not found for %s", import->symbol,
-		         provider);
-		return -1;
 	}
-	*value = (uintptr_t)symbol + state.addend;
+	*value = bind_zero ? 0 : (uintptr_t)symbol + state.addend;
 	return 0;
 }
 
@@ -644,7 +932,10 @@ static int apply_chained_page(struct import_context* context,
 				         "Mach-O contains an invalid chained import");
 				return -1;
 			}
-			if (resolve_chained_bind(context, &import, pointer_addend,
+			uint8_t segment_index =
+				(uint8_t)(segment - context->segments);
+			if (resolve_chained_bind(context, &import, segment_index,
+			                         pointer_offset, pointer_addend,
 			                         &value) != 0)
 				return -1;
 		} else {
@@ -652,9 +943,9 @@ static int apply_chained_page(struct import_context* context,
 			if (pointer_format == DYLD_CHAINED_PTR_64) {
 				uint64_t high = (raw >> 36) & 0xffu;
 				value = (uintptr_t)(target | (high << 56)) +
-				        context->loaded->slide;
+				        context->image->slide;
 			} else {
-				value = (uintptr_t)context->loaded->mh + target;
+				value = (uintptr_t)context->image->header + target;
 			}
 		}
 		if (write_chained_pointer(context, segment, pointer_offset,
@@ -784,12 +1075,12 @@ static int apply_chained_fixups(struct import_context* context)
 	return 0;
 }
 
-int machgate_bind_native_imports(struct load_results* loaded, char* error,
+int machgate_bind_native_imports(struct machgate_guest_image* image, char* error,
 				 size_t error_size)
 {
 	struct import_context context;
 	memset(&context, 0, sizeof(context));
-	context.loaded = loaded;
+	context.image = image;
 	context.error = error;
 	context.error_size = error_size;
 	context.page_size = sysconf(_SC_PAGESIZE);
@@ -803,19 +1094,19 @@ int machgate_bind_native_imports(struct load_results* loaded, char* error,
 	if (context.dyld_info) {
 		int result = apply_bind_stream(
 			&context, context.dyld_info->bind_off,
-			context.dyld_info->bind_size, 0);
+			context.dyld_info->bind_size, 0, 0);
 		if (result < 0)
 			return -1;
 		bind_count += result;
 		result = apply_bind_stream(
 			&context, context.dyld_info->weak_bind_off,
-			context.dyld_info->weak_bind_size, 0);
+			context.dyld_info->weak_bind_size, 0, 1);
 		if (result < 0)
 			return -1;
 		bind_count += result;
 		result = apply_bind_stream(
 			&context, context.dyld_info->lazy_bind_off,
-			context.dyld_info->lazy_bind_size, 1);
+			context.dyld_info->lazy_bind_size, 1, 0);
 		if (result < 0)
 			return -1;
 		bind_count += result;

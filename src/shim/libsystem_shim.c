@@ -1,31 +1,23 @@
-/*
- * libSystem.B.dylib shim for aarch64 Linux.
- *
- * Maps Apple libSystem symbols to glibc equivalents. Also translates
- * POSIX functions whose constants differ between Darwin and Linux
- * (O_* flags, AT_* flags, fcntl commands, struct stat layout, etc.).
- * Remaining standard C/POSIX symbols (malloc, pthread_create, strlen,
- * etc.) resolve through normal glibc linking.
- *
- * Built as a shared library:
- *   gcc -shared -fPIC -o libsystem_shim.so libsystem_shim.c -lm -lpthread -ldl
- */
-
 #define _GNU_SOURCE
 #include "../syscall/execve_reexec.h"
+#include "darwin_errno.h"
+#include "fd_lifecycle.h"
+#include "file_abi.h"
+#include "host_facts.h"
+#include "variadic_abi_compat.h"
+#include <ctype.h>
+#include <errno.h>
+#include <math.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <errno.h>
 #include <time.h>
-#include <math.h>
+#include <ucontext.h>
 #include <unistd.h>
 #include <wctype.h>
-#include <ctype.h>
-#include <pthread.h>
-#include <signal.h>
-#include <ucontext.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <sys/syscall.h>
@@ -39,15 +31,6 @@
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 
-static int shim_startup_log_enabled(void)
-{
-	const char* value = getenv("MACHGATE_VERBOSE");
-	if (!value)
-		value = getenv("MACHGATE_LOG_STARTUP");
-	return value && value[0] && strcmp(value, "0") != 0 &&
-	       strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0 &&
-	       strcmp(value, "no") != 0 && strcmp(value, "NO") != 0;
-}
 #include <linux/futex.h>
 #include <poll.h>
 #include <netdb.h>
@@ -65,7 +48,6 @@ static int shim_startup_log_enabled(void)
 
 extern char **environ;
 
-static int shim_hw_ncpu(void);
 static int shim_trace_enabled(void);
 static int shim_cxx_init_full_trace_enabled(void);
 static int shim_delta_vm_trace_enabled(void);
@@ -79,9 +61,6 @@ static void shim_fd_trace_log(const char* format, ...);
 static pid_t shim_trace_tid(void);
 static unsigned long shim_trace_pthread_self(void);
 static const char* shim_trace_path(const char* path);
-static char* getenv_from_guest_envp(const char* name);
-static int shim_errno_from_linux(int linux_errno);
-static int translate_oflags(int darwin_flags);
 static void trace_guest_address_context(const char* label, uintptr_t address);
 static uintptr_t trace_ucontext_reg(void* ucontext, int reg);
 static void trace_signal_indirect_branch(uintptr_t call_site, void* ucontext);
@@ -151,62 +130,6 @@ struct darwin_rusage {
 	int64_t ru_nivcsw;
 };
 
-/* ===== Mach time ===== */
-
-/* mach_absolute_time returns nanoseconds on arm64 (timebase is always 1:1) */
-uint64_t mach_absolute_time(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-struct mach_timebase_info_data {
-	uint32_t numer;
-	uint32_t denom;
-};
-
-int mach_timebase_info(struct mach_timebase_info_data *info)
-{
-	/* On arm64, the timebase is always 1:1 (nanoseconds) */
-	info->numer = 1;
-	info->denom = 1;
-	return 0; /* KERN_SUCCESS */
-}
-
-/*
- * clock_gettime_nsec_np(clockid_t) — Darwin's nanosecond clock accessor.
- *
- * Returns the named clock as a uint64 nanosecond count. The Darwin clock ids
- * differ from Linux's, so translate: CLOCK_REALTIME(0) → REALTIME; the per-CPU
- * accounting clocks → their Linux equivalents; everything else (the various
- * MONOTONIC/UPTIME_RAW flavors, including CLOCK_UPTIME_RAW=8, map to
- * CLOCK_MONOTONIC. Returns 0 on error, matching Darwin.
- */
-uint64_t clock_gettime_nsec_np(int clock_id)
-{
-	clockid_t linux_clk;
-	switch (clock_id) {
-	case 0:  /* CLOCK_REALTIME */
-		linux_clk = CLOCK_REALTIME;
-		break;
-	case 12: /* CLOCK_PROCESS_CPUTIME_ID */
-		linux_clk = CLOCK_PROCESS_CPUTIME_ID;
-		break;
-	case 16: /* CLOCK_THREAD_CPUTIME_ID */
-		linux_clk = CLOCK_THREAD_CPUTIME_ID;
-		break;
-	default: /* MONOTONIC / MONOTONIC_RAW / UPTIME_RAW (+APPROX) */
-		linux_clk = CLOCK_MONOTONIC;
-		break;
-	}
-
-	struct timespec ts;
-	if (clock_gettime(linux_clk, &ts) != 0)
-		return 0;
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
 double log2(double value)
 {
 	return log(value) / log(2.0);
@@ -224,19 +147,15 @@ uint32_t mach_task_self_ = 0x103; /* dummy port number */
 uint32_t vm_page_size = 4096;
 uint32_t vm_kernel_page_size = 4096;
 uint32_t kIOMasterPortDefault = 0;
+uint32_t kIOMainPortDefault = 0;
 
-struct machgate_mach_semaphore {
-	uint32_t name;
-	int value;
-	int used;
+enum {
+	MACHGATE_KERN_NOT_SUPPORTED = 46,
+	MACHGATE_MACH_SEND_MSG = 0x00000001,
+	MACHGATE_MACH_RCV_MSG = 0x00000002,
+	MACHGATE_MACH_SEND_INVALID_DEST = 0x10000003,
+	MACHGATE_MACH_RCV_INVALID_NAME = 0x10004002,
 };
-
-#define MACHGATE_MACH_SEMAPHORE_MAX 64
-
-static struct machgate_mach_semaphore
-	machgate_mach_semaphores[MACHGATE_MACH_SEMAPHORE_MAX];
-static uint32_t next_mach_semaphore_name = 0x4000;
-static uint32_t next_mach_port_name = 0x5000;
 
 uint32_t mach_host_self(void)
 {
@@ -248,84 +167,14 @@ uint32_t mach_thread_self(void)
 	return (uint32_t)syscall(SYS_gettid);
 }
 
-uint64_t mach_continuous_time(void)
-{
-	return mach_absolute_time();
-}
-
-uint64_t mach_approximate_time(void)
-{
-	return mach_absolute_time();
-}
-
-uint64_t mach_continuous_approximate_time(void)
-{
-	return mach_continuous_time();
-}
-
-/* task_info — stub, returns KERN_FAILURE */
 int task_info(uint32_t target_task, uint32_t flavor,
-              void *task_info_out, uint32_t *task_info_count)
+              void* task_info_out, uint32_t* task_info_count)
 {
-	(void)target_task; (void)flavor;
-	(void)task_info_out; (void)task_info_count;
-	return 5; /* KERN_FAILURE */
-}
-
-int task_policy_set(uint32_t task, int flavor, void* policy_info,
-                    uint32_t policy_info_count)
-{
-	(void)task;
+	(void)target_task;
 	(void)flavor;
-	(void)policy_info;
-	(void)policy_info_count;
-	return 0;
-}
-
-int thread_info(uint32_t target_thread, int flavor, void* thread_info_out,
-                uint32_t* thread_info_count)
-{
-	(void)target_thread;
-	(void)flavor;
-
-	if (thread_info_out && thread_info_count)
-		memset(thread_info_out, 0, (size_t)*thread_info_count * sizeof(int));
-	return 0;
-}
-
-int thread_get_state(uint32_t target_thread, int flavor, void* state,
-                     uint32_t* state_count)
-{
-	(void)target_thread;
-	(void)flavor;
-
-	if (state && state_count)
-		memset(state, 0, (size_t)*state_count * sizeof(uint32_t));
-	return 0;
-}
-
-int thread_suspend(uint32_t target_thread)
-{
-	(void)target_thread;
-	return 0;
-}
-
-int thread_resume(uint32_t target_thread)
-{
-	(void)target_thread;
-	return 0;
-}
-
-int thread_set_exception_ports(uint32_t thread, uint32_t exception_mask,
-                               uint32_t new_port, int behavior,
-                               int new_flavor)
-{
-	(void)thread;
-	(void)exception_mask;
-	(void)new_port;
-	(void)behavior;
-	(void)new_flavor;
-	return 0;
+	(void)task_info_out;
+	(void)task_info_count;
+	return MACHGATE_KERN_NOT_SUPPORTED;
 }
 
 int thread_switch(uint32_t thread_name, int option, uint32_t option_time)
@@ -345,62 +194,29 @@ int thread_switch(uint32_t thread_name, int option, uint32_t option_time)
 	return 0;
 }
 
-/* mach_msg — stub, returns MACH_MSG_SUCCESS (0) */
-int mach_msg(void *msg, uint32_t option, uint32_t send_size,
+int mach_msg(void* msg, uint32_t option, uint32_t send_size,
              uint32_t rcv_size, uint32_t rcv_name,
              uint32_t timeout, uint32_t notify)
 {
-	(void)msg; (void)option; (void)send_size;
-	(void)rcv_size; (void)rcv_name; (void)timeout; (void)notify;
-	return 0;
+	(void)msg;
+	(void)send_size;
+	(void)rcv_size;
+	(void)rcv_name;
+	(void)timeout;
+	(void)notify;
+
+	if (option & MACHGATE_MACH_SEND_MSG)
+		return MACHGATE_MACH_SEND_INVALID_DEST;
+	if (option & MACHGATE_MACH_RCV_MSG)
+		return MACHGATE_MACH_RCV_INVALID_NAME;
+	return MACHGATE_KERN_NOT_SUPPORTED;
 }
 
-/* mach_port_deallocate — stub */
 int mach_port_deallocate(uint32_t task, uint32_t name)
 {
-	(void)task; (void)name;
-	return 0;
-}
-
-int mach_port_allocate(uint32_t task, uint32_t right, uint32_t* name)
-{
-	(void)task;
-	(void)right;
-
-	if (!name)
-		return 4;
-	*name = __sync_fetch_and_add(&next_mach_port_name, 1);
-	return 0;
-}
-
-int mach_port_construct(uint32_t task, void* options, uint64_t context,
-                        uint32_t* name)
-{
-	(void)task;
-	(void)options;
-	(void)context;
-	return mach_port_allocate(task, 0, name);
-}
-
-int mach_port_insert_right(uint32_t task, uint32_t name, uint32_t poly,
-                           uint32_t poly_poly)
-{
 	(void)task;
 	(void)name;
-	(void)poly;
-	(void)poly_poly;
-	return 0;
-}
-
-int mach_port_set_attributes(uint32_t task, uint32_t name, int flavor,
-                             void* info, uint32_t info_count)
-{
-	(void)task;
-	(void)name;
-	(void)flavor;
-	(void)info;
-	(void)info_count;
-	return 0;
+	return MACHGATE_KERN_NOT_SUPPORTED;
 }
 
 int vm_deallocate(uint32_t target_task, uint64_t address, uint64_t size)
@@ -498,7 +314,7 @@ int host_info(uint32_t host, int flavor, void* info, uint32_t* info_count)
 	if (flavor == 1) {
 		struct darwin_host_basic_info basic;
 		memset(&basic, 0, sizeof(basic));
-		basic.max_cpus = shim_hw_ncpu();
+		basic.max_cpus = machgate_host_cpu_count();
 		basic.avail_cpus = basic.max_cpus;
 		basic.memory_size = 0x80000000U;
 		basic.cpu_type = 0x0100000c;
@@ -506,8 +322,7 @@ int host_info(uint32_t host, int flavor, void* info, uint32_t* info_count)
 		basic.physical_cpu_max = basic.max_cpus;
 		basic.logical_cpu = basic.max_cpus;
 		basic.logical_cpu_max = basic.max_cpus;
-		basic.max_mem = (uint64_t)sysconf(_SC_PHYS_PAGES) *
-		                (uint64_t)sysconf(_SC_PAGESIZE);
+		basic.max_mem = machgate_host_memory_size();
 
 		size_t available = (size_t)*info_count * sizeof(int32_t);
 		size_t copy_size = available < sizeof(basic) ? available : sizeof(basic);
@@ -517,16 +332,6 @@ int host_info(uint32_t host, int flavor, void* info, uint32_t* info_count)
 	}
 
 	memset(info, 0, (size_t)*info_count * sizeof(int32_t));
-	return 0;
-}
-
-int mach_msg_server_once(void* demux, uint32_t max_size, uint32_t rcv_name,
-                         uint32_t options)
-{
-	(void)demux;
-	(void)max_size;
-	(void)rcv_name;
-	(void)options;
 	return 0;
 }
 
@@ -546,7 +351,7 @@ int host_processor_info(uint32_t host, int flavor, uint32_t* out_processor_count
 	if (flavor != DARWIN_PROCESSOR_CPU_LOAD_INFO)
 		return 5;
 
-	uint32_t processor_count = (uint32_t)shim_hw_ncpu();
+	uint32_t processor_count = (uint32_t)machgate_host_cpu_count();
 	uint32_t info_count = processor_count * DARWIN_CPU_STATE_MAX;
 	size_t info_size = (size_t)info_count * sizeof(uint32_t);
 	uint32_t* processor_info = mmap(NULL, info_size, PROT_READ | PROT_WRITE,
@@ -581,76 +386,6 @@ int host_statistics64(uint32_t host, int flavor, void* info,
 	return 0;
 }
 
-static struct machgate_mach_semaphore* find_mach_semaphore(uint32_t name)
-{
-	for (int index = 0; index < MACHGATE_MACH_SEMAPHORE_MAX; index++) {
-		if (machgate_mach_semaphores[index].used &&
-		    machgate_mach_semaphores[index].name == name)
-			return &machgate_mach_semaphores[index];
-	}
-	return NULL;
-}
-
-int semaphore_create(uint32_t task, uint32_t* semaphore, int policy,
-                     int value)
-{
-	(void)task;
-	(void)policy;
-
-	if (!semaphore)
-		return 4;
-
-	for (int index = 0; index < MACHGATE_MACH_SEMAPHORE_MAX; index++) {
-		struct machgate_mach_semaphore* slot =
-			&machgate_mach_semaphores[index];
-		if (slot->used)
-			continue;
-		slot->used = 1;
-		slot->value = value;
-		slot->name = next_mach_semaphore_name++;
-		*semaphore = slot->name;
-		return 0;
-	}
-
-	return 3;
-}
-
-int semaphore_destroy(uint32_t task, uint32_t semaphore)
-{
-	(void)task;
-
-	struct machgate_mach_semaphore* slot = find_mach_semaphore(semaphore);
-	if (!slot)
-		return 0;
-	memset(slot, 0, sizeof(*slot));
-	return 0;
-}
-
-int semaphore_signal(uint32_t semaphore)
-{
-	struct machgate_mach_semaphore* slot = find_mach_semaphore(semaphore);
-	if (slot)
-		slot->value++;
-	return 0;
-}
-
-int semaphore_wait(uint32_t semaphore)
-{
-	struct machgate_mach_semaphore* slot = find_mach_semaphore(semaphore);
-	if (slot && slot->value > 0)
-		slot->value--;
-	return 0;
-}
-
-int semaphore_timedwait(uint32_t semaphore, uint32_t seconds,
-                        uint32_t nanoseconds)
-{
-	(void)seconds;
-	(void)nanoseconds;
-	return semaphore_wait(semaphore);
-}
-
-uint8_t NDR_record[8] = { 0 };
 int __mb_cur_max = 4;
 
 enum {
@@ -672,35 +407,6 @@ int __fpclassifyd(double value)
 
 void dyld_stub_binder(void)
 {
-}
-
-int* _NSGetArgc(void)
-{
-	static int argc = 0;
-	int* machgate_argc = dlsym(RTLD_DEFAULT, "__machgate_guest_argc");
-
-	if (machgate_argc)
-		return machgate_argc;
-	return &argc;
-}
-
-char*** _NSGetArgv(void)
-{
-	static char** argv = NULL;
-	char*** machgate_argv = dlsym(RTLD_DEFAULT, "__machgate_guest_argv");
-
-	if (machgate_argv)
-		return machgate_argv;
-	return &argv;
-}
-
-char*** _NSGetEnviron(void)
-{
-	char*** machgate_envp = dlsym(RTLD_DEFAULT, "__machgate_guest_envp");
-
-	if (machgate_envp && *machgate_envp)
-		return machgate_envp;
-	return &environ;
 }
 
 uint32_t _dyld_image_count(void)
@@ -1153,18 +859,6 @@ typedef const void* SecCertificateRef;
 typedef const void* SecPolicyRef;
 typedef void* SecTrustRef;
 typedef int32_t OSStatus;
-typedef double CFTimeInterval;
-typedef void* CFRunLoopRef;
-typedef void* FSEventStreamRef;
-typedef uint64_t FSEventStreamEventId;
-typedef uint32_t FSEventStreamEventFlags;
-typedef uint32_t FSEventStreamCreateFlags;
-typedef void (*FSEventStreamCallback)(FSEventStreamRef stream,
-                                      void* info,
-                                      size_t number_of_events,
-                                      void* event_paths,
-                                      const FSEventStreamEventFlags* event_flags,
-                                      const FSEventStreamEventId* event_ids);
 
 enum {
 	CF_TYPE_ID_STRING = 1,
@@ -1232,24 +926,6 @@ struct cf_dictionary_value_callbacks {
 	uint8_t (*equal)(const void* value_a, const void* value_b);
 };
 
-struct fsevent_stream_context {
-	CFIndex version;
-	void* info;
-	const void* retain;
-	const void* release;
-	const void* copy_description;
-};
-
-struct fsevent_stream {
-	FSEventStreamCallback callback;
-	struct fsevent_stream_context context;
-	CFArrayRef paths;
-	uint64_t device;
-	FSEventStreamEventId latest_event_id;
-	uint8_t started;
-	uint8_t invalidated;
-};
-
 CFDataRef CFDataCreate(CFAllocatorRef allocator, const uint8_t* bytes,
                        CFIndex length);
 CFDictionaryRef CFDictionaryCreate(CFAllocatorRef allocator,
@@ -1293,7 +969,6 @@ static const char cf_timezone_object[] = "MachGate/UTC";
 static const char cf_error_description[] = "MachGate CoreFoundation error";
 static const char cf_allocator_null_object[] = "MachGate/CFAllocatorNull";
 static const char cf_boolean_true_object[] = "MachGate/kCFBooleanTrue";
-static const char cf_run_loop_default_mode_object[] = "kCFRunLoopDefaultMode";
 static const char cf_url_volume_available_capacity_important_key[] = "NSURLVolumeAvailableCapacityForImportantUsageKey";
 static const char cf_url_volume_available_capacity_key[] = "NSURLVolumeAvailableCapacityKey";
 static const char cf_url_volume_is_browsable_key[] = "NSURLVolumeIsBrowsableKey";
@@ -1318,7 +993,6 @@ const double kCFAbsoluteTimeIntervalSince1970 = 978307200.0;
 const void* kCFAllocatorDefault = NULL;
 const void* kCFAllocatorNull = cf_allocator_null_object;
 const void* kCFBooleanTrue = cf_boolean_true_object;
-const void* kCFRunLoopDefaultMode = cf_run_loop_default_mode_object;
 const void* kCFURLVolumeAvailableCapacityForImportantUsageKey = cf_url_volume_available_capacity_important_key;
 const void* kCFURLVolumeAvailableCapacityKey = cf_url_volume_available_capacity_key;
 const void* kCFURLVolumeIsBrowsableKey = cf_url_volume_is_browsable_key;
@@ -2156,141 +1830,6 @@ int res_9_nsearch(void* state, const char* name, int dns_class,
 	return -1;
 }
 
-FSEventStreamRef FSEventStreamCreate(CFAllocatorRef allocator,
-                                     FSEventStreamCallback callback,
-                                     const struct fsevent_stream_context* context,
-                                     CFArrayRef paths,
-                                     FSEventStreamEventId since_when,
-                                     CFTimeInterval latency,
-                                     FSEventStreamCreateFlags flags)
-{
-	(void)allocator;
-	(void)latency;
-	(void)flags;
-
-	struct fsevent_stream* stream = calloc(1, sizeof(*stream));
-	if (!stream)
-		return NULL;
-
-	stream->callback = callback;
-	if (context)
-		stream->context = *context;
-	stream->paths = paths;
-	stream->latest_event_id = since_when == UINT64_MAX ? 1 : since_when;
-	return stream;
-}
-
-FSEventStreamRef FSEventStreamCreateRelativeToDevice(
-	CFAllocatorRef allocator, FSEventStreamCallback callback,
-	const struct fsevent_stream_context* context, uint64_t device,
-	CFArrayRef paths, FSEventStreamEventId since_when,
-	CFTimeInterval latency, FSEventStreamCreateFlags flags)
-{
-	struct fsevent_stream* stream = FSEventStreamCreate(
-		allocator, callback, context, paths, since_when, latency, flags);
-	if (stream)
-		stream->device = device;
-	return stream;
-}
-
-CFStringRef FSEventStreamCopyDescription(FSEventStreamRef stream_ref)
-{
-	(void)stream_ref;
-	return CFStringCreateWithCString(NULL, "MachGate/FSEventStream", 0);
-}
-
-CFArrayRef FSEventStreamCopyPathsBeingWatched(FSEventStreamRef stream_ref)
-{
-	struct fsevent_stream* stream = stream_ref;
-	if (!stream || !stream->paths)
-		return CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
-	return stream->paths;
-}
-
-void FSEventStreamFlushAsync(FSEventStreamRef stream_ref)
-{
-	(void)stream_ref;
-}
-
-void FSEventStreamFlushSync(FSEventStreamRef stream_ref)
-{
-	(void)stream_ref;
-}
-
-uint64_t FSEventStreamGetDeviceBeingWatched(FSEventStreamRef stream_ref)
-{
-	struct fsevent_stream* stream = stream_ref;
-	return stream ? stream->device : 0;
-}
-
-FSEventStreamEventId FSEventStreamGetLatestEventId(FSEventStreamRef stream_ref)
-{
-	struct fsevent_stream* stream = stream_ref;
-	return stream ? stream->latest_event_id : 0;
-}
-
-void FSEventStreamInvalidate(FSEventStreamRef stream_ref)
-{
-	struct fsevent_stream* stream = stream_ref;
-	if (stream)
-		stream->invalidated = 1;
-}
-
-void FSEventStreamRelease(FSEventStreamRef stream_ref)
-{
-	free(stream_ref);
-}
-
-void FSEventStreamScheduleWithRunLoop(FSEventStreamRef stream_ref,
-                                      CFRunLoopRef run_loop,
-                                      CFStringRef run_loop_mode)
-{
-	(void)stream_ref;
-	(void)run_loop;
-	(void)run_loop_mode;
-}
-
-void FSEventStreamSetDispatchQueue(FSEventStreamRef stream_ref, void* queue)
-{
-	(void)stream_ref;
-	(void)queue;
-}
-
-int FSEventStreamStart(FSEventStreamRef stream_ref)
-{
-	struct fsevent_stream* stream = stream_ref;
-	if (!stream || stream->invalidated)
-		return 0;
-	stream->started = 1;
-	return 1;
-}
-
-void FSEventStreamStop(FSEventStreamRef stream_ref)
-{
-	struct fsevent_stream* stream = stream_ref;
-	if (stream)
-		stream->started = 0;
-}
-
-CFStringRef FSEventsCopyUUIDForDevice(uint64_t device)
-{
-	(void)device;
-	return CFUUIDCreateString(NULL, NULL);
-}
-
-FSEventStreamEventId FSEventsGetCurrentEventId(void)
-{
-	return 1;
-}
-
-FSEventStreamEventId FSEventsGetLastEventIdForDeviceBeforeTime(
-	uint64_t device, CFAbsoluteTime time)
-{
-	(void)device;
-	(void)time;
-	return 1;
-}
-
 CFMutableDictionaryRef IOBSDNameMatching(uint32_t master_port,
                                          uint32_t options,
                                          const char* bsd_name)
@@ -2318,6 +1857,14 @@ int IOServiceGetMatchingServices(uint32_t master_port, CFDictionaryRef matching,
 	(void)matching;
 	if (iterator)
 		*iterator = 0;
+	return 0;
+}
+
+uint32_t IOServiceGetMatchingService(uint32_t main_port,
+				     CFDictionaryRef matching)
+{
+	(void)main_port;
+	(void)matching;
 	return 0;
 }
 
@@ -2408,7 +1955,8 @@ CFTypeID CFGetTypeID(const void* object)
 
 	CFTypeID type_id = *(const CFTypeID*)object;
 	if (type_id == CF_TYPE_ID_ARRAY || type_id == CF_TYPE_ID_DATA ||
-	    type_id == CF_TYPE_ID_DICTIONARY || type_id == CF_TYPE_ID_NUMBER)
+	    type_id == CF_TYPE_ID_DICTIONARY || type_id == CF_TYPE_ID_BOOLEAN ||
+	    type_id == CF_TYPE_ID_NUMBER)
 		return type_id;
 	return CF_TYPE_ID_STRING;
 }
@@ -2438,2116 +1986,6 @@ uint8_t LocaleRefGetPartString(void* locale, uint32_t part_mask,
 	if (part_string && max_string_len > 0)
 		part_string[0] = 0;
 	return 0;
-}
-
-typedef int32_t UChar32;
-typedef int32_t UErrorCode;
-
-#define U_ZERO_ERROR 0
-#define U_ILLEGAL_ARGUMENT_ERROR 1
-#define U_BUFFER_OVERFLOW_ERROR 15
-#define UBRK_DONE (-1)
-#define UCOL_DEFAULT (-1)
-#define UCOL_LESS (-1)
-#define UCOL_EQUAL 0
-#define UCOL_GREATER 1
-#define UCOL_TERTIARY 2
-#define UCOL_OFF 16
-#define UCOL_STRENGTH 5
-#define UCOL_ATTRIBUTE_COUNT 8
-
-struct machgate_ubrk {
-	int32_t position;
-	int32_t text_length;
-};
-
-struct machgate_ucal {
-	double millis;
-};
-
-struct machgate_ucfpos {
-	int32_t category;
-	int32_t field;
-	int32_t start;
-	int32_t limit;
-};
-
-struct machgate_ucol {
-	int32_t attributes[UCOL_ATTRIBUTE_COUNT];
-};
-
-struct machgate_uenum {
-	int32_t index;
-	int32_t count;
-	const char* const* values;
-};
-
-struct machgate_udat {
-	struct machgate_ucal calendar;
-};
-
-struct machgate_formatted_value {
-	int32_t length;
-	uint16_t text[256];
-};
-
-struct machgate_unumsys {
-	char name[16];
-};
-
-struct machgate_utext {
-	uint32_t magic;
-	int32_t flags;
-	int32_t provider_properties;
-	int32_t size_of_struct;
-};
-
-struct machgate_uidna_info {
-	int16_t size;
-	uint8_t is_transitional_different;
-	uint8_t reserved_b3;
-	uint32_t errors;
-	int32_t reserved_i2;
-	int32_t reserved_i3;
-};
-
-static int icu_is_ascii_alpha(UChar32 value)
-{
-	return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
-}
-
-static int icu_is_ascii_digit(UChar32 value)
-{
-	return value >= '0' && value <= '9';
-}
-
-static int icu_is_ascii_space(UChar32 value)
-{
-	return value == ' ' || (value >= '\t' && value <= '\r');
-}
-
-int u_charDirection(UChar32 value)
-{
-	(void)value;
-	return 0;
-}
-
-int8_t u_charType(UChar32 value)
-{
-	if (value >= 'A' && value <= 'Z')
-		return 1;
-	if (value >= 'a' && value <= 'z')
-		return 2;
-	if (icu_is_ascii_digit(value))
-		return 9;
-	if (value >= 0 && value < 0x20)
-		return 15;
-	if (value == ' ')
-		return 12;
-	return 0;
-}
-
-const char* u_errorName(UErrorCode code)
-{
-	switch (code) {
-	case U_ZERO_ERROR:
-		return "U_ZERO_ERROR";
-	case U_ILLEGAL_ARGUMENT_ERROR:
-		return "U_ILLEGAL_ARGUMENT_ERROR";
-	case U_BUFFER_OVERFLOW_ERROR:
-		return "U_BUFFER_OVERFLOW_ERROR";
-	default:
-		return "[BOGUS UErrorCode]";
-	}
-}
-
-void u_getVersion(uint8_t version_array[4])
-{
-	if (!version_array)
-		return;
-	version_array[0] = 76;
-	version_array[1] = 1;
-	version_array[2] = 0;
-	version_array[3] = 0;
-}
-
-uint8_t u_hasBinaryProperty(UChar32 value, int property)
-{
-	switch (property) {
-	case 0:
-		return icu_is_ascii_alpha(value);
-	case 1:
-	case 48:
-		return isxdigit((unsigned char)value) ? 1 : 0;
-	case 22:
-		return value >= 'a' && value <= 'z';
-	case 30:
-		return value >= 'A' && value <= 'Z';
-	case 31:
-		return icu_is_ascii_space(value);
-	case 44:
-		return icu_is_ascii_alpha(value) || icu_is_ascii_digit(value);
-	case 45:
-		return value == ' ' || value == '\t';
-	case 46:
-		return value >= 0x21 && value <= 0x7e;
-	case 47:
-		return value >= 0x20 && value <= 0x7e;
-	case 49:
-	case 34:
-		return icu_is_ascii_alpha(value);
-	default:
-		return 0;
-	}
-}
-
-UChar32 u_tolower(UChar32 value)
-{
-	if (value >= 'A' && value <= 'Z')
-		return value + ('a' - 'A');
-	return value;
-}
-
-UChar32 u_toupper(UChar32 value)
-{
-	if (value >= 'a' && value <= 'z')
-		return value - ('a' - 'A');
-	return value;
-}
-
-static int32_t icu_str_map(uint16_t* dest, int32_t dest_capacity,
-                           const uint16_t* src, int32_t src_length,
-                           UErrorCode* status, int to_upper)
-{
-	if (!src || src_length < -1) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return 0;
-	}
-
-	if (src_length < 0) {
-		src_length = 0;
-		while (src[src_length])
-			src_length++;
-	}
-
-	if (dest && dest_capacity > 0) {
-		int32_t copy_length = src_length < dest_capacity ? src_length : dest_capacity;
-		for (int32_t index = 0; index < copy_length; index++) {
-			UChar32 value = src[index];
-			dest[index] = (uint16_t)(to_upper ? u_toupper(value) : u_tolower(value));
-		}
-		if (copy_length < dest_capacity)
-			dest[copy_length] = 0;
-	}
-
-	if (status)
-		*status = src_length >= dest_capacity ? U_BUFFER_OVERFLOW_ERROR : U_ZERO_ERROR;
-	return src_length;
-}
-
-int32_t u_strToLower(uint16_t* dest, int32_t dest_capacity,
-                     const uint16_t* src, int32_t src_length,
-                     const char* locale, UErrorCode* status)
-{
-	(void)locale;
-	return icu_str_map(dest, dest_capacity, src, src_length, status, 0);
-}
-
-int32_t u_strToUpper(uint16_t* dest, int32_t dest_capacity,
-                     const uint16_t* src, int32_t src_length,
-                     const char* locale, UErrorCode* status)
-{
-	(void)locale;
-	return icu_str_map(dest, dest_capacity, src, src_length, status, 1);
-}
-
-void* ubrk_clone(const void* break_iterator, UErrorCode* status)
-{
-	struct machgate_ubrk* result = calloc(1, sizeof(*result));
-	const struct machgate_ubrk* source = break_iterator;
-
-	if (!result) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (source)
-		*result = *source;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return result;
-}
-
-void ubrk_close(void* break_iterator)
-{
-	free(break_iterator);
-}
-
-int32_t ubrk_countAvailable(void)
-{
-	return 1;
-}
-
-int32_t ubrk_current(const void* break_iterator)
-{
-	const struct machgate_ubrk* iterator = break_iterator;
-	return iterator ? iterator->position : UBRK_DONE;
-}
-
-int32_t ubrk_first(void* break_iterator)
-{
-	struct machgate_ubrk* iterator = break_iterator;
-	if (!iterator)
-		return UBRK_DONE;
-	iterator->position = 0;
-	return iterator->position;
-}
-
-int32_t ubrk_following(void* break_iterator, int32_t offset)
-{
-	struct machgate_ubrk* iterator = break_iterator;
-	if (!iterator || offset < 0)
-		return UBRK_DONE;
-	if (iterator->text_length >= 0 && offset >= iterator->text_length)
-		return UBRK_DONE;
-	iterator->position = offset + 1;
-	return iterator->position;
-}
-
-int32_t ubrk_preceding(void* break_iterator, int32_t offset)
-{
-	struct machgate_ubrk* iterator = break_iterator;
-	if (!iterator || offset <= 0)
-		return UBRK_DONE;
-	iterator->position = offset - 1;
-	return iterator->position;
-}
-
-const char* ubrk_getAvailable(int32_t index)
-{
-	return index == 0 ? "en_US" : NULL;
-}
-
-int32_t ubrk_getRuleStatus(void* break_iterator)
-{
-	(void)break_iterator;
-	return 0;
-}
-
-uint8_t ubrk_isBoundary(void* break_iterator, int32_t offset)
-{
-	struct machgate_ubrk* iterator = break_iterator;
-	if (iterator)
-		iterator->position = offset;
-	return offset >= 0 ? 1 : 0;
-}
-
-int32_t ubrk_next(void* break_iterator)
-{
-	struct machgate_ubrk* iterator = break_iterator;
-	if (!iterator)
-		return UBRK_DONE;
-	if (iterator->text_length >= 0 && iterator->position >= iterator->text_length)
-		return UBRK_DONE;
-	iterator->position++;
-	return iterator->position;
-}
-
-void* ubrk_open(int type, const char* locale, const uint16_t* text,
-                int32_t text_length, UErrorCode* status)
-{
-	(void)type;
-	(void)locale;
-	(void)text;
-	struct machgate_ubrk* iterator = ubrk_clone(NULL, status);
-	if (iterator)
-		iterator->text_length = text_length;
-	return iterator;
-}
-
-void ubrk_setText(void* break_iterator, const uint16_t* text,
-                  int32_t text_length, UErrorCode* status)
-{
-	struct machgate_ubrk* iterator = break_iterator;
-	(void)text;
-
-	if (!iterator) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return;
-	}
-	iterator->position = 0;
-	iterator->text_length = text_length;
-	if (status)
-		*status = U_ZERO_ERROR;
-}
-
-void ubrk_setUText(void* break_iterator, void* text, UErrorCode* status)
-{
-	(void)text;
-	ubrk_setText(break_iterator, NULL, -1, status);
-}
-
-static double icu_now_millis(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
-}
-
-static int32_t utf16_copy_ascii(uint16_t* result, int32_t capacity,
-                                const char* text, UErrorCode* status)
-{
-	int32_t length = (int32_t)strlen(text);
-
-	if (result && capacity > 0) {
-		int32_t copy_length = length < capacity ? length : capacity - 1;
-		for (int32_t index = 0; index < copy_length; index++)
-			result[index] = (uint16_t)(unsigned char)text[index];
-		result[copy_length] = 0;
-	}
-
-	if (status)
-		*status = length >= capacity ? U_BUFFER_OVERFLOW_ERROR : U_ZERO_ERROR;
-	return length;
-}
-
-void* ucal_open(const uint16_t* zone_id, int32_t length, const char* locale,
-                int type, UErrorCode* status)
-{
-	struct machgate_ucal* calendar = calloc(1, sizeof(*calendar));
-	(void)zone_id;
-	(void)length;
-	(void)locale;
-	(void)type;
-
-	if (!calendar) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	calendar->millis = icu_now_millis();
-	if (status)
-		*status = U_ZERO_ERROR;
-	return calendar;
-}
-
-void ucal_close(void* calendar)
-{
-	free(calendar);
-}
-
-void* ucal_clone(const void* calendar, UErrorCode* status)
-{
-	struct machgate_ucal* result = calloc(1, sizeof(*result));
-	const struct machgate_ucal* source = calendar;
-
-	if (!result) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	result->millis = source ? source->millis : icu_now_millis();
-	if (status)
-		*status = U_ZERO_ERROR;
-	return result;
-}
-
-int32_t ucal_getAttribute(const void* calendar, int attribute)
-{
-	(void)calendar;
-
-	switch (attribute) {
-	case 0:
-		return 1;
-	case 1:
-		return 1;
-	case 2:
-		return 1;
-	default:
-		return 0;
-	}
-}
-
-void ucal_setMillis(void* calendar, double date_time, UErrorCode* status)
-{
-	struct machgate_ucal* cal = calendar;
-	if (cal)
-		cal->millis = date_time;
-	if (status)
-		*status = cal ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-int32_t ucal_get(const void* calendar, int field, UErrorCode* status)
-{
-	const struct machgate_ucal* cal = calendar;
-	time_t seconds = (time_t)((cal ? cal->millis : icu_now_millis()) / 1000.0);
-	struct tm tm_value;
-
-	gmtime_r(&seconds, &tm_value);
-	if (status)
-		*status = U_ZERO_ERROR;
-
-	switch (field) {
-	case 1:
-	case 19:
-		return tm_value.tm_year + 1900;
-	case 2:
-	case 22:
-		return tm_value.tm_mon;
-	case 5:
-		return tm_value.tm_mday;
-	case 6:
-		return tm_value.tm_yday + 1;
-	case 7:
-		return tm_value.tm_wday + 1;
-	case 9:
-		return tm_value.tm_hour >= 12;
-	case 10:
-		return tm_value.tm_hour % 12;
-	case 11:
-		return tm_value.tm_hour;
-	case 12:
-		return tm_value.tm_min;
-	case 13:
-		return tm_value.tm_sec;
-	case 14:
-		return cal ? (int32_t)((int64_t)cal->millis % 1000) : 0;
-	case 15:
-	case 16:
-		return 0;
-	default:
-		return 0;
-	}
-}
-
-int32_t ucal_getCanonicalTimeZoneID(const uint16_t* id, int32_t length,
-                                    uint16_t* result, int32_t capacity,
-                                    uint8_t* is_system_id,
-                                    UErrorCode* status)
-{
-	(void)id;
-	(void)length;
-	if (is_system_id)
-		*is_system_id = 1;
-	return utf16_copy_ascii(result, capacity, "Etc/UTC", status);
-}
-
-int32_t ucal_getHostTimeZone(uint16_t* result, int32_t capacity,
-                             UErrorCode* status)
-{
-	return utf16_copy_ascii(result, capacity, "Etc/UTC", status);
-}
-
-int32_t ucal_getTimeZoneDisplayName(const void* calendar, int type,
-                                    const char* locale, uint16_t* result,
-                                    int32_t capacity, UErrorCode* status)
-{
-	(void)calendar;
-	(void)type;
-	(void)locale;
-	return utf16_copy_ascii(result, capacity, "UTC", status);
-}
-
-void ucal_getTimeZoneOffsetFromLocal(const void* calendar,
-                                     int non_existing_time_opt,
-                                     int duplicated_time_opt,
-                                     int32_t* raw_offset,
-                                     int32_t* dst_offset,
-                                     UErrorCode* status)
-{
-	(void)calendar;
-	(void)non_existing_time_opt;
-	(void)duplicated_time_opt;
-	if (raw_offset)
-		*raw_offset = 0;
-	if (dst_offset)
-		*dst_offset = 0;
-	if (status)
-		*status = U_ZERO_ERROR;
-}
-
-int ucal_getDayOfWeekType(const void* calendar, int day_of_week,
-                          UErrorCode* status)
-{
-	(void)calendar;
-	(void)day_of_week;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return 0;
-}
-
-void* ucal_getKeywordValuesForLocale(const char* key, const char* locale,
-                                     uint8_t commonly_used,
-                                     UErrorCode* status)
-{
-	(void)key;
-	(void)locale;
-	(void)commonly_used;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return NULL;
-}
-
-void* ucal_openTimeZoneIDEnumeration(int zone_type, const char* region,
-                                     const int32_t* raw_offset,
-                                     UErrorCode* status)
-{
-	(void)zone_type;
-	(void)region;
-	(void)raw_offset;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return NULL;
-}
-
-void* ucal_openTimeZones(UErrorCode* status)
-{
-	if (status)
-		*status = U_ZERO_ERROR;
-	return NULL;
-}
-
-void ucal_setGregorianChange(void* calendar, double date, UErrorCode* status)
-{
-	(void)calendar;
-	(void)date;
-	if (status)
-		*status = U_ZERO_ERROR;
-}
-
-void ucfpos_close(void* field_position)
-{
-	free(field_position);
-}
-
-void* ucfpos_open(UErrorCode* status)
-{
-	struct machgate_ucfpos* field_position = calloc(1, sizeof(*field_position));
-	if (!field_position) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return field_position;
-}
-
-void ucfpos_reset(void* field_position, UErrorCode* status)
-{
-	struct machgate_ucfpos* position = field_position;
-	if (position)
-		memset(position, 0, sizeof(*position));
-	if (status)
-		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-void ucfpos_constrainCategory(void* field_position, int32_t category,
-                              UErrorCode* status)
-{
-	struct machgate_ucfpos* position = field_position;
-	if (position) {
-		position->category = category;
-		position->field = 0;
-	}
-	if (status)
-		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-void ucfpos_constrainField(void* field_position, int32_t category,
-                           int32_t field, UErrorCode* status)
-{
-	struct machgate_ucfpos* position = field_position;
-	if (position) {
-		position->category = category;
-		position->field = field;
-	}
-	if (status)
-		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-int32_t ucfpos_getCategory(const void* field_position, UErrorCode* status)
-{
-	const struct machgate_ucfpos* position = field_position;
-	if (status)
-		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-	return position ? position->category : 0;
-}
-
-int32_t ucfpos_getField(const void* field_position, UErrorCode* status)
-{
-	const struct machgate_ucfpos* position = field_position;
-	if (status)
-		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-	return position ? position->field : 0;
-}
-
-void ucfpos_getIndexes(const void* field_position, int32_t* start,
-                       int32_t* limit, UErrorCode* status)
-{
-	const struct machgate_ucfpos* position = field_position;
-	if (start)
-		*start = position ? position->start : 0;
-	if (limit)
-		*limit = position ? position->limit : 0;
-	if (status)
-		*status = position ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-static void* ucol_alloc(UErrorCode* status)
-{
-	struct machgate_ucol* collator = calloc(1, sizeof(*collator));
-	if (!collator) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-
-	for (int index = 0; index < UCOL_ATTRIBUTE_COUNT; index++)
-		collator->attributes[index] = UCOL_DEFAULT;
-	collator->attributes[UCOL_STRENGTH] = UCOL_TERTIARY;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return collator;
-}
-
-void* ucol_open(const char* locale, UErrorCode* status)
-{
-	(void)locale;
-	return ucol_alloc(status);
-}
-
-void ucol_close(void* collator)
-{
-	free(collator);
-}
-
-int32_t ucol_countAvailable(void)
-{
-	return 1;
-}
-
-const char* ucol_getAvailable(int32_t index)
-{
-	return index == 0 ? "en_US" : NULL;
-}
-
-void* ucol_getKeywordValues(const char* keyword, UErrorCode* status)
-{
-	if (keyword && strcmp(keyword, "collation") != 0) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return NULL;
-}
-
-void* ucol_getKeywordValuesForLocale(const char* key, const char* locale,
-                                     uint8_t commonly_used,
-                                     UErrorCode* status)
-{
-	(void)key;
-	(void)locale;
-	(void)commonly_used;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return NULL;
-}
-
-const uint16_t* ucol_getRules(const void* collator, int32_t* length)
-{
-	static const uint16_t empty_rules[1] = { 0 };
-	(void)collator;
-	if (length)
-		*length = 0;
-	return empty_rules;
-}
-
-int32_t ucol_getAttribute(const void* collator, int32_t attribute,
-                          UErrorCode* status)
-{
-	const struct machgate_ucol* col = collator;
-	if (status)
-		*status = col ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-	if (!col)
-		return UCOL_DEFAULT;
-	if (attribute < 0 || attribute >= UCOL_ATTRIBUTE_COUNT)
-		return UCOL_DEFAULT;
-	return col->attributes[attribute];
-}
-
-void ucol_setAttribute(void* collator, int32_t attribute, int32_t value,
-                       UErrorCode* status)
-{
-	struct machgate_ucol* col = collator;
-	if (!col || attribute < 0 || attribute >= UCOL_ATTRIBUTE_COUNT) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return;
-	}
-	col->attributes[attribute] = value;
-	if (status)
-		*status = U_ZERO_ERROR;
-}
-
-static int32_t ucol_utf16_length(const uint16_t* text, int32_t length)
-{
-	if (!text)
-		return 0;
-	if (length >= 0)
-		return length;
-
-	length = 0;
-	while (text[length])
-		length++;
-	return length;
-}
-
-static int ucol_compare_int32(int32_t left, int32_t right)
-{
-	if (left < right)
-		return UCOL_LESS;
-	if (left > right)
-		return UCOL_GREATER;
-	return UCOL_EQUAL;
-}
-
-int32_t ucol_strcoll(const void* collator, const uint16_t* source,
-                     int32_t source_length, const uint16_t* target,
-                     int32_t target_length)
-{
-	(void)collator;
-	source_length = ucol_utf16_length(source, source_length);
-	target_length = ucol_utf16_length(target, target_length);
-
-	int32_t common_length = source_length < target_length ? source_length : target_length;
-	for (int32_t index = 0; index < common_length; index++) {
-		int result = ucol_compare_int32(source[index], target[index]);
-		if (result != UCOL_EQUAL)
-			return result;
-	}
-	return ucol_compare_int32(source_length, target_length);
-}
-
-int32_t ucol_strcollUTF8(const void* collator, const char* source,
-                         int32_t source_length, const char* target,
-                         int32_t target_length, UErrorCode* status)
-{
-	(void)collator;
-	if (!source)
-		source = "";
-	if (!target)
-		target = "";
-	if (source_length < 0)
-		source_length = (int32_t)strlen(source);
-	if (target_length < 0)
-		target_length = (int32_t)strlen(target);
-
-	int32_t common_length = source_length < target_length ? source_length : target_length;
-	int result = memcmp(source, target, (size_t)common_length);
-	if (status)
-		*status = U_ZERO_ERROR;
-	if (result < 0)
-		return UCOL_LESS;
-	if (result > 0)
-		return UCOL_GREATER;
-	return ucol_compare_int32(source_length, target_length);
-}
-
-const uint16_t* ucurr_getName(const uint16_t* currency, const char* locale,
-                              int32_t name_style, uint8_t* is_choice_format,
-                              int32_t* length, UErrorCode* status)
-{
-	static const uint16_t empty_name[1] = { 0 };
-	(void)locale;
-	(void)name_style;
-	if (is_choice_format)
-		*is_choice_format = 0;
-	if (length) {
-		int32_t name_length = 0;
-		if (currency) {
-			while (currency[name_length])
-				name_length++;
-		}
-		*length = name_length;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return currency ? currency : empty_name;
-}
-
-void* ucurr_openISOCurrencies(uint32_t currency_type, UErrorCode* status)
-{
-	(void)currency_type;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return NULL;
-}
-
-void uenum_close(void* enumeration)
-{
-	free(enumeration);
-}
-
-int32_t uenum_count(void* enumeration, UErrorCode* status)
-{
-	const struct machgate_uenum* en = enumeration;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return en ? en->count : 0;
-}
-
-const char* uenum_next(void* enumeration, int32_t* result_length,
-                       UErrorCode* status)
-{
-	struct machgate_uenum* en = enumeration;
-	const char* result = NULL;
-	if (en && en->index < en->count && en->values)
-		result = en->values[en->index++];
-	if (result_length)
-		*result_length = result ? (int32_t)strlen(result) : 0;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return result;
-}
-
-const uint16_t* uenum_unext(void* enumeration, int32_t* result_length,
-                            UErrorCode* status)
-{
-	(void)enumeration;
-	if (result_length)
-		*result_length = 0;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return NULL;
-}
-
-void uenum_reset(void* enumeration, UErrorCode* status)
-{
-	struct machgate_uenum* en = enumeration;
-	if (en)
-		en->index = 0;
-	if (status)
-		*status = U_ZERO_ERROR;
-}
-
-void* udat_open(int32_t time_style, int32_t date_style, const char* locale,
-                const uint16_t* tz_id, int32_t tz_id_length,
-                const uint16_t* pattern, int32_t pattern_length,
-                UErrorCode* status)
-{
-	struct machgate_udat* date_format = calloc(1, sizeof(*date_format));
-	(void)time_style;
-	(void)date_style;
-	(void)locale;
-	(void)tz_id;
-	(void)tz_id_length;
-	(void)pattern;
-	(void)pattern_length;
-
-	if (!date_format) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	date_format->calendar.millis = icu_now_millis();
-	if (status)
-		*status = U_ZERO_ERROR;
-	return date_format;
-}
-
-void udat_close(void* date_format)
-{
-	free(date_format);
-}
-
-int32_t udat_format(const void* date_format, double date_to_format,
-                    uint16_t* result, int32_t result_length,
-                    void* position, UErrorCode* status)
-{
-	(void)date_format;
-	(void)date_to_format;
-	(void)position;
-	return utf16_copy_ascii(result, result_length, "1970-01-01", status);
-}
-
-int32_t udat_formatForFields(const void* date_format, double date_to_format,
-                             uint16_t* result, int32_t result_length,
-                             void* field_position_iterator,
-                             UErrorCode* status)
-{
-	(void)field_position_iterator;
-	return udat_format(date_format, date_to_format, result, result_length,
-	                   NULL, status);
-}
-
-const void* udat_getCalendar(const void* date_format)
-{
-	const struct machgate_udat* format = date_format;
-	return format ? &format->calendar : NULL;
-}
-
-int32_t udat_toPattern(const void* date_format, uint8_t localized,
-                       uint16_t* result, int32_t result_length,
-                       UErrorCode* status)
-{
-	(void)date_format;
-	(void)localized;
-	return utf16_copy_ascii(result, result_length, "yyyy-MM-dd", status);
-}
-
-void* udatpg_open(const char* locale, UErrorCode* status)
-{
-	int* generator = calloc(1, sizeof(*generator));
-	(void)locale;
-	if (!generator) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return generator;
-}
-
-void udatpg_close(void* generator)
-{
-	free(generator);
-}
-
-static int32_t utf16_copy(uint16_t* result, int32_t capacity,
-                          const uint16_t* text, int32_t length,
-                          UErrorCode* status)
-{
-	if (!text)
-		return utf16_copy_ascii(result, capacity, "", status);
-	if (length < 0) {
-		length = 0;
-		while (text[length])
-			length++;
-	}
-
-	if (result && capacity > 0) {
-		int32_t copy_length = length < capacity ? length : capacity - 1;
-		for (int32_t index = 0; index < copy_length; index++)
-			result[index] = text[index];
-		result[copy_length] = 0;
-	}
-
-	if (status)
-		*status = length >= capacity ? U_BUFFER_OVERFLOW_ERROR : U_ZERO_ERROR;
-	return length;
-}
-
-int32_t udatpg_getBestPatternWithOptions(void* generator,
-                                         const uint16_t* skeleton,
-                                         int32_t length, int32_t options,
-                                         uint16_t* best_pattern,
-                                         int32_t capacity,
-                                         UErrorCode* status)
-{
-	(void)generator;
-	(void)options;
-	return utf16_copy(best_pattern, capacity, skeleton, length, status);
-}
-
-int32_t udatpg_getFieldDisplayName(const void* generator, int32_t field,
-                                   int32_t width, uint16_t* field_name,
-                                   int32_t capacity, UErrorCode* status)
-{
-	(void)generator;
-	(void)field;
-	(void)width;
-	return utf16_copy_ascii(field_name, capacity, "field", status);
-}
-
-int32_t udatpg_getSkeleton(void* generator, const uint16_t* pattern,
-                           int32_t length, uint16_t* skeleton,
-                           int32_t capacity, UErrorCode* status)
-{
-	(void)generator;
-	return utf16_copy(skeleton, capacity, pattern, length, status);
-}
-
-void* udtitvfmt_open(const char* locale, const uint16_t* skeleton,
-                     int32_t skeleton_length, const uint16_t* tz_id,
-                     int32_t tz_id_length, UErrorCode* status)
-{
-	int* formatter = calloc(1, sizeof(*formatter));
-	(void)locale;
-	(void)skeleton;
-	(void)skeleton_length;
-	(void)tz_id;
-	(void)tz_id_length;
-	if (!formatter) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return formatter;
-}
-
-void udtitvfmt_close(void* formatter)
-{
-	free(formatter);
-}
-
-void* udtitvfmt_openResult(UErrorCode* status)
-{
-	struct machgate_formatted_value* result = calloc(1, sizeof(*result));
-	if (!result) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return result;
-}
-
-void udtitvfmt_closeResult(void* result)
-{
-	free(result);
-}
-
-void udtitvfmt_formatCalendarToResult(const void* formatter,
-                                      void* from_calendar,
-                                      void* to_calendar, void* result,
-                                      UErrorCode* status)
-{
-	(void)formatter;
-	(void)from_calendar;
-	(void)to_calendar;
-	(void)result;
-	if (status)
-		*status = U_ZERO_ERROR;
-}
-
-void udtitvfmt_formatToResult(const void* formatter, double from_date,
-                              double to_date, void* result,
-                              UErrorCode* status)
-{
-	(void)formatter;
-	(void)from_date;
-	(void)to_date;
-	(void)result;
-	if (status)
-		*status = U_ZERO_ERROR;
-}
-
-const void* udtitvfmt_resultAsValue(const void* result, UErrorCode* status)
-{
-	if (status)
-		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-	return result;
-}
-
-void* ufieldpositer_open(UErrorCode* status)
-{
-	int* iterator = calloc(1, sizeof(*iterator));
-	if (!iterator) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return iterator;
-}
-
-void ufieldpositer_close(void* iterator)
-{
-	free(iterator);
-}
-
-int32_t ufieldpositer_next(void* iterator, int32_t* begin_index,
-                           int32_t* end_index)
-{
-	(void)iterator;
-	if (begin_index)
-		*begin_index = 0;
-	if (end_index)
-		*end_index = 0;
-	return -1;
-}
-
-const uint16_t* ufmtval_getString(const void* formatted_value,
-                                  int32_t* length, UErrorCode* status)
-{
-	static const uint16_t empty[1] = { 0 };
-	const struct machgate_formatted_value* value = formatted_value;
-	if (length)
-		*length = value ? value->length : 0;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return value ? value->text : empty;
-}
-
-uint8_t ufmtval_nextPosition(const void* formatted_value,
-                             void* field_position, UErrorCode* status)
-{
-	(void)formatted_value;
-	(void)field_position;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return 0;
-}
-
-void* uidna_openUTS46(uint32_t options, UErrorCode* status)
-{
-	int* idna = calloc(1, sizeof(*idna));
-	(void)options;
-	if (!idna) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return idna;
-}
-
-void uidna_close(void* idna)
-{
-	free(idna);
-}
-
-static int32_t uidna_copy_name(const uint16_t* name, int32_t length,
-                               uint16_t* dest, int32_t capacity,
-                               struct machgate_uidna_info* info,
-                               UErrorCode* status)
-{
-	if (info) {
-		info->is_transitional_different = 0;
-		info->errors = 0;
-	}
-	return utf16_copy(dest, capacity, name, length, status);
-}
-
-int32_t uidna_nameToASCII(const void* idna, const uint16_t* name,
-                          int32_t length, uint16_t* dest, int32_t capacity,
-                          struct machgate_uidna_info* info,
-                          UErrorCode* status)
-{
-	(void)idna;
-	return uidna_copy_name(name, length, dest, capacity, info, status);
-}
-
-int32_t uidna_nameToUnicode(const void* idna, const uint16_t* name,
-                            int32_t length, uint16_t* dest, int32_t capacity,
-                            struct machgate_uidna_info* info,
-                            UErrorCode* status)
-{
-	(void)idna;
-	return uidna_copy_name(name, length, dest, capacity, info, status);
-}
-
-void* uldn_openForContext(const char* locale, const int32_t* contexts,
-                          int32_t length, UErrorCode* status)
-{
-	int* display_names = calloc(1, sizeof(*display_names));
-	(void)locale;
-	(void)contexts;
-	(void)length;
-	if (!display_names) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return display_names;
-}
-
-void uldn_close(void* display_names)
-{
-	free(display_names);
-}
-
-static int32_t uldn_copy_display_name(const char* text, uint16_t* result,
-                                      int32_t capacity, UErrorCode* status)
-{
-	return utf16_copy_ascii(result, capacity, text ? text : "", status);
-}
-
-int32_t uldn_keyValueDisplayName(const void* display_names, const char* key,
-                                 const char* value, uint16_t* result,
-                                 int32_t capacity, UErrorCode* status)
-{
-	(void)display_names;
-	(void)key;
-	return uldn_copy_display_name(value, result, capacity, status);
-}
-
-int32_t uldn_localeDisplayName(const void* display_names, const char* locale,
-                               uint16_t* result, int32_t capacity,
-                               UErrorCode* status)
-{
-	(void)display_names;
-	return uldn_copy_display_name(locale, result, capacity, status);
-}
-
-int32_t uldn_regionDisplayName(const void* display_names, const char* region,
-                               uint16_t* result, int32_t capacity,
-                               UErrorCode* status)
-{
-	(void)display_names;
-	return uldn_copy_display_name(region, result, capacity, status);
-}
-
-int32_t uldn_scriptDisplayName(const void* display_names, const char* script,
-                               uint16_t* result, int32_t capacity,
-                               UErrorCode* status)
-{
-	(void)display_names;
-	return uldn_copy_display_name(script, result, capacity, status);
-}
-
-void* ulistfmt_openForType(const char* locale, int32_t type, int32_t width,
-                           UErrorCode* status)
-{
-	int* formatter = calloc(1, sizeof(*formatter));
-	(void)locale;
-	(void)type;
-	(void)width;
-	if (!formatter) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return formatter;
-}
-
-void ulistfmt_close(void* formatter)
-{
-	free(formatter);
-}
-
-void* ulistfmt_openResult(UErrorCode* status)
-{
-	struct machgate_formatted_value* result = calloc(1, sizeof(*result));
-	if (!result) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return result;
-}
-
-void ulistfmt_closeResult(void* result)
-{
-	free(result);
-}
-
-static int32_t ulistfmt_copy_first(const uint16_t* const strings[],
-                                   const int32_t* string_lengths,
-                                   int32_t string_count, uint16_t* result,
-                                   int32_t capacity, UErrorCode* status)
-{
-	if (!strings || string_count <= 0 || !strings[0])
-		return utf16_copy_ascii(result, capacity, "", status);
-	int32_t length = string_lengths ? string_lengths[0] : -1;
-	return utf16_copy(result, capacity, strings[0], length, status);
-}
-
-int32_t ulistfmt_format(const void* formatter, const uint16_t* const strings[],
-                        const int32_t* string_lengths, int32_t string_count,
-                        uint16_t* result, int32_t capacity,
-                        UErrorCode* status)
-{
-	(void)formatter;
-	return ulistfmt_copy_first(strings, string_lengths, string_count, result,
-	                           capacity, status);
-}
-
-void ulistfmt_formatStringsToResult(const void* formatter,
-                                    const uint16_t* const strings[],
-                                    const int32_t* string_lengths,
-                                    int32_t string_count, void* result,
-                                    UErrorCode* status)
-{
-	struct machgate_formatted_value* value = result;
-	(void)formatter;
-	if (value) {
-		value->length = ulistfmt_copy_first(strings, string_lengths, string_count,
-		                                    value->text, 256, status);
-		return;
-	}
-	if (status)
-		*status = U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-const void* ulistfmt_resultAsValue(const void* result, UErrorCode* status)
-{
-	if (status)
-		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-	return result;
-}
-
-static int32_t char_copy(char* result, int32_t capacity, const char* text,
-                         UErrorCode* status)
-{
-	int32_t length = (int32_t)strlen(text);
-
-	if (result && capacity > 0) {
-		int32_t copy_length = length < capacity ? length : capacity - 1;
-		memcpy(result, text, (size_t)copy_length);
-		result[copy_length] = 0;
-	}
-
-	if (status)
-		*status = length >= capacity ? U_BUFFER_OVERFLOW_ERROR : U_ZERO_ERROR;
-	return length;
-}
-
-static const char* uloc_or_default(const char* locale)
-{
-	return locale && locale[0] ? locale : "en_US";
-}
-
-int32_t uloc_addLikelySubtags(const char* locale, char* result,
-                              int32_t capacity, UErrorCode* status)
-{
-	return char_copy(result, capacity, uloc_or_default(locale), status);
-}
-
-int32_t uloc_canonicalize(const char* locale, char* result,
-                          int32_t capacity, UErrorCode* status)
-{
-	return char_copy(result, capacity, uloc_or_default(locale), status);
-}
-
-int32_t uloc_countAvailable(void)
-{
-	return 1;
-}
-
-int32_t uloc_forLanguageTag(const char* language_tag, char* locale,
-                            int32_t capacity, int32_t* parsed_length,
-                            UErrorCode* status)
-{
-	const char* source = uloc_or_default(language_tag);
-	if (parsed_length)
-		*parsed_length = (int32_t)strlen(source);
-	return char_copy(locale, capacity, source, status);
-}
-
-const char* uloc_getAvailable(int32_t index)
-{
-	return index == 0 ? "en_US" : NULL;
-}
-
-static int32_t uloc_copy_part(const char* locale, char* result,
-                              int32_t capacity, UErrorCode* status,
-                              int part)
-{
-	const char* source = uloc_or_default(locale);
-	char buffer[16] = "";
-	const char* separator = strchr(source, '_');
-
-	if (part == 0) {
-		size_t length = separator ? (size_t)(separator - source) : strlen(source);
-		if (length >= sizeof(buffer))
-			length = sizeof(buffer) - 1;
-		memcpy(buffer, source, length);
-		buffer[length] = 0;
-	} else if (separator) {
-		const char* country = separator + 1;
-		size_t length = strcspn(country, "_@.-");
-		if (length >= sizeof(buffer))
-			length = sizeof(buffer) - 1;
-		memcpy(buffer, country, length);
-		buffer[length] = 0;
-	}
-
-	return char_copy(result, capacity, buffer, status);
-}
-
-int32_t uloc_getBaseName(const char* locale, char* name, int32_t capacity,
-                         UErrorCode* status)
-{
-	const char* source = uloc_or_default(locale);
-	char buffer[128];
-	size_t length = strcspn(source, "@");
-	if (length >= sizeof(buffer))
-		length = sizeof(buffer) - 1;
-	memcpy(buffer, source, length);
-	buffer[length] = 0;
-	return char_copy(name, capacity, buffer, status);
-}
-
-int32_t uloc_getCharacterOrientation(const char* locale, UErrorCode* status)
-{
-	(void)locale;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return 0;
-}
-
-int32_t uloc_getCountry(const char* locale, char* country, int32_t capacity,
-                        UErrorCode* status)
-{
-	return uloc_copy_part(locale, country, capacity, status, 1);
-}
-
-const char* uloc_getDefault(void)
-{
-	return "en_US";
-}
-
-int32_t uloc_getKeywordValue(const char* locale, const char* keyword,
-                             char* buffer, int32_t capacity,
-                             UErrorCode* status)
-{
-	(void)locale;
-	(void)keyword;
-	return char_copy(buffer, capacity, "", status);
-}
-
-int32_t uloc_getLanguage(const char* locale, char* language,
-                         int32_t capacity, UErrorCode* status)
-{
-	return uloc_copy_part(locale, language, capacity, status, 0);
-}
-
-int32_t uloc_getScript(const char* locale, char* script, int32_t capacity,
-                       UErrorCode* status)
-{
-	(void)locale;
-	return char_copy(script, capacity, "", status);
-}
-
-int32_t uloc_minimizeSubtags(const char* locale, char* result,
-                             int32_t capacity, UErrorCode* status)
-{
-	return char_copy(result, capacity, uloc_or_default(locale), status);
-}
-
-void* uloc_openKeywords(const char* locale, UErrorCode* status)
-{
-	(void)locale;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return NULL;
-}
-
-int32_t uloc_setKeywordValue(const char* keyword, const char* value,
-                             char* buffer, int32_t capacity,
-                             UErrorCode* status)
-{
-	(void)keyword;
-	(void)value;
-	return char_copy(buffer, capacity, uloc_or_default(buffer), status);
-}
-
-int32_t uloc_toLanguageTag(const char* locale, char* language_tag,
-                           int32_t capacity, uint8_t strict,
-                           UErrorCode* status)
-{
-	(void)strict;
-	return char_copy(language_tag, capacity, uloc_or_default(locale), status);
-}
-
-const char* uloc_toUnicodeLocaleType(const char* keyword, const char* value)
-{
-	(void)keyword;
-	return value;
-}
-
-static int machgate_unorm2_nfc;
-static int machgate_unorm2_nfd;
-static int machgate_unorm2_nfkc;
-static int machgate_unorm2_nfkd;
-
-const void* unorm2_getNFCInstance(UErrorCode* status)
-{
-	if (status)
-		*status = U_ZERO_ERROR;
-	return &machgate_unorm2_nfc;
-}
-
-const void* unorm2_getNFDInstance(UErrorCode* status)
-{
-	if (status)
-		*status = U_ZERO_ERROR;
-	return &machgate_unorm2_nfd;
-}
-
-const void* unorm2_getNFKCInstance(UErrorCode* status)
-{
-	if (status)
-		*status = U_ZERO_ERROR;
-	return &machgate_unorm2_nfkc;
-}
-
-const void* unorm2_getNFKDInstance(UErrorCode* status)
-{
-	if (status)
-		*status = U_ZERO_ERROR;
-	return &machgate_unorm2_nfkd;
-}
-
-int32_t unorm2_normalize(const void* normalizer, const uint16_t* source,
-                         int32_t length, uint16_t* result,
-                         int32_t capacity, UErrorCode* status)
-{
-	(void)normalizer;
-	return utf16_copy(result, capacity, source, length, status);
-}
-
-int32_t unorm2_normalizeSecondAndAppend(const void* normalizer,
-                                        uint16_t* first, int32_t first_length,
-                                        int32_t first_capacity,
-                                        const uint16_t* second,
-                                        int32_t second_length,
-                                        UErrorCode* status)
-{
-	(void)normalizer;
-	if (!first || first_capacity <= 0) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return 0;
-	}
-	if (first_length < 0) {
-		first_length = 0;
-		while (first[first_length])
-			first_length++;
-	}
-	int32_t appended = utf16_copy(first + first_length,
-	                              first_capacity - first_length,
-	                              second, second_length, status);
-	return first_length + appended;
-}
-
-int32_t unorm2_getDecomposition(const void* normalizer, UChar32 value,
-                                uint16_t* decomposition, int32_t capacity,
-                                UErrorCode* status)
-{
-	(void)normalizer;
-	if (decomposition && capacity > 0)
-		decomposition[0] = 0;
-	if (status)
-		*status = U_ZERO_ERROR;
-	(void)value;
-	return 0;
-}
-
-uint8_t unorm2_isNormalized(const void* normalizer, const uint16_t* source,
-                            int32_t length, UErrorCode* status)
-{
-	(void)normalizer;
-	(void)source;
-	(void)length;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return 1;
-}
-
-void* unum_open(int32_t style, const uint16_t* pattern, int32_t pattern_length,
-                const char* locale, void* parse_error, UErrorCode* status)
-{
-	int* formatter = calloc(1, sizeof(*formatter));
-	(void)style;
-	(void)pattern;
-	(void)pattern_length;
-	(void)locale;
-	(void)parse_error;
-	if (!formatter) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return formatter;
-}
-
-void unum_close(void* formatter)
-{
-	free(formatter);
-}
-
-void unum_setAttribute(void* formatter, int32_t attribute, int32_t value)
-{
-	(void)formatter;
-	(void)attribute;
-	(void)value;
-}
-
-static void formatted_value_set_ascii(struct machgate_formatted_value* value,
-                                      const char* text)
-{
-	if (!value)
-		return;
-	value->length = utf16_copy_ascii(value->text, 256, text, NULL);
-}
-
-static void formatted_value_set_double(struct machgate_formatted_value* value,
-                                       double number)
-{
-	char buffer[64];
-	snprintf(buffer, sizeof(buffer), "%.15g", number);
-	formatted_value_set_ascii(value, buffer);
-}
-
-void* unumf_openForSkeletonAndLocale(const uint16_t* skeleton,
-                                     int32_t skeleton_length,
-                                     const char* locale,
-                                     UErrorCode* status)
-{
-	int* formatter = calloc(1, sizeof(*formatter));
-	(void)skeleton;
-	(void)skeleton_length;
-	(void)locale;
-	if (!formatter) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return formatter;
-}
-
-void unumf_close(void* formatter)
-{
-	free(formatter);
-}
-
-void* unumf_openResult(UErrorCode* status)
-{
-	struct machgate_formatted_value* result = calloc(1, sizeof(*result));
-	if (!result) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return result;
-}
-
-void unumf_closeResult(void* result)
-{
-	free(result);
-}
-
-void unumf_formatDecimal(const void* formatter, const char* value,
-                         int32_t value_length, void* result,
-                         UErrorCode* status)
-{
-	struct machgate_formatted_value* formatted = result;
-	char buffer[128];
-	(void)formatter;
-	if (!value)
-		value = "";
-	if (value_length < 0)
-		value_length = (int32_t)strlen(value);
-	if (value_length >= (int32_t)sizeof(buffer))
-		value_length = (int32_t)sizeof(buffer) - 1;
-	memcpy(buffer, value, (size_t)value_length);
-	buffer[value_length] = 0;
-	formatted_value_set_ascii(formatted, buffer);
-	if (status)
-		*status = formatted ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-void unumf_formatDouble(const void* formatter, double value, void* result,
-                        UErrorCode* status)
-{
-	(void)formatter;
-	formatted_value_set_double(result, value);
-	if (status)
-		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-void unumf_resultGetAllFieldPositions(const void* result, void* iterator,
-                                      UErrorCode* status)
-{
-	(void)result;
-	(void)iterator;
-	if (status)
-		*status = U_ZERO_ERROR;
-}
-
-int32_t unumf_resultToString(const void* result, uint16_t* buffer,
-                             int32_t capacity, UErrorCode* status)
-{
-	const struct machgate_formatted_value* formatted = result;
-	return utf16_copy(buffer, capacity,
-	                  formatted ? formatted->text : NULL,
-	                  formatted ? formatted->length : 0, status);
-}
-
-const void* unumf_resultAsValue(const void* result, UErrorCode* status)
-{
-	if (status)
-		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-	return result;
-}
-
-void* unumrf_openForSkeletonWithCollapseAndIdentityFallback(
-	const uint16_t* skeleton, int32_t skeleton_length, int32_t collapse,
-	int32_t identity_fallback, const char* locale, UErrorCode* status)
-{
-	int* formatter = calloc(1, sizeof(*formatter));
-	(void)skeleton;
-	(void)skeleton_length;
-	(void)collapse;
-	(void)identity_fallback;
-	(void)locale;
-	if (!formatter) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return formatter;
-}
-
-void unumrf_close(void* formatter)
-{
-	free(formatter);
-}
-
-void* unumrf_openResult(UErrorCode* status)
-{
-	return unumf_openResult(status);
-}
-
-void unumrf_closeResult(void* result)
-{
-	free(result);
-}
-
-void unumrf_formatDecimalRange(const void* formatter, const char* first,
-                               int32_t first_length, const char* second,
-                               int32_t second_length, void* result,
-                               UErrorCode* status)
-{
-	(void)formatter;
-	(void)second;
-	(void)second_length;
-	unumf_formatDecimal(NULL, first, first_length, result, status);
-}
-
-void unumrf_formatDoubleRange(const void* formatter, double first,
-                              double second, void* result,
-                              UErrorCode* status)
-{
-	(void)formatter;
-	(void)second;
-	unumf_formatDouble(NULL, first, result, status);
-}
-
-const void* unumrf_resultAsValue(const void* result, UErrorCode* status)
-{
-	return unumf_resultAsValue(result, status);
-}
-
-void unumsys_close(void* numbering_system)
-{
-	free(numbering_system);
-}
-
-static void* unumsys_alloc(const char* name, UErrorCode* status)
-{
-	struct machgate_unumsys* numbering_system = calloc(1, sizeof(*numbering_system));
-	if (!numbering_system) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	snprintf(numbering_system->name, sizeof(numbering_system->name), "%s",
-	         name && name[0] ? name : "latn");
-	if (status)
-		*status = U_ZERO_ERROR;
-	return numbering_system;
-}
-
-void* unumsys_open(const char* locale, UErrorCode* status)
-{
-	(void)locale;
-	return unumsys_alloc("latn", status);
-}
-
-void* unumsys_openByName(const char* name, UErrorCode* status)
-{
-	return unumsys_alloc(name, status);
-}
-
-void* unumsys_openAvailableNames(UErrorCode* status)
-{
-	static const char* const values[] = { "latn" };
-	struct machgate_uenum* enumeration = calloc(1, sizeof(*enumeration));
-	if (!enumeration) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	enumeration->count = 1;
-	enumeration->values = values;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return enumeration;
-}
-
-const char* unumsys_getName(const void* numbering_system)
-{
-	const struct machgate_unumsys* system = numbering_system;
-	return system ? system->name : "latn";
-}
-
-uint8_t unumsys_isAlgorithmic(const void* numbering_system)
-{
-	(void)numbering_system;
-	return 0;
-}
-
-void* uplrules_openForType(const char* locale, int32_t type, UErrorCode* status)
-{
-	int* rules = calloc(1, sizeof(*rules));
-	(void)locale;
-	(void)type;
-	if (!rules) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return rules;
-}
-
-void uplrules_close(void* rules)
-{
-	free(rules);
-}
-
-void* uplrules_getKeywords(const void* rules, UErrorCode* status)
-{
-	static const char* const values[] = { "other" };
-	struct machgate_uenum* enumeration = calloc(1, sizeof(*enumeration));
-	(void)rules;
-	if (!enumeration) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	enumeration->count = 1;
-	enumeration->values = values;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return enumeration;
-}
-
-int32_t uplrules_selectFormatted(const void* rules, const void* number,
-                                 uint16_t* keyword, int32_t capacity,
-                                 UErrorCode* status)
-{
-	(void)rules;
-	(void)number;
-	return utf16_copy_ascii(keyword, capacity, "other", status);
-}
-
-int32_t uplrules_selectForRange(const void* rules, const void* range,
-                                uint16_t* keyword, int32_t capacity,
-                                UErrorCode* status)
-{
-	(void)rules;
-	(void)range;
-	return utf16_copy_ascii(keyword, capacity, "other", status);
-}
-
-void* ureldatefmt_open(const char* locale, void* number_format, int32_t width,
-                       int32_t capitalization_context, UErrorCode* status)
-{
-	int* formatter = calloc(1, sizeof(*formatter));
-	(void)locale;
-	free(number_format);
-	(void)width;
-	(void)capitalization_context;
-	if (!formatter) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return formatter;
-}
-
-void ureldatefmt_close(void* formatter)
-{
-	free(formatter);
-}
-
-void* ureldatefmt_openResult(UErrorCode* status)
-{
-	return unumf_openResult(status);
-}
-
-void ureldatefmt_closeResult(void* result)
-{
-	free(result);
-}
-
-const void* ureldatefmt_resultAsValue(const void* result, UErrorCode* status)
-{
-	return unumf_resultAsValue(result, status);
-}
-
-static int32_t ureldatefmt_format_value(double offset, uint16_t* result,
-                                        int32_t capacity, UErrorCode* status)
-{
-	char buffer[64];
-	snprintf(buffer, sizeof(buffer), "%.15g", offset);
-	return utf16_copy_ascii(result, capacity, buffer, status);
-}
-
-int32_t ureldatefmt_format(const void* formatter, double offset, int32_t unit,
-                           uint16_t* result, int32_t capacity,
-                           UErrorCode* status)
-{
-	(void)formatter;
-	(void)unit;
-	return ureldatefmt_format_value(offset, result, capacity, status);
-}
-
-int32_t ureldatefmt_formatNumeric(const void* formatter, double offset,
-                                  int32_t unit, uint16_t* result,
-                                  int32_t capacity, UErrorCode* status)
-{
-	return ureldatefmt_format(formatter, offset, unit, result, capacity, status);
-}
-
-void ureldatefmt_formatToResult(const void* formatter, double offset,
-                                int32_t unit, void* result,
-                                UErrorCode* status)
-{
-	(void)formatter;
-	(void)unit;
-	formatted_value_set_double(result, offset);
-	if (status)
-		*status = result ? U_ZERO_ERROR : U_ILLEGAL_ARGUMENT_ERROR;
-}
-
-void ureldatefmt_formatNumericToResult(const void* formatter, double offset,
-                                       int32_t unit, void* result,
-                                       UErrorCode* status)
-{
-	ureldatefmt_formatToResult(formatter, offset, unit, result, status);
-}
-
-void* ures_open(const char* package_name, const char* locale, UErrorCode* status)
-{
-	int* resource = calloc(1, sizeof(*resource));
-	(void)package_name;
-	(void)locale;
-	if (!resource) {
-		if (status)
-			*status = U_ILLEGAL_ARGUMENT_ERROR;
-		return NULL;
-	}
-	if (status)
-		*status = U_ZERO_ERROR;
-	return resource;
-}
-
-void ures_close(void* resource)
-{
-	free(resource);
-}
-
-void* ures_getByKey(const void* resource, const char* key, void* fill_in,
-                    UErrorCode* status)
-{
-	(void)resource;
-	(void)key;
-	(void)fill_in;
-	return ures_open(NULL, NULL, status);
-}
-
-const uint16_t* ures_getStringByKey(const void* resource, const char* key,
-                                    int32_t* length, UErrorCode* status)
-{
-	static const uint16_t empty[1] = { 0 };
-	(void)resource;
-	(void)key;
-	if (length)
-		*length = 0;
-	if (status)
-		*status = U_ZERO_ERROR;
-	return empty;
-}
-
-void* utext_setup(void* text, int32_t extra_space, UErrorCode* status)
-{
-	struct machgate_utext* result = text;
-	(void)extra_space;
-	if (!result) {
-		result = calloc(1, sizeof(*result));
-		if (!result) {
-			if (status)
-				*status = U_ILLEGAL_ARGUMENT_ERROR;
-			return NULL;
-		}
-		result->flags = 1;
-	} else {
-		memset(result, 0, sizeof(*result));
-	}
-	result->magic = 0x345ad82c;
-	result->size_of_struct = (int32_t)sizeof(*result);
-	if (status)
-		*status = U_ZERO_ERROR;
-	return result;
-}
-
-void* utext_close(void* text)
-{
-	struct machgate_utext* utext = text;
-	if (!utext)
-		return NULL;
-	if (utext->flags & 1)
-		free(utext);
-	return NULL;
-}
-
-void* CFRunLoopGetCurrent(void)
-{
-	static int run_loop;
-	return &run_loop;
-}
-
-uint8_t CFRunLoopIsWaiting(void* run_loop)
-{
-	(void)run_loop;
-	return 0;
-}
-
-void CFRunLoopRun(void)
-{
-}
-
-void CFRunLoopStop(void* run_loop)
-{
-	(void)run_loop;
-}
-
-void CFRunLoopWakeUp(void* run_loop)
-{
-	(void)run_loop;
 }
 
 const void* CFNumberCreate(CFAllocatorRef allocator, int type,
@@ -4623,12 +2061,6 @@ CFStringRef CFErrorCopyDescription(CFErrorRef error)
 {
 	(void)error;
 	return cf_error_description;
-}
-
-CFIndex CFErrorGetCode(CFErrorRef error)
-{
-	(void)error;
-	return 0;
 }
 
 void CFRelease(const void* object)
@@ -5343,8 +2775,9 @@ static void apply_spawn_file_actions(struct shim_spawn_file_actions* actions)
 			dup2(action->fd, action->newfd);
 			break;
 		case SHIM_SPAWN_ACTION_OPEN: {
-			int fd = open(action->path, translate_oflags(action->flags),
-			              action->mode);
+			int fd = syscall(SYS_openat, AT_FDCWD, action->path,
+			                 machgate_linux_open_flags(action->flags),
+			                 action->mode);
 			if (fd >= 0) {
 				if (fd != action->fd) {
 					dup2(fd, action->fd);
@@ -5485,7 +2918,7 @@ static ssize_t shim_write_with_sigpipe_guard(long syscall_number, int fd,
 	ssize_t result = syscall(syscall_number, fd, buffer, size_or_count);
 	int saved_errno = errno;
 	if (result < 0)
-		saved_errno = shim_errno_from_linux(saved_errno);
+		saved_errno = machgate_darwin_errno_from_linux(saved_errno);
 	shim_fd_trace_log("write caller=%p fd=%d size=%zu result=%zd errno=%d\n",
 	                  SHIM_CALLER_RETURN_ADDRESS(), fd, size_or_count,
 	                  result, result < 0 ? saved_errno : 0);
@@ -5503,7 +2936,7 @@ ssize_t read(int fd, void* buffer, size_t size)
 	ssize_t result = (ssize_t)syscall(SYS_read, fd, buffer, size);
 	int saved_errno = errno;
 	if (result < 0)
-		saved_errno = shim_errno_from_linux(saved_errno);
+		saved_errno = machgate_darwin_errno_from_linux(saved_errno);
 	shim_fd_trace_log("read caller=%p fd=%d size=%zu result=%zd errno=%d\n",
 	                  SHIM_CALLER_RETURN_ADDRESS(), fd, size, result,
 	                  result < 0 ? saved_errno : 0);
@@ -5520,7 +2953,7 @@ ssize_t readv(int fd, const struct iovec* iov, int iovcnt)
 	ssize_t result = (ssize_t)syscall(SYS_readv, fd, iov, (int)iovcnt);
 	int saved_errno = errno;
 	if (result < 0)
-		saved_errno = shim_errno_from_linux(saved_errno);
+		saved_errno = machgate_darwin_errno_from_linux(saved_errno);
 	shim_fd_trace_log("readv caller=%p fd=%d iovcnt=%d result=%zd errno=%d\n",
 	                  SHIM_CALLER_RETURN_ADDRESS(), fd, iovcnt, result,
 	                  result < 0 ? saved_errno : 0);
@@ -5578,58 +3011,6 @@ int __darwin_check_fd_set_overflow(int fd, const void* fd_set,
 	(void)fd_set;
 	(void)select_size;
 	return fd >= 0 && fd < FD_SETSIZE;
-}
-
-int sysctlnametomib(const char* name, int* mib, size_t* mib_length)
-{
-	if (!name || !mib_length) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	struct mib_entry {
-		const char* name;
-		int values[2];
-		size_t length;
-	};
-
-static const struct mib_entry entries[] = {
-	{ "kern.ostype", { 1, 1 }, 2 },
-	{ "kern.osrelease", { 1, 2 }, 2 },
-	{ "kern.version", { 1, 4 }, 2 },
-	{ "kern.argmax", { 1, 8 }, 2 },
-	{ "kern.hostname", { 1, 10 }, 2 },
-	{ "kern.osversion", { 1, 65 }, 2 },
-	{ "kern.osproductversion", { 1, 140 }, 2 },
-	{ "kern.osproductversioncompat", { 1, 141 }, 2 },
-	{ "hw.machine", { 6, 1 }, 2 },
-	{ "hw.model", { 6, 2 }, 2 },
-	{ "hw.ncpu", { 6, 3 }, 2 },
-	{ "hw.byteorder", { 6, 4 }, 2 },
-		{ "hw.memsize", { 6, 24 }, 2 },
-		{ "hw.pagesize", { 6, 7 }, 2 },
-		{ "hw.logicalcpu", { 6, 103 }, 2 },
-		{ "hw.physicalcpu", { 6, 101 }, 2 },
-		{ "hw.activecpu", { 6, 25 }, 2 },
-	};
-
-	for (size_t index = 0; index < sizeof(entries) / sizeof(entries[0]);
-	     index++) {
-		if (strcmp(name, entries[index].name) != 0)
-			continue;
-		if (!mib || *mib_length < entries[index].length) {
-			*mib_length = entries[index].length;
-			errno = ENOMEM;
-			return -1;
-		}
-		memcpy(mib, entries[index].values,
-		       entries[index].length * sizeof(*mib));
-		*mib_length = entries[index].length;
-		return 0;
-	}
-
-	errno = ENOENT;
-	return -1;
 }
 
 int getfsstat(struct statfs* buffer, int buffer_size, int flags)
@@ -6058,7 +3439,9 @@ void __cxa_guard_abort(uint64_t* guard)
 		        __builtin_return_address(0));
 }
 
-static void trace_process_exit_code(const char* name, int status, void* caller)
+__attribute__((visibility("hidden")))
+void machgate_trace_process_exit_code(const char* name, int status,
+	                              void* caller)
 {
 	FILE* trace_file = shim_open_trace_file();
 
@@ -6078,211 +3461,6 @@ static void trace_process_exit_code(const char* name, int status, void* caller)
 	fclose(trace_file);
 }
 
-void exit(int status)
-{
-	trace_process_exit_code("exit", status, SHIM_CALLER_RETURN_ADDRESS());
-	syscall(SYS_exit_group, status);
-	__builtin_unreachable();
-}
-
-void _exit(int status)
-{
-	trace_process_exit_code("_exit", status, SHIM_CALLER_RETURN_ADDRESS());
-	syscall(SYS_exit_group, status);
-	__builtin_unreachable();
-}
-
-static int shim_errno_from_linux(int linux_errno)
-{
-	switch (linux_errno) {
-	case EAGAIN:
-		return 35;
-	case ETIMEDOUT:
-		return 60;
-	default:
-		return linux_errno;
-	}
-}
-
-/* ===== Apple stdio globals ===== */
-
-/* Apple's libSystem exports these as global FILE* pointers.
- * We define them as initialized globals pointing to glibc's streams.
- * Note: these are initialized at load time via __attribute__((constructor)). */
-FILE* __stdinp;
-FILE* __stdoutp;
-FILE* __stderrp;
-
-__attribute__((constructor))
-static void init_stdio_globals(void)
-{
-	__stdinp  = stdin;
-	__stdoutp = stdout;
-	__stderrp = stderr;
-}
-
-
-/* ===== errno ===== */
-
-/* Apple's __error() returns a pointer to errno (like __errno_location on Linux) */
-int* __error(void)
-{
-	return __errno_location();
-}
-
-/* ===== Stack protector ===== */
-
-/* __chkstk_darwin is a stack probing function. On Linux, the kernel handles
- * stack growth automatically via guard pages, so this is a no-op. */
-void __chkstk_darwin(void)
-{
-	/* no-op */
-}
-
-/* __stack_chk_guard and __stack_chk_fail are provided by glibc.
- * We don't need to define them — they'll resolve through normal linking. */
-
-/* ===== Math shims ===== */
-
-/* Adapted from Darling's src/libm/Source/sincos.c */
-
-struct __float2 { float __sinval; float __cosval; };
-struct __double2 { double __sinval; double __cosval; };
-
-struct __float2 __sincosf_stret(float v)
-{
-	struct __float2 rv = { sinf(v), cosf(v) };
-	return rv;
-}
-
-struct __double2 __sincos_stret(double v)
-{
-	struct __double2 rv = { sin(v), cos(v) };
-	return rv;
-}
-
-struct __float2 __sincospif_stret(float v)
-{
-	return __sincosf_stret(v * (float)M_PI);
-}
-
-struct __double2 __sincospi_stret(double v)
-{
-	return __sincos_stret(v * M_PI);
-}
-
-/* Adapted from Darling's src/libm/Source/exp10.c */
-
-double __exp10(double x)
-{
-	return pow(10.0, x);
-}
-
-float __exp10f(float x)
-{
-	return powf(10.0f, x);
-}
-
-static char* getenv_from_guest_envp(const char* name)
-{
-	char*** machgate_envp = dlsym(RTLD_DEFAULT, "__machgate_guest_envp");
-	size_t name_len;
-
-	if (!name || !machgate_envp || !*machgate_envp)
-		return NULL;
-
-	name_len = strlen(name);
-	for (size_t env_index = 0; (*machgate_envp)[env_index]; env_index++) {
-		char* entry = (*machgate_envp)[env_index];
-		if (strncmp(entry, name, name_len) == 0 && entry[name_len] == '=')
-			return entry + name_len + 1;
-	}
-
-	return NULL;
-}
-
-char *shim_getenv(const char *name) __asm__("getenv");
-char *shim_getenv(const char *name)
-{
-	char* guest_value = getenv_from_guest_envp(name);
-	if (guest_value)
-		return guest_value;
-
-	static char *(*real_getenv)(const char*) = NULL;
-	if (!real_getenv)
-		real_getenv = dlsym(RTLD_NEXT, "getenv");
-	return real_getenv(name);
-}
-
-/* ===== _NSGetExecutablePath ===== */
-
-int _NSGetExecutablePath(char *buf, uint32_t *bufsize)
-{
-	if (!buf || !bufsize) return -1;
-
-	const char** guest_executable_path =
-		dlsym(RTLD_DEFAULT, "__machgate_guest_executable_path");
-	const char* path = (guest_executable_path && *guest_executable_path)
-		? *guest_executable_path
-		: NULL;
-	char proc_path[4096];
-
-	if (!path) {
-		ssize_t proc_len = readlink("/proc/self/exe", proc_path,
-		                            sizeof(proc_path) - 1);
-		if (proc_len < 0) return -1;
-		proc_path[proc_len] = '\0';
-		path = proc_path;
-	}
-
-	size_t len = strlen(path);
-
-	if ((uint32_t)len >= *bufsize) {
-		*bufsize = (uint32_t)len + 1;
-		return -1; /* buffer too small */
-	}
-
-	memcpy(buf, path, len + 1);
-	*bufsize = (uint32_t)len;
-	return 0;
-}
-
-int proc_pidpath(int pid, void* buffer, uint32_t buffersize)
-{
-	if (!buffer || buffersize == 0) {
-		errno = EINVAL;
-		return 0;
-	}
-
-	const char** guest_executable_path =
-		dlsym(RTLD_DEFAULT, "__machgate_guest_executable_path");
-	const char* path = (pid == getpid() && guest_executable_path &&
-	                    *guest_executable_path)
-		? *guest_executable_path
-		: NULL;
-	char proc_path[4096];
-	char proc_link[64];
-
-	if (!path) {
-		snprintf(proc_link, sizeof(proc_link), "/proc/%d/exe", pid);
-		ssize_t proc_len = readlink(proc_link, proc_path,
-		                            sizeof(proc_path) - 1);
-		if (proc_len < 0)
-			return 0;
-		proc_path[proc_len] = '\0';
-		path = proc_path;
-	}
-
-	size_t len = strlen(path);
-	if (len >= buffersize) {
-		errno = ENOBUFS;
-		return 0;
-	}
-
-	memcpy(buffer, path, len + 1);
-	return (int)len;
-}
-
 ssize_t __getdirentries64(int fd, char* buffer, size_t buffer_size,
                           int64_t* basep)
 {
@@ -6297,17 +3475,6 @@ ssize_t __getdirentries64(int fd, char* buffer, size_t buffer_size,
 int __pthread_fchdir(int fd)
 {
 	return fchdir(fd);
-}
-
-const char* getprogname(void)
-{
-	const char** guest_executable_path =
-		dlsym(RTLD_DEFAULT, "__machgate_guest_executable_path");
-	const char* path = (guest_executable_path && *guest_executable_path)
-		? *guest_executable_path
-		: "machgate";
-	const char* slash = strrchr(path, '/');
-	return slash ? slash + 1 : path;
 }
 
 int getpeereid(int fd, uid_t* uid, gid_t* gid)
@@ -6351,219 +3518,6 @@ void* getsectiondata(const void* header, const char* segment_name,
 	(void)section_name;
 	return getsegmentdata(header, segment_name, size);
 }
-
-/* ===== Apple locale / ctype ===== */
-
-/* _DefaultRuneLocale — Apple's locale data structure.
- * The __runetype[] table is indexed by character value; each entry is a
- * bitmask of character class flags.
- *
- * Apple _CTYPE bit definitions (from <ctype.h>):
- *   0x00000100 _CTYPE_A  alpha        0x00000200 _CTYPE_C  control
- *   0x00000400 _CTYPE_D  digit        0x00000800 _CTYPE_G  graph
- *   0x00001000 _CTYPE_L  lowercase    0x00002000 _CTYPE_P  punctuation
- *   0x00004000 _CTYPE_S  space        0x00008000 _CTYPE_U  uppercase
- *   0x00010000 _CTYPE_X  hex digit    0x00020000 _CTYPE_B  blank
- *   0x00040000 _CTYPE_R  print
- *
- * On macOS, _DefaultRuneLocale is the struct itself (not a pointer).
- * Guest code accesses it as:  *(uint32_t*)(_DefaultRuneLocale + ch*4 + 0x3c)
- * where 0x3c is the byte offset from the struct start to __runetype[]. */
-
-struct _RuneLocale {
-	char __pad[0x3c];        /* magic + encoding + other fields */
-	uint32_t __runetype[256];
-	int32_t  __maplower[256];
-	int32_t  __mapupper[256];
-};
-
-struct _RuneLocale _DefaultRuneLocale;
-
-/* Apple ctype flag bits */
-#define _CTYPE_A 0x00000100
-#define _CTYPE_C 0x00000200
-#define _CTYPE_D 0x00000400
-#define _CTYPE_G 0x00000800
-#define _CTYPE_L 0x00001000
-#define _CTYPE_P 0x00002000
-#define _CTYPE_S 0x00004000
-#define _CTYPE_U 0x00008000
-#define _CTYPE_X 0x00010000
-#define _CTYPE_B 0x00020000
-#define _CTYPE_R 0x00040000
-
-__attribute__((constructor))
-static void init_rune_locale(void)
-{
-	memcpy(_DefaultRuneLocale.__pad, "RuneMagi", 8);
-
-	for (int c = 0; c <= 0x1F; c++)
-		_DefaultRuneLocale.__runetype[c] = _CTYPE_C;
-	_DefaultRuneLocale.__runetype[0x7F] = _CTYPE_C;
-
-	_DefaultRuneLocale.__runetype[' ']  = _CTYPE_S | _CTYPE_B;
-	_DefaultRuneLocale.__runetype['\t'] = _CTYPE_S | _CTYPE_B;
-	_DefaultRuneLocale.__runetype['\n'] = _CTYPE_S;
-	_DefaultRuneLocale.__runetype['\r'] = _CTYPE_S;
-	_DefaultRuneLocale.__runetype['\f'] = _CTYPE_S;
-	_DefaultRuneLocale.__runetype['\v'] = _CTYPE_S;
-
-	for (int c = '0'; c <= '9'; c++)
-		_DefaultRuneLocale.__runetype[c] = _CTYPE_D | _CTYPE_G | _CTYPE_R | _CTYPE_X;
-
-	for (int c = 'A'; c <= 'Z'; c++)
-		_DefaultRuneLocale.__runetype[c] = _CTYPE_A | _CTYPE_U | _CTYPE_G | _CTYPE_R;
-	for (int c = 'A'; c <= 'F'; c++)
-		_DefaultRuneLocale.__runetype[c] |= _CTYPE_X;
-
-	for (int c = 'a'; c <= 'z'; c++)
-		_DefaultRuneLocale.__runetype[c] = _CTYPE_A | _CTYPE_L | _CTYPE_G | _CTYPE_R;
-	for (int c = 'a'; c <= 'f'; c++)
-		_DefaultRuneLocale.__runetype[c] |= _CTYPE_X;
-
-	const char* punct = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-	for (int i = 0; punct[i]; i++)
-		_DefaultRuneLocale.__runetype[(unsigned char)punct[i]] = _CTYPE_P | _CTYPE_G | _CTYPE_R;
-
-	for (int c = 0; c < 256; c++) {
-		_DefaultRuneLocale.__maplower[c] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
-		_DefaultRuneLocale.__mapupper[c] = (c >= 'a' && c <= 'z') ? c - 32 : c;
-	}
-}
-
-/* ___maskrune — Apple's character classification */
-int __maskrune(int c, unsigned long mask)
-{
-	if (c < 0 || c > 255) return 0;
-	return (int)(_DefaultRuneLocale.__runetype[c] & mask);
-}
-
-/* ___tolower / ___toupper — Apple exports these as function pointers */
-int __tolower(int c)
-{
-	return tolower(c);
-}
-
-int __toupper(int c)
-{
-	return toupper(c);
-}
-
-/* ===== BSD string functions ===== */
-
-/* strlcpy/strlcat — available in glibc 2.38+, but provide fallbacks
- * for older systems */
-#if !defined(__GLIBC__) || (__GLIBC__ < 2) || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 38)
-
-size_t strlcpy(char *dst, const char *src, size_t size)
-{
-	size_t srclen = strlen(src);
-	if (size > 0) {
-		size_t copylen = srclen < size - 1 ? srclen : size - 1;
-		memcpy(dst, src, copylen);
-		dst[copylen] = '\0';
-	}
-	return srclen;
-}
-
-size_t strlcat(char *dst, const char *src, size_t size)
-{
-	size_t dstlen = strnlen(dst, size);
-	if (dstlen == size) return size + strlen(src);
-	return dstlen + strlcpy(dst + dstlen, src, size - dstlen);
-}
-
-#endif
-
-/* ===== memset_pattern ===== */
-
-void memset_pattern4(void *dst, const void *pattern, size_t len)
-{
-	const uint8_t *p = (const uint8_t *)pattern;
-	uint8_t *d = (uint8_t *)dst;
-	while (len >= 4) {
-		memcpy(d, p, 4);
-		d += 4;
-		len -= 4;
-	}
-	if (len > 0) memcpy(d, p, len);
-}
-
-void memset_pattern8(void *dst, const void *pattern, size_t len)
-{
-	const uint8_t *p = (const uint8_t *)pattern;
-	uint8_t *d = (uint8_t *)dst;
-	while (len >= 8) {
-		memcpy(d, p, 8);
-		d += 8;
-		len -= 8;
-	}
-	if (len > 0) memcpy(d, p, len);
-}
-
-void memset_pattern16(void *dst, const void *pattern, size_t len)
-{
-	const uint8_t *p = (const uint8_t *)pattern;
-	uint8_t *d = (uint8_t *)dst;
-	while (len >= 16) {
-		memcpy(d, p, 16);
-		d += 16;
-		len -= 16;
-	}
-	if (len > 0) memcpy(d, p, len);
-}
-
-/* ===== pthread mutex ABI translation ===== */
-
-/*
- * macOS pthread_mutex_t is 64 bytes: { long __sig; char __opaque[56]; }
- * where __sig = 0x32AAABA7 for PTHREAD_MUTEX_INITIALIZER.
- *
- * Linux/glibc aarch64 pthread_mutex_t is 48 bytes with PTHREAD_MUTEX_INITIALIZER = {0}.
- *
- * Since Linux's struct fits within macOS's, we can re-initialize in-place.
- * We detect macOS-format by checking for the signature at offset 0.
- */
-
-#define DARWIN_PTHREAD_MUTEX_SIG 0x32AAABA7L
-#define DARWIN_PTHREAD_RMUTEX_SIG 0x32AAABA1L
-/*
- * All Apple pthread_mutex static initializers share the prefix 0x32AAABA0 with
- * the mutex type encoded in the low nibble: A7=normal, A1=errorcheck,
- * A2=recursive, A3=firstfit. Detect by mask (as Apple's own
- * _PTHREAD_MUTEX_SIG_CMP does) rather than enumerating exact values — missing a
- * type (e.g. A2 = PTHREAD_RECURSIVE_MUTEX_INITIALIZER, written by Mina's
- * ycTempString.cpp ctor) leaves the signature in place, and glibc then reads it
- * as a locked __lock and deadlocks in __lll_lock_wait on the first lock.
- */
-#define DARWIN_PTHREAD_MUTEX_SIG_MASK 0xFFFFFFF0L
-#define DARWIN_PTHREAD_MUTEX_SIG_CMP  0x32AAABA0L
-#define DARWIN_PTHREAD_COND_SIG 0x3CB0B1BBL
-
-/*
- * We need wrappers that detect macOS-format pthread objects and re-init
- * them for Linux before use. The wrappers are exported with the standard
- * names (pthread_mutex_lock, etc.) so the resolver's dlsym finds them.
- * Inside, we call the real glibc functions via RTLD_NEXT.
- */
-
-#include <dlfcn.h>
-
-/* Real glibc pthread function pointers, resolved at load time */
-static int (*real_pthread_mutex_lock)(pthread_mutex_t *);
-static int (*real_pthread_mutex_unlock)(pthread_mutex_t *);
-static int (*real_pthread_mutex_trylock)(pthread_mutex_t *);
-static int (*real_pthread_mutex_init)(pthread_mutex_t *, const pthread_mutexattr_t *);
-static int (*real_pthread_mutex_destroy)(pthread_mutex_t *);
-static int (*real_pthread_cond_wait)(pthread_cond_t *, pthread_mutex_t *);
-static int (*real_pthread_cond_timedwait)(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
-static int (*real_pthread_cond_signal)(pthread_cond_t *);
-static int (*real_pthread_cond_broadcast)(pthread_cond_t *);
-static int (*real_pthread_cond_init)(pthread_cond_t *, const pthread_condattr_t *);
-static int (*real_pthread_cond_destroy)(pthread_cond_t *);
-static int (*real_pthread_rwlock_rdlock)(pthread_rwlock_t *);
-static int (*real_pthread_rwlock_wrlock)(pthread_rwlock_t *);
-static int (*real_pthread_rwlock_unlock)(pthread_rwlock_t *);
 
 static int shim_trace_enabled(void);
 static int darwin_signal_to_linux(int darwin_signal);
@@ -6686,15 +3640,13 @@ static void forget_pthread_identity(pthread_t thread)
 	unlock_pthread_id_slots();
 }
 
-static inline uintptr_t *darwin_tsd_mirror_base(void)
+extern void* machgate_guest_thread_context(void) __attribute__((weak));
+
+static inline uintptr_t* darwin_tsd_mirror_base(void)
 {
-#if defined(__aarch64__)
-	uintptr_t *result;
-	__asm__ volatile("mrs %0, tpidr_el0" : "=r"(result));
-	return result;
-#else
+	if (machgate_guest_thread_context)
+		return machgate_guest_thread_context();
 	return NULL;
-#endif
 }
 
 static inline int darwin_tsd_key_index(pthread_key_t key)
@@ -6706,98 +3658,11 @@ static inline int darwin_tsd_key_index(pthread_key_t key)
 }
 
 __attribute__((constructor(101)))
-static void init_pthread_wrappers(void)
+static void init_pthread_identity(void)
 {
-	/* Resolve real glibc pthread functions via RTLD_NEXT.
-	 * This skips our own definitions and finds glibc's. */
-	real_pthread_mutex_lock = dlsym(RTLD_NEXT, "pthread_mutex_lock");
-	real_pthread_mutex_unlock = dlsym(RTLD_NEXT, "pthread_mutex_unlock");
-	real_pthread_mutex_trylock = dlsym(RTLD_NEXT, "pthread_mutex_trylock");
-	real_pthread_mutex_init = dlsym(RTLD_NEXT, "pthread_mutex_init");
-	real_pthread_mutex_destroy = dlsym(RTLD_NEXT, "pthread_mutex_destroy");
-	real_pthread_cond_wait = dlsym(RTLD_NEXT, "pthread_cond_wait");
-	real_pthread_cond_timedwait = dlsym(RTLD_NEXT, "pthread_cond_timedwait");
-	real_pthread_cond_signal = dlsym(RTLD_NEXT, "pthread_cond_signal");
-	real_pthread_cond_broadcast = dlsym(RTLD_NEXT, "pthread_cond_broadcast");
-	real_pthread_cond_init = dlsym(RTLD_NEXT, "pthread_cond_init");
-	real_pthread_cond_destroy = dlsym(RTLD_NEXT, "pthread_cond_destroy");
-	real_pthread_rwlock_rdlock = dlsym(RTLD_NEXT, "pthread_rwlock_rdlock");
-	real_pthread_rwlock_wrlock = dlsym(RTLD_NEXT, "pthread_rwlock_wrlock");
-	real_pthread_rwlock_unlock = dlsym(RTLD_NEXT, "pthread_rwlock_unlock");
 	machgate_main_pthread = pthread_self();
 	machgate_main_pthread_set = 1;
 	register_current_pthread_identity();
-
-	if (!real_pthread_mutex_lock)
-		fprintf(stderr, "libsystem_shim: WARNING: could not resolve real pthread_mutex_lock\n");
-	else if (shim_startup_log_enabled())
-		fprintf(stderr, "libsystem_shim: pthread wrappers initialized (real=%p)\n", real_pthread_mutex_lock);
-}
-
-/* Check if this looks like a macOS-initialized mutex and reinit for Linux */
-static inline void fixup_mutex(pthread_mutex_t *mutex)
-{
-	long *sig = (long *)mutex;
-	if ((*sig & DARWIN_PTHREAD_MUTEX_SIG_MASK) == DARWIN_PTHREAD_MUTEX_SIG_CMP) {
-		pthread_mutexattr_t attr;
-		pthread_mutexattr_init(&attr);
-		pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-		memset(mutex, 0, sizeof(pthread_mutex_t));
-		real_pthread_mutex_init(mutex, &attr);
-		pthread_mutexattr_destroy(&attr);
-	}
-}
-
-int pthread_mutex_lock(pthread_mutex_t *mutex)
-{
-	fixup_mutex(mutex);  /* macOS signature detection */
-	/* Upgrade zero-initialized (PTHREAD_MUTEX_INITIALIZER) mutexes to
-	 * recursive. Guest code may re-lock from the same thread
-	 * (works on macOS, deadlocks on Linux). Without LD_PRELOAD,
-	 * only Mach-O code reaches these wrappers (via GOT patching). */
-	{
-		static const char zeros[sizeof(pthread_mutex_t)] = {0};
-		if (memcmp(mutex, zeros, sizeof(pthread_mutex_t)) == 0) {
-			pthread_mutexattr_t attr;
-			pthread_mutexattr_init(&attr);
-			pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-			real_pthread_mutex_init(mutex, &attr);
-			pthread_mutexattr_destroy(&attr);
-		}
-	}
-	return real_pthread_mutex_lock(mutex);
-}
-
-int pthread_mutex_unlock(pthread_mutex_t *mutex)
-{
-	return real_pthread_mutex_unlock(mutex);
-}
-
-int pthread_mutex_trylock(pthread_mutex_t *mutex)
-{
-	fixup_mutex(mutex);
-	return real_pthread_mutex_trylock(mutex);
-}
-
-int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
-{
-	memset(mutex, 0, sizeof(pthread_mutex_t));
-	/* On macOS, PTHREAD_MUTEX_DEFAULT allows same-thread re-locking without
-	 * deadlock in some configurations. Make mutexes recursive to match. */
-	if (!attr) {
-		pthread_mutexattr_t rattr;
-		pthread_mutexattr_init(&rattr);
-		pthread_mutexattr_settype(&rattr, PTHREAD_MUTEX_RECURSIVE);
-		int ret = real_pthread_mutex_init(mutex, &rattr);
-		pthread_mutexattr_destroy(&rattr);
-		return ret;
-	}
-	return real_pthread_mutex_init(mutex, attr);
-}
-
-int pthread_mutex_destroy(pthread_mutex_t *mutex)
-{
-	return real_pthread_mutex_destroy(mutex);
 }
 
 int pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
@@ -7409,8 +4274,8 @@ static void shim_fd_trace_log(const char* format, ...)
 		return;
 
 	va_start(args, format);
-	length = vsnprintf(buffer + offset, sizeof(buffer) - (size_t)offset,
-	                   format, args);
+	length = machgate_host_vsnprintf(
+		buffer + offset, sizeof(buffer) - (size_t)offset, format, args);
 	va_end(args);
 	if (length < 0)
 		return;
@@ -7428,16 +4293,6 @@ static FILE* shim_open_trace_file(void)
 	if (!trace_file || !*trace_file)
 		return NULL;
 	return fopen(trace_file, "a");
-}
-
-/* Same issue for pthread_cond_t */
-static inline void fixup_cond(pthread_cond_t *cond)
-{
-	long *sig = (long *)cond;
-	if (*sig == DARWIN_PTHREAD_COND_SIG) {
-		memset(cond, 0, sizeof(pthread_cond_t));
-		real_pthread_cond_init(cond, NULL);
-	}
 }
 
 #define ATTR_SLOT_COUNT 64
@@ -7850,7 +4705,7 @@ static void remember_kqueue_fd(int fd, int canonical_fd)
 	pthread_mutex_unlock(&kqueue_mutex);
 }
 
-static void remember_kqueue_dup(int from_fd, int to_fd)
+void machgate_fd_did_duplicate(int from_fd, int to_fd)
 {
 	pthread_mutex_lock(&kqueue_mutex);
 	int canonical_fd = resolve_kqueue_fd_unlocked(from_fd);
@@ -7891,7 +4746,7 @@ static void forget_kqueue_fd_unlocked(int fd)
 	}
 }
 
-static void forget_kqueue_fd(int fd)
+void machgate_fd_did_close(int fd)
 {
 	pthread_mutex_lock(&kqueue_mutex);
 	forget_kqueue_fd_unlocked(fd);
@@ -8288,118 +5143,15 @@ int kevent64(int kq, const struct darwin_kevent_placeholder* changelist,
 	return kevent(kq, changelist, nchanges, eventlist, nevents, timeout);
 }
 
-int notify_is_valid_token(int token)
-{
-	(void)token;
-	return 0;
-}
-
-int notify_cancel(int token)
-{
-	(void)token;
-	return 0;
-}
-
-int notify_register_file_descriptor(const char* name, int* notify_fd,
-                                    int flags, int* token)
-{
-	(void)name;
-	(void)flags;
-
-	if (!notify_fd || !token)
-		return EINVAL;
-
-	int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-	if (fd < 0)
-		return errno;
-
-	*notify_fd = fd;
-	*token = fd;
-	return 0;
-}
-
 void* xpc_date_create_from_current(void)
 {
 	return NULL;
 }
 
-int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
-{
-	fixup_cond(cond);
-	fixup_mutex(mutex);
-	return real_pthread_cond_wait(cond, mutex);
-}
-
-int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
-                           const struct timespec *abstime)
-{
-	int result;
-
-	fixup_cond(cond);
-	fixup_mutex(mutex);
-	result = real_pthread_cond_timedwait(cond, mutex, abstime);
-	return shim_errno_from_linux(result);
-}
-
-int pthread_cond_signal(pthread_cond_t *cond)
-{
-	fixup_cond(cond);
-	return real_pthread_cond_signal(cond);
-}
-
-int pthread_cond_broadcast(pthread_cond_t *cond)
-{
-	fixup_cond(cond);
-	return real_pthread_cond_broadcast(cond);
-}
-
-int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr)
-{
-	memset(cond, 0, sizeof(pthread_cond_t));
-	return real_pthread_cond_init(cond, attr);
-}
-
-int pthread_cond_destroy(pthread_cond_t *cond)
-{
-	return real_pthread_cond_destroy(cond);
-}
-
-/* pthread_rwlock_t also has macOS signature: 0x2DA8B3B4 */
-#define DARWIN_PTHREAD_RWLOCK_SIG 0x2DA8B3B4L
-
-static inline void fixup_rwlock(pthread_rwlock_t *rwlock)
-{
-	long *sig = (long *)rwlock;
-	if (*sig == DARWIN_PTHREAD_RWLOCK_SIG) {
-		memset(rwlock, 0, sizeof(pthread_rwlock_t));
-		pthread_rwlock_init(rwlock, NULL);
-	}
-}
-
-int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock)
-{
-	fixup_rwlock(rwlock);
-	return real_pthread_rwlock_rdlock(rwlock);
-}
-
-int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock)
-{
-	fixup_rwlock(rwlock);
-	return real_pthread_rwlock_wrlock(rwlock);
-}
-
-int pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
-{
-	return real_pthread_rwlock_unlock(rwlock);
-}
-
-/* ===== pthread Apple extensions ===== */
-
-/* pthread_mach_thread_np — returns the "Mach thread port" for a pthread.
- * We return the Linux TID as a reasonable approximation. */
 uint32_t pthread_mach_thread_np(pthread_t thread)
 {
-	return (uint32_t)pthread_identity_for_thread(thread);
+	uint64_t identity = pthread_identity_for_thread(thread);
+	return (uint32_t)identity;
 }
 
 /* pthread_threadid_np — get a unique 64-bit thread ID */
@@ -9247,251 +5999,6 @@ int sigwait(const sigset_t *set, int *sig)
 	return result;
 }
 
-/* ===== sysctl ===== */
-
-/* Apple <sys/sysctl.h> MIB constants we answer. */
-#define DARWIN_CTL_KERN     1
-#define DARWIN_CTL_HW       6
-#define DARWIN_KERN_OSTYPE  1
-#define DARWIN_KERN_OSRELEASE 2
-#define DARWIN_KERN_VERSION 4
-#define DARWIN_KERN_ARGMAX  8
-#define DARWIN_KERN_HOSTNAME 10
-#define DARWIN_KERN_OSVERSION 65
-#define DARWIN_KERN_OSPRODUCTVERSION 140
-#define DARWIN_KERN_OSPRODUCTVERSION_COMPAT 141
-#define DARWIN_HW_MACHINE   1
-#define DARWIN_HW_MODEL     2
-#define DARWIN_HW_NCPU      3
-#define DARWIN_HW_BYTEORDER 4
-#define DARWIN_HW_PHYSMEM   5
-#define DARWIN_HW_PAGESIZE  7
-#define DARWIN_HW_MEMSIZE   24
-#define DARWIN_HW_AVAILCPU  25
-#define DARWIN_HW_PHYSICALCPU 101
-#define DARWIN_HW_LOGICALCPU 103
-
-static const char darwin_ostype[] = "Darwin";
-static const char darwin_osrelease[] = "24.6.0";
-static const char darwin_version[] = "Darwin Kernel Version 24.6.0: MachGate";
-static const char darwin_osversion[] = "24G84";
-static const char darwin_osproductversion[] = "15.6";
-static const char darwin_machine[] = "arm64";
-static const char darwin_model[] = "VirtualMac2,1";
-
-static int shim_hw_ncpu(void)
-{
-	long n = sysconf(_SC_NPROCESSORS_ONLN);
-	return (n < 1) ? 1 : (int)n;
-}
-
-static uint64_t shim_hw_memsize(void)
-{
-	long pages = sysconf(_SC_PHYS_PAGES);
-	long psize = sysconf(_SC_PAGESIZE);
-	if (pages < 1 || psize < 1)
-		return 0;
-	return (uint64_t)pages * (uint64_t)psize;
-}
-
-static int shim_sysctl_copy(const void* value, size_t value_size, void* oldp,
-                            size_t* oldlenp)
-{
-	if (!oldlenp) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	if (!oldp) {
-		*oldlenp = value_size;
-		return 0;
-	}
-
-	if (*oldlenp < value_size) {
-		*oldlenp = value_size;
-		errno = ENOMEM;
-		return -1;
-	}
-
-	memcpy(oldp, value, value_size);
-	*oldlenp = value_size;
-	return 0;
-}
-
-static int shim_sysctl_copy_int(int value, void* oldp, size_t* oldlenp)
-{
-	return shim_sysctl_copy(&value, sizeof(value), oldp, oldlenp);
-}
-
-static int shim_sysctl_copy_uint64(uint64_t value, void* oldp,
-                                   size_t* oldlenp)
-{
-	return shim_sysctl_copy(&value, sizeof(value), oldp, oldlenp);
-}
-
-static int shim_sysctl_copy_string(const char* value, void* oldp,
-                                   size_t* oldlenp)
-{
-	return shim_sysctl_copy(value, strlen(value) + 1, oldp, oldlenp);
-}
-
-static int shim_sysctl_copy_hostname(void* oldp, size_t* oldlenp)
-{
-	char hostname[256];
-
-	if (gethostname(hostname, sizeof(hostname)) != 0)
-		snprintf(hostname, sizeof(hostname), "%s", "machgate");
-	hostname[sizeof(hostname) - 1] = '\0';
-	return shim_sysctl_copy_string(hostname, oldp, oldlenp);
-}
-
-/* sysctl — answer the hardware MIBs command-line guests commonly read.
- *
- * CRITICAL: returning -1 without writing *oldp leaves the caller reading
- * uninitialized stack. Mina's startup does exactly this: it asks for
- * {CTL_HW, HW_AVAILCPU} (then {CTL_HW, HW_NCPU}) to size its job-queue worker
- * pool and does NOT check the return value — a stub that skips *oldp yields a
- * garbage core count and an unbounded thread-spawn loop. So we write real values
- * for the CPU/memory/page MIBs and only fall through to ENOTSUP for the rest. */
-int sysctl(const int *name, unsigned int namelen,
-           void *oldp, size_t *oldlenp,
-           const void *newp, size_t newlen)
-{
-	(void)newp; (void)newlen;
-
-	if (name && namelen >= 2 && name[0] == DARWIN_CTL_KERN) {
-		switch (name[1]) {
-		case DARWIN_KERN_OSTYPE:
-			return shim_sysctl_copy_string(darwin_ostype, oldp,
-			                               oldlenp);
-		case DARWIN_KERN_OSRELEASE:
-			return shim_sysctl_copy_string(darwin_osrelease, oldp,
-			                               oldlenp);
-		case DARWIN_KERN_VERSION:
-			return shim_sysctl_copy_string(darwin_version, oldp,
-			                               oldlenp);
-		case DARWIN_KERN_ARGMAX:
-			return shim_sysctl_copy_int(262144, oldp, oldlenp);
-		case DARWIN_KERN_HOSTNAME:
-			return shim_sysctl_copy_hostname(oldp, oldlenp);
-		case DARWIN_KERN_OSVERSION:
-			return shim_sysctl_copy_string(darwin_osversion, oldp,
-			                               oldlenp);
-		case DARWIN_KERN_OSPRODUCTVERSION:
-		case DARWIN_KERN_OSPRODUCTVERSION_COMPAT:
-			return shim_sysctl_copy_string(darwin_osproductversion,
-			                               oldp, oldlenp);
-		default:
-			break;
-		}
-	}
-
-	if (name && namelen >= 2 && name[0] == DARWIN_CTL_HW) {
-		switch (name[1]) {
-		case DARWIN_HW_MACHINE:
-			return shim_sysctl_copy_string(darwin_machine, oldp,
-			                               oldlenp);
-		case DARWIN_HW_MODEL:
-			return shim_sysctl_copy_string(darwin_model, oldp,
-			                               oldlenp);
-		case DARWIN_HW_NCPU:
-		case DARWIN_HW_AVAILCPU:
-		case DARWIN_HW_PHYSICALCPU:
-		case DARWIN_HW_LOGICALCPU:
-			return shim_sysctl_copy_int(shim_hw_ncpu(), oldp,
-			                            oldlenp);
-		case DARWIN_HW_BYTEORDER:
-			return shim_sysctl_copy_int(1234, oldp, oldlenp);
-		case DARWIN_HW_PAGESIZE:
-			return shim_sysctl_copy_int((int)sysconf(_SC_PAGESIZE),
-			                            oldp, oldlenp);
-		case DARWIN_HW_MEMSIZE:
-		case DARWIN_HW_PHYSMEM:
-			return shim_sysctl_copy_uint64(shim_hw_memsize(), oldp,
-			                               oldlenp);
-		default:
-			break;
-		}
-	}
-	errno = ENOENT;
-	return -1;
-}
-
-int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
-                 const void *newp, size_t newlen)
-{
-	(void)newp; (void)newlen;
-
-	if (name) {
-		if (!strcmp(name, "hw.ncpu")        || !strcmp(name, "hw.activecpu")  ||
-		    !strcmp(name, "hw.logicalcpu")  || !strcmp(name, "hw.logicalcpu_max") ||
-		    !strcmp(name, "hw.physicalcpu") || !strcmp(name, "hw.physicalcpu_max") ||
-		    !strcmp(name, "hw.availcpu")    ||
-		    !strcmp(name, "machdep.cpu.core_count") ||
-		    !strcmp(name, "machdep.cpu.thread_count")) {
-			return shim_sysctl_copy_int(shim_hw_ncpu(), oldp,
-			                            oldlenp);
-		} else if (!strcmp(name, "hw.memsize")) {
-			return shim_sysctl_copy_uint64(shim_hw_memsize(), oldp,
-			                               oldlenp);
-		} else if (!strcmp(name, "hw.pagesize")) {
-			return shim_sysctl_copy_int((int)sysconf(_SC_PAGESIZE),
-			                            oldp, oldlenp);
-		} else if (!strcmp(name, "hw.byteorder")) {
-			return shim_sysctl_copy_int(1234, oldp, oldlenp);
-		} else if (!strcmp(name, "hw.optional.arm64")) {
-			return shim_sysctl_copy_int(1, oldp, oldlenp);
-		} else if (!strcmp(name, "hw.machine")) {
-			return shim_sysctl_copy_string(darwin_machine, oldp,
-			                               oldlenp);
-		} else if (!strcmp(name, "hw.model")) {
-			return shim_sysctl_copy_string(darwin_model, oldp,
-			                               oldlenp);
-		} else if (!strcmp(name, "kern.ostype")) {
-			return shim_sysctl_copy_string(darwin_ostype, oldp,
-			                               oldlenp);
-		} else if (!strcmp(name, "kern.osrelease")) {
-			return shim_sysctl_copy_string(darwin_osrelease, oldp,
-			                               oldlenp);
-		} else if (!strcmp(name, "kern.version")) {
-			return shim_sysctl_copy_string(darwin_version, oldp,
-			                               oldlenp);
-		} else if (!strcmp(name, "kern.hostname")) {
-			return shim_sysctl_copy_hostname(oldp, oldlenp);
-		} else if (!strcmp(name, "kern.argmax")) {
-			return shim_sysctl_copy_int(262144, oldp, oldlenp);
-		} else if (!strcmp(name, "kern.osversion")) {
-			return shim_sysctl_copy_string(darwin_osversion, oldp,
-			                               oldlenp);
-		} else if (!strcmp(name, "kern.osproductversion") ||
-		           !strcmp(name, "kern.osproductversioncompat")) {
-			return shim_sysctl_copy_string(darwin_osproductversion,
-			                               oldp, oldlenp);
-		}
-	}
-	errno = ENOENT;
-	return -1;
-}
-
-int uname(void* buffer)
-{
-	char* bytes = buffer;
-
-	if (!bytes) {
-		errno = EFAULT;
-		return -1;
-	}
-
-	memset(bytes, 0, 256 * 5);
-	snprintf(bytes, 256, "%s", darwin_ostype);
-	if (gethostname(bytes + 256, 256) != 0)
-		snprintf(bytes + 256, 256, "%s", "machgate");
-	snprintf(bytes + 512, 256, "%s", darwin_osrelease);
-	snprintf(bytes + 768, 256, "%s", darwin_version);
-	snprintf(bytes + 1024, 256, "%s", darwin_machine);
-	return 0;
-}
-
 /* ===== Blocks runtime ===== */
 
 void *_NSConcreteGlobalBlock = NULL;
@@ -9518,190 +6025,6 @@ void _Block_object_dispose(const void *obj, int flags)
 {
 	(void)obj; (void)flags;
 	fprintf(stderr, "libsystem_shim: WARNING: _Block_object_dispose is unsupported\n");
-}
-
-/* ===== Grand Central Dispatch ===== */
-#include <semaphore.h>
-
-#define DISPATCH_OBJ_SEMAPHORE 1
-#define DISPATCH_OBJ_QUEUE     2
-#define DISPATCH_OBJ_DATA      3
-
-struct dispatch_object {
-	int type;
-	int refcount;
-};
-
-struct dispatch_semaphore {
-	int type;  /* DISPATCH_OBJ_SEMAPHORE */
-	int refcount;
-	sem_t sem;
-};
-
-struct dispatch_queue {
-	int type;  /* DISPATCH_OBJ_QUEUE */
-	int refcount;
-	char label[64];
-};
-
-/* Global queues — the binary imports _dispatch_main_q as a DATA symbol.
- * After Mach-O underscore stripping, resolver looks for "_dispatch_main_q". */
-struct dispatch_queue _dispatch_main_q = { DISPATCH_OBJ_QUEUE, 100, "com.apple.main-thread" };
-static struct dispatch_queue _dispatch_global_default = { DISPATCH_OBJ_QUEUE, 100, "com.apple.root.default" };
-
-/* ---- Semaphores (real, backed by POSIX sem_t) ---- */
-
-void* dispatch_semaphore_create(long value)
-{
-	struct dispatch_semaphore *ds = (struct dispatch_semaphore *)calloc(1, sizeof(*ds));
-	if (!ds) return NULL;
-	ds->type = DISPATCH_OBJ_SEMAPHORE;
-	ds->refcount = 1;
-	sem_init(&ds->sem, 0, (unsigned int)value);
-	return ds;
-}
-
-long dispatch_semaphore_wait(void *dsema, uint64_t timeout)
-{
-	struct dispatch_semaphore *ds = (struct dispatch_semaphore *)dsema;
-	if (!ds) return -1;
-	if (timeout == ~(uint64_t)0) {
-		/* DISPATCH_TIME_FOREVER */
-		return sem_wait(&ds->sem) == 0 ? 0 : -1;
-	} else if (timeout == 0) {
-		/* DISPATCH_TIME_NOW */
-		return sem_trywait(&ds->sem) == 0 ? 0 : -1;
-	} else {
-		struct timespec ts;
-		clock_gettime(CLOCK_REALTIME, &ts);
-		uint64_t ns = timeout;
-		ts.tv_sec += ns / 1000000000ULL;
-		ts.tv_nsec += ns % 1000000000ULL;
-		if (ts.tv_nsec >= 1000000000L) {
-			ts.tv_sec++;
-			ts.tv_nsec -= 1000000000L;
-		}
-		return sem_timedwait(&ds->sem, &ts) == 0 ? 0 : -1;
-	}
-}
-
-long dispatch_semaphore_signal(void *dsema)
-{
-	struct dispatch_semaphore *ds = (struct dispatch_semaphore *)dsema;
-	if (!ds) return 0;
-	sem_post(&ds->sem);
-	return 0;
-}
-
-/* ---- Queues (stubs — async/sync execute inline) ---- */
-
-void* dispatch_get_global_queue(long priority, unsigned long flags)
-{
-	(void)priority; (void)flags;
-	return &_dispatch_global_default;
-}
-
-void* dispatch_queue_create(const char *label, void *attr)
-{
-	(void)attr;
-	struct dispatch_queue *q = (struct dispatch_queue *)calloc(1, sizeof(*q));
-	if (!q) return NULL;
-	q->type = DISPATCH_OBJ_QUEUE;
-	q->refcount = 1;
-	if (label) strncpy(q->label, label, sizeof(q->label) - 1);
-	return q;
-}
-
-/* ---- Async/sync (execute blocks inline — no real concurrency) ---- */
-
-typedef void (*dispatch_block_t)(void);
-typedef void (*dispatch_function_t)(void*);
-
-struct machgate_dispatch_source {
-	void* type;
-	uintptr_t handle;
-	uintptr_t mask;
-	void* queue;
-	void* event_handler;
-};
-
-const char _dispatch_source_type_mach_recv[] = "mach_recv";
-
-static void dispatch_invoke_block(void* block)
-{
-	if (!block)
-		return;
-
-	void** block_words = (void**)block;
-	void (*invoke)(void*) = (void (*)(void*))block_words[2];
-	if (invoke)
-		invoke(block);
-}
-
-void dispatch_async(void *queue, void *block)
-{
-	(void)queue;
-	dispatch_invoke_block(block);
-}
-
-void dispatch_sync(void *queue, void *block)
-{
-	(void)queue;
-	dispatch_invoke_block(block);
-}
-
-void dispatch_once(long *predicate, void *block)
-{
-	if (__sync_bool_compare_and_swap(predicate, 0, 1)) {
-		dispatch_invoke_block(block);
-		__sync_synchronize();
-		*predicate = ~0L;
-	} else {
-		while (*predicate != ~0L)
-			sched_yield();
-	}
-}
-
-void dispatch_once_f(long* predicate, void* context,
-                     dispatch_function_t function)
-{
-	if (__sync_bool_compare_and_swap(predicate, 0, 1)) {
-		if (function)
-			function(context);
-		__sync_synchronize();
-		*predicate = ~0L;
-		return;
-	}
-
-	while (*predicate != ~0L)
-		sched_yield();
-}
-
-void* dispatch_source_create(const void* type, uintptr_t handle,
-                             uintptr_t mask, void* queue)
-{
-	struct machgate_dispatch_source* source = calloc(1, sizeof(*source));
-	if (!source)
-		return NULL;
-	source->type = (void*)type;
-	source->handle = handle;
-	source->mask = mask;
-	source->queue = queue;
-	return source;
-}
-
-void dispatch_source_set_event_handler(void* source_ref, void* handler)
-{
-	struct machgate_dispatch_source* source = source_ref;
-	if (source)
-		source->event_handler = handler;
-}
-
-void dispatch_resume(void* object)
-{
-	struct machgate_dispatch_source* source = object;
-	if (source && source->event_handler)
-		dispatch_invoke_block(source->event_handler);
 }
 
 void _os_signpost_emit_with_name_impl(void* dso, void* log, uint32_t type,
@@ -9771,7 +6094,7 @@ static int ulock_result(int result, uint32_t operation)
 	if (result == 0)
 		return 0;
 	if (operation & DARWIN_ULF_NO_ERRNO)
-		return -shim_errno_from_linux(errno ? errno : EIO);
+		return -machgate_darwin_errno_from_linux(errno ? errno : EIO);
 	return -1;
 }
 
@@ -9837,204 +6160,12 @@ int __ulock_wake(uint32_t operation, void* address, uint64_t wake_value)
 	return ulock_result(-1, operation);
 }
 
-/* ---- Dispatch time ---- */
-
-#define DISPATCH_TIME_NOW     0ULL
-#define DISPATCH_TIME_FOREVER (~0ULL)
-
-uint64_t dispatch_time(uint64_t when, int64_t delta)
-{
-	if (when == DISPATCH_TIME_FOREVER)
-		return DISPATCH_TIME_FOREVER;
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	uint64_t now = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-	if (when == DISPATCH_TIME_NOW)
-		when = now;
-	return when + (uint64_t)delta;
-}
-
-uint64_t dispatch_walltime(const struct timespec *when, int64_t delta)
-{
-	uint64_t t;
-	if (when) {
-		t = (uint64_t)when->tv_sec * 1000000000ULL + (uint64_t)when->tv_nsec;
-	} else {
-		struct timespec ts;
-		clock_gettime(CLOCK_REALTIME, &ts);
-		t = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-	}
-	return t + (uint64_t)delta;
-}
-
-/* ---- Dispatch data (stub) ---- */
-
-struct dispatch_data_obj {
-	int          type;       /* DISPATCH_OBJ_DATA */
-	int          refcount;
-	const void  *buf;
-	size_t       size;
-};
-
-void* dispatch_data_create(const void *buffer, size_t size,
-                           void *queue, void *destructor)
-{
-	(void)queue; (void)destructor;
-	struct dispatch_data_obj *o = (struct dispatch_data_obj *)calloc(1, sizeof(*o));
-	if (!o) return NULL;
-	o->type = DISPATCH_OBJ_DATA;
-	o->refcount = 1;
-	o->buf = buffer;
-	o->size = size;
-	return o;
-}
-
-/* ---- Retain/release ---- */
-
-void dispatch_release(void *object)
-{
-	if (!object) return;
-	struct dispatch_object *obj = (struct dispatch_object *)object;
-	if (obj->refcount > 99) return; /* global queues, never free */
-	if (__sync_sub_and_fetch(&obj->refcount, 1) <= 0) {
-		if (obj->type == DISPATCH_OBJ_SEMAPHORE) {
-			struct dispatch_semaphore *ds = (struct dispatch_semaphore *)object;
-			sem_destroy(&ds->sem);
-		}
-		free(object);
-	}
-}
-
-void dispatch_retain(void *object)
-{
-	if (!object) return;
-	struct dispatch_object *obj = (struct dispatch_object *)object;
-	__sync_add_and_fetch(&obj->refcount, 1);
-}
-
-/* ===== Thread-local variable support (stubs) ===== */
-
-void _tlv_atexit(void (*func)(void *), void *arg)
-{
-	(void)func; (void)arg;
-	/* Best-effort: ignore TLV cleanup registration */
-}
-
-/*
- * Mach-O thread-local variable (TLV) bootstrap.
- *
- * Mach-O TLV descriptors have the layout:
- *   struct TLVDescriptor {
- *       void* (*thunk)(TLVDescriptor*);  // this function
- *       unsigned long key;                // pthread_key_t (0 = uninitialized)
- *       unsigned long offset;             // offset within TLV image
- *   };
- *
- * The thunk is called when a TLV is first accessed. It must return
- * a pointer to per-thread storage for the variable at `offset`.
- * We allocate a per-thread block using pthread keys and copy the
- * initial TLV image from __thread_data on first use.
- */
-
-/* TLV image info — set by machgate before execution */
-void* __tlv_image_base = NULL;   /* base of __DATA,__thread_data */
-size_t __tlv_image_size = 0;     /* size of __thread_data */
-size_t __tlv_bss_size = 0;       /* size of __thread_bss (after thread_data) */
-
-struct tlv_descriptor {
-	void* (*thunk)(struct tlv_descriptor*);
-	unsigned long key;
-	unsigned long offset;
-};
-
-static pthread_mutex_t tlv_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-static void tlv_destructor(void* block)
-{
-	free(block);
-}
-
-void* _tlv_bootstrap_impl(struct tlv_descriptor* desc)
-{
-	if (desc->key == 0) {
-		pthread_mutex_lock(&tlv_mutex);
-		if (desc->key == 0) {
-			pthread_key_t key;
-			pthread_key_create(&key, tlv_destructor);
-			desc->key = (unsigned long)key + 1;
-		}
-		pthread_mutex_unlock(&tlv_mutex);
-	}
-
-	pthread_key_t key = (pthread_key_t)(desc->key - 1);
-	void* block = pthread_getspecific(key);
-
-	if (!block) {
-		/* Allocate per-thread TLV block */
-		size_t total = __tlv_image_size + __tlv_bss_size;
-		if (total < 4096) total = 4096; /* minimum size */
-		block = calloc(1, total);
-
-		/* Copy initial values from __thread_data */
-		if (__tlv_image_base && __tlv_image_size > 0)
-			memcpy(block, __tlv_image_base, __tlv_image_size);
-
-		pthread_setspecific(key, block);
-	}
-
-	return (char*)block + desc->offset;
-}
-
-#if defined(__aarch64__)
-__asm__(
-	".text\n"
-	".global _tlv_bootstrap\n"
-	".type _tlv_bootstrap, %function\n"
-	"_tlv_bootstrap:\n"
-	"sub sp, sp, #160\n"
-	"stp x1, x2, [sp]\n"
-	"stp x3, x4, [sp, #16]\n"
-	"stp x5, x6, [sp, #32]\n"
-	"stp x7, x8, [sp, #48]\n"
-	"stp x9, x10, [sp, #64]\n"
-	"stp x11, x12, [sp, #80]\n"
-	"stp x13, x14, [sp, #96]\n"
-	"stp x15, x16, [sp, #112]\n"
-	"stp x17, x18, [sp, #128]\n"
-	"str x30, [sp, #144]\n"
-	"bl _tlv_bootstrap_impl\n"
-	"ldr x30, [sp, #144]\n"
-	"ldp x17, x18, [sp, #128]\n"
-	"ldp x15, x16, [sp, #112]\n"
-	"ldp x13, x14, [sp, #96]\n"
-	"ldp x11, x12, [sp, #80]\n"
-	"ldp x9, x10, [sp, #64]\n"
-	"ldp x7, x8, [sp, #48]\n"
-	"ldp x5, x6, [sp, #32]\n"
-	"ldp x3, x4, [sp, #16]\n"
-	"ldp x1, x2, [sp]\n"
-	"add sp, sp, #160\n"
-	"ret\n"
-);
-#else
-void* _tlv_bootstrap(struct tlv_descriptor* desc)
-{
-	return _tlv_bootstrap_impl(desc);
-}
-#endif
-
-/* ===== Darwin-suffixed symbol variants ===== */
-
-/* Some symbols in the binary have $DARWIN_EXTSN suffix. The resolver strips
- * these suffixes during lookup, so fopen$DARWIN_EXTSN maps to fopen.
- * No action needed here — they resolve through normal glibc. */
-
-/* ===== vfork ===== */
-
-/* vfork is deprecated but available on Linux. We redirect to fork for safety. */
 pid_t vfork(void)
 {
-	return fork();
+	pid_t child = fork();
+	if (child < 0)
+		return -1;
+	return child;
 }
 
 /* ===== setjmp ===== */
@@ -10055,744 +6186,8 @@ __asm__(
 /* __udivti3 is provided by libgcc / compiler-rt.
  * It should resolve through normal linking. No stub needed. */
 
-/* ===== C++ exception unwinding ===== */
-
-/* _Unwind_Resume is imported by the Mach-O from libSystem.B.dylib.
- * On macOS, libSystem re-exports it from libunwind. On Linux, it's
- * in libgcc_s.so.1. We forward to the real implementation via dlsym
- * so the resolver can find it when resolving libSystem symbols. */
-void _Unwind_Resume(void* exception_object)
-{
-	static void (*real_unwind_resume)(void*) = NULL;
-	if (!real_unwind_resume) {
-		void* libgcc = dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_GLOBAL);
-		if (libgcc)
-			real_unwind_resume = dlsym(libgcc, "_Unwind_Resume");
-		if (!real_unwind_resume)
-			real_unwind_resume = dlsym(RTLD_NEXT, "_Unwind_Resume");
-	}
-	if (real_unwind_resume && real_unwind_resume != _Unwind_Resume)
-		real_unwind_resume(exception_object);
-	abort();
-}
-
-/* ===== File operation ABI translation ===== */
-
-/*
- * macOS and Linux assign entirely different bit values to O_* flags,
- * AT_* flags, and some fcntl() command numbers. Without translation:
- *   - Darwin O_CREAT (0x0200) becomes Linux O_TRUNC — corrupting files
- *   - Darwin O_NONBLOCK (0x0004) is meaningless on Linux (unused bit)
- *   - Darwin AT_FDCWD (-2) != Linux AT_FDCWD (-100)
- *   - Darwin AT_SYMLINK_NOFOLLOW (0x0020) != Linux (0x0100)
- *
- * We translate at every entry point where Mach-O code passes these values.
- */
-
-/* ---- Darwin O_* flag values (XNU bsd/sys/fcntl.h) ---- */
-#define DARWIN_O_NONBLOCK    0x00000004
-#define DARWIN_O_APPEND      0x00000008
-#define DARWIN_O_SHLOCK      0x00000010  /* no Linux equivalent */
-#define DARWIN_O_EXLOCK      0x00000020  /* no Linux equivalent */
-#define DARWIN_O_ASYNC       0x00000040
-#define DARWIN_O_NOFOLLOW    0x00000100
-#define DARWIN_O_CREAT       0x00000200
-#define DARWIN_O_TRUNC       0x00000400
-#define DARWIN_O_EXCL        0x00000800
-#define DARWIN_O_EVTONLY     0x00008000  /* no Linux equivalent */
-#define DARWIN_O_NOCTTY      0x00020000
-#define DARWIN_O_DIRECTORY   0x00100000
-#define DARWIN_O_SYMLINK     0x00200000  /* no Linux equivalent */
-#define DARWIN_O_DSYNC       0x00400000
-#define DARWIN_O_CLOEXEC     0x01000000
-
-/* ---- Darwin AT_* flag values (XNU bsd/sys/fcntl.h) ---- */
-#define DARWIN_AT_FDCWD              (-2)
-#define DARWIN_AT_EACCESS            0x0010
-#define DARWIN_AT_SYMLINK_NOFOLLOW   0x0020
-#define DARWIN_AT_SYMLINK_FOLLOW     0x0040
-#define DARWIN_AT_REMOVEDIR          0x0080
-
-/* ---- Darwin fcntl commands that differ from Linux ----
- * F_DUPFD(0), F_GETFD(1), F_SETFD(2), F_GETFL(3), F_SETFL(4) are the
- * same on both platforms. The rest are renumbered or macOS-only. */
-#define DARWIN_F_GETOWN     5   /* Linux: 9 */
-#define DARWIN_F_SETOWN     6   /* Linux: 8 */
-#define DARWIN_F_GETLK      7   /* Linux: 5 */
-#define DARWIN_F_SETLK      8   /* Linux: 6 */
-#define DARWIN_F_SETLKW     9   /* Linux: 7 */
-#define DARWIN_F_RDADVISE   44  /* no Linux equivalent */
-#define DARWIN_F_RDAHEAD    45  /* no Linux equivalent */
-#define DARWIN_F_NOCACHE    48  /* no Linux equivalent */
-#define DARWIN_F_GETPATH    50  /* implement via /proc */
-#define DARWIN_F_FULLFSYNC  51  /* implement via fsync */
-#define DARWIN_F_DUPFD_CLOEXEC 67
-
-#define DARWIN_FIOCLEX      0x20006601u
-#define DARWIN_FIONCLEX     0x20006602u
-#define DARWIN_FIONREAD     0x4004667fu
-#define DARWIN_FIONBIO      0x8004667eu
-#define DARWIN_TIOCOUTQ     0x40047473u
-#define DARWIN_TIOCSWINSZ   0x80087467u
-#define DARWIN_TIOCGWINSZ   0x40087468u
-
-#define DARWIN_RENAME_SWAP 0x00000002u
-#define DARWIN_RENAME_EXCL 0x00000004u
-
-#ifndef RENAME_NOREPLACE
-#define RENAME_NOREPLACE (1U << 0)
-#endif
-
-#ifndef RENAME_EXCHANGE
-#define RENAME_EXCHANGE (1U << 1)
-#endif
-
-/* ---- Translation helpers ---- */
-
-struct flag_pair { int darwin; int linux_val; };
-
-static const struct flag_pair oflags_map[] = {
-	{ DARWIN_O_NONBLOCK,  O_NONBLOCK  },
-	{ DARWIN_O_APPEND,    O_APPEND    },
-	{ DARWIN_O_ASYNC,     FASYNC      },
-	{ DARWIN_O_NOFOLLOW,  O_NOFOLLOW  },
-	{ DARWIN_O_CREAT,     O_CREAT     },
-	{ DARWIN_O_TRUNC,     O_TRUNC     },
-	{ DARWIN_O_EXCL,      O_EXCL      },
-	{ DARWIN_O_NOCTTY,    O_NOCTTY    },
-	{ DARWIN_O_DIRECTORY, O_DIRECTORY },
-	{ DARWIN_O_DSYNC,     O_DSYNC     },
-	{ DARWIN_O_CLOEXEC,   O_CLOEXEC   },
-	{ 0, 0 }
-};
-
-/* Darwin O_flags → Linux O_flags */
-static int translate_oflags(int darwin_flags)
-{
-	/* Access mode bits (O_RDONLY=0, O_WRONLY=1, O_RDWR=2) are identical */
-	int linux_flags = darwin_flags & O_ACCMODE;
-
-	for (const struct flag_pair *p = oflags_map; p->darwin; p++) {
-		if (darwin_flags & p->darwin)
-			linux_flags |= p->linux_val;
-	}
-
-	/* Silently dropped Darwin-only flags:
-	 *   O_SHLOCK/O_EXLOCK — BSD advisory lock at open time
-	 *   O_EVTONLY — kqueue event-only descriptor
-	 *   O_SYMLINK — open symlink itself, not target */
-	return linux_flags;
-}
-
-/* Linux O_flags → Darwin O_flags (for fcntl F_GETFL) */
-static int translate_oflags_to_darwin(int linux_flags)
-{
-	int darwin_flags = linux_flags & O_ACCMODE;
-
-	for (const struct flag_pair *p = oflags_map; p->darwin; p++) {
-		if (linux_flags & p->linux_val)
-			darwin_flags |= p->darwin;
-	}
-
-	return darwin_flags;
-}
-
-static const struct flag_pair atflags_map[] = {
-	{ DARWIN_AT_EACCESS,          AT_EACCESS          },
-	{ DARWIN_AT_SYMLINK_NOFOLLOW, AT_SYMLINK_NOFOLLOW },
-	{ DARWIN_AT_SYMLINK_FOLLOW,   AT_SYMLINK_FOLLOW   },
-	{ DARWIN_AT_REMOVEDIR,        AT_REMOVEDIR        },
-	{ 0, 0 }
-};
-
-/* Darwin AT_flags → Linux AT_flags */
-static int translate_atflags(int darwin_flags)
-{
-	int linux_flags = 0;
-
-	for (const struct flag_pair *p = atflags_map; p->darwin; p++) {
-		if (darwin_flags & p->darwin)
-			linux_flags |= p->linux_val;
-	}
-
-	return linux_flags;
-}
-
-/* Darwin AT_FDCWD (-2) → Linux AT_FDCWD (-100) */
-static int translate_dirfd(int darwin_dirfd)
-{
-	return (darwin_dirfd == DARWIN_AT_FDCWD) ? AT_FDCWD : darwin_dirfd;
-}
-
-/* ---- open() / openat() ---- */
-
-int shim_open(const char *pathname, int flags, ...) __asm__("open");
-int shim_open(const char *pathname, int flags, ...)
-{
-	int linux_flags = translate_oflags(flags);
-	mode_t mode = 0;
-
-	if (flags & DARWIN_O_CREAT) {
-		va_list args;
-		va_start(args, flags);
-		mode = va_arg(args, mode_t);
-		va_end(args);
-	}
-
-	/* aarch64 Linux has no SYS_open; everything goes through SYS_openat */
-	return syscall(SYS_openat, AT_FDCWD, pathname, linux_flags, mode);
-}
-
-int shim_openat(int dirfd, const char *pathname, int flags, ...) __asm__("openat");
-int shim_openat(int dirfd, const char *pathname, int flags, ...)
-{
-	int linux_flags = translate_oflags(flags);
-	mode_t mode = 0;
-
-	if (flags & DARWIN_O_CREAT) {
-		va_list args;
-		va_start(args, flags);
-		mode = va_arg(args, mode_t);
-		va_end(args);
-	}
-
-	return syscall(SYS_openat, translate_dirfd(dirfd), pathname,
-	               linux_flags, mode);
-}
-
-int __renameatx_np(int oldfd, const char* old_path, int newfd,
-                   const char* new_path, unsigned int flags)
-{
-	unsigned int linux_flags = 0;
-
-	if (flags & DARWIN_RENAME_SWAP)
-		linux_flags |= RENAME_EXCHANGE;
-	if (flags & DARWIN_RENAME_EXCL)
-		linux_flags |= RENAME_NOREPLACE;
-
-	if (flags & ~(DARWIN_RENAME_SWAP | DARWIN_RENAME_EXCL)) {
-		errno = ENOTSUP;
-		return -1;
-	}
-
-	if (linux_flags)
-		return syscall(SYS_renameat2, translate_dirfd(oldfd), old_path,
-		               translate_dirfd(newfd), new_path, linux_flags);
-
-	return syscall(SYS_renameat, translate_dirfd(oldfd), old_path,
-	               translate_dirfd(newfd), new_path);
-}
-
-int renameatx_np(int oldfd, const char* old_path, int newfd,
-                 const char* new_path, unsigned int flags)
-{
-	return __renameatx_np(oldfd, old_path, newfd, new_path, flags);
-}
-
-/* ---- fcntl() ---- */
-
-static int shim_fcntl_fixed(int fd, int cmd, unsigned long arg)
-{
-	int linux_cmd;
-	switch (cmd) {
-	/* Commands 0–4 (F_DUPFD through F_SETFL) are identical */
-	case 0: case 1: case 2: case 3: case 4:
-		linux_cmd = cmd;
-		break;
-	case DARWIN_F_GETOWN:   linux_cmd = F_GETOWN;  break;
-	case DARWIN_F_SETOWN:   linux_cmd = F_SETOWN;  break;
-	case DARWIN_F_GETLK:    linux_cmd = F_GETLK;   break;
-	case DARWIN_F_SETLK:    linux_cmd = F_SETLK;   break;
-	case DARWIN_F_SETLKW:   linux_cmd = F_SETLKW;  break;
-	case DARWIN_F_DUPFD_CLOEXEC:
-		linux_cmd = F_DUPFD_CLOEXEC;
-		break;
-	case DARWIN_F_FULLFSYNC:
-		/* Best-effort: Linux fsync flushes data + metadata */
-		return fsync(fd);
-	case DARWIN_F_NOCACHE:
-	case DARWIN_F_RDADVISE:
-	case DARWIN_F_RDAHEAD:
-		/* No Linux equivalent; succeed silently */
-		return 0;
-	case DARWIN_F_GETPATH: {
-		/* Implement via /proc/self/fd readlink */
-		char proc_path[32];
-		snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
-		ssize_t len = readlink(proc_path, (char *)arg, 1024 - 1);
-		if (len < 0) return -1;
-		((char *)arg)[len] = '\0';
-		return 0;
-	}
-	default:
-		linux_cmd = cmd;
-		break;
-	}
-
-	/* Translate O_flags for F_SETFL */
-	if (cmd == F_SETFL)
-		arg = (unsigned long)translate_oflags((int)arg);
-
-	int ret = syscall(SYS_fcntl, fd, linux_cmd, arg);
-	int saved_errno = errno;
-	if (ret >= 0 && (cmd == F_DUPFD || cmd == DARWIN_F_DUPFD_CLOEXEC))
-		remember_kqueue_dup(fd, ret);
-
-	/* Translate O_flags back to Darwin for F_GETFL */
-	if (cmd == F_GETFL && ret >= 0)
-		ret = translate_oflags_to_darwin(ret);
-
-	shim_fd_trace_log("fcntl caller=%p fd=%d cmd=%d linux_cmd=%d arg=%#lx result=%d errno=%d\n",
-	                  SHIM_CALLER_RETURN_ADDRESS(), fd, cmd, linux_cmd, arg,
-	                  ret, ret < 0 ? saved_errno : 0);
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: fcntl(fd=%d cmd=%d->%d arg=%#lx) -> %d errno=%d\n",
-		        fd, cmd, linux_cmd, arg, ret, ret < 0 ? saved_errno : 0);
-
-	return ret;
-}
-
-int shim_fcntl(int fd, int cmd, ...) __asm__("fcntl");
-int shim_fcntl(int fd, int cmd, ...)
-{
-	va_list args;
-	va_start(args, cmd);
-	unsigned long arg = va_arg(args, unsigned long);
-	va_end(args);
-
-	return shim_fcntl_fixed(fd, cmd, arg);
-}
-
-int machgate_darwin_fcntl_fixed(int fd, int cmd, unsigned long arg)
-{
-	return shim_fcntl_fixed(fd, cmd, arg);
-}
-
-static int translate_ioctl_request(unsigned long darwin_request,
-                                   unsigned long* linux_request)
-{
-	switch (darwin_request) {
-	case DARWIN_FIONREAD:
-		*linux_request = FIONREAD;
-		return 1;
-	case DARWIN_FIONBIO:
-		*linux_request = FIONBIO;
-		return 1;
-#ifdef TIOCOUTQ
-	case DARWIN_TIOCOUTQ:
-		*linux_request = TIOCOUTQ;
-		return 1;
-#endif
-	case DARWIN_TIOCSWINSZ:
-		*linux_request = TIOCSWINSZ;
-		return 1;
-	case DARWIN_TIOCGWINSZ:
-		*linux_request = TIOCGWINSZ;
-		return 1;
-	default:
-		return 0;
-	}
-}
-
-int machgate_darwin_ioctl_fixed(int fd, unsigned long request,
-                                unsigned long arg)
-{
-	unsigned long linux_request;
-	int result;
-	int saved_errno;
-
-	linux_request = request;
-
-	if (request == DARWIN_FIOCLEX) {
-		result = syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
-		saved_errno = errno;
-	} else if (request == DARWIN_FIONCLEX) {
-		result = syscall(SYS_fcntl, fd, F_SETFD, 0);
-		saved_errno = errno;
-	} else if (translate_ioctl_request(request, &linux_request)) {
-		result = syscall(SYS_ioctl, fd, linux_request, arg);
-		saved_errno = errno;
-	} else {
-		errno = ENOSYS;
-		result = -1;
-		saved_errno = errno;
-		linux_request = request;
-	}
-
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: ioctl(fd=%d request=%#lx->%#lx arg=%#lx) -> %d errno=%d\n",
-		        fd, request, linux_request, arg, result,
-		        result < 0 ? saved_errno : 0);
-
-	return result;
-}
-
-/* ---- shm_open() ---- */
-
-int shim_shm_open(const char *name, int oflag, mode_t mode) __asm__("shm_open");
-int shim_shm_open(const char *name, int oflag, mode_t mode)
-{
-	int linux_flags = translate_oflags(oflag);
-	/* Forward to real shm_open via dlsym to avoid recursion */
-	static int (*real_shm_open)(const char *, int, mode_t) = NULL;
-	if (!real_shm_open) {
-		real_shm_open = dlsym(RTLD_NEXT, "shm_open");
-		if (!real_shm_open) {
-			errno = ENOSYS;
-			return -1;
-		}
-	}
-	return real_shm_open(name, linux_flags, mode);
-}
-
-/* ---- dup() / dup2() / dup3() / pipe2() ---- */
-
-int shim_dup(int fd) __asm__("dup");
-int shim_dup(int fd)
-{
-	int result = syscall(SYS_dup, fd);
-	if (result >= 0)
-		remember_kqueue_dup(fd, result);
-	shim_fd_trace_log("dup caller=%p fd=%d result=%d errno=%d\n",
-	                  SHIM_CALLER_RETURN_ADDRESS(), fd, result,
-	                  result < 0 ? errno : 0);
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: dup(fd=%d) -> %d errno=%d\n",
-		        fd, result, result < 0 ? errno : 0);
-	return result;
-}
-
-int shim_dup2(int oldfd, int newfd) __asm__("dup2");
-int shim_dup2(int oldfd, int newfd)
-{
-	int result;
-
-	if (oldfd == newfd) {
-		result = syscall(SYS_fcntl, oldfd, F_GETFD, 0);
-		if (result >= 0)
-			result = newfd;
-	} else {
-		result = syscall(SYS_dup3, oldfd, newfd, 0);
-		if (result >= 0)
-			forget_kqueue_fd(newfd);
-	}
-	if (result >= 0)
-		remember_kqueue_dup(oldfd, result);
-
-	shim_fd_trace_log("dup2 caller=%p oldfd=%d newfd=%d result=%d errno=%d\n",
-	                  SHIM_CALLER_RETURN_ADDRESS(), oldfd, newfd, result,
-	                  result < 0 ? errno : 0);
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: dup2(oldfd=%d newfd=%d) -> %d errno=%d\n",
-		        oldfd, newfd, result, result < 0 ? errno : 0);
-	return result;
-}
-
-int shim_dup3(int oldfd, int newfd, int flags) __asm__("dup3");
-int shim_dup3(int oldfd, int newfd, int flags)
-{
-	int result = syscall(SYS_dup3, oldfd, newfd, translate_oflags(flags));
-	if (result >= 0) {
-		forget_kqueue_fd(newfd);
-		remember_kqueue_dup(oldfd, result);
-	}
-	shim_fd_trace_log("dup3 caller=%p oldfd=%d newfd=%d flags=%#x result=%d errno=%d\n",
-	                  SHIM_CALLER_RETURN_ADDRESS(), oldfd, newfd, flags,
-	                  result, result < 0 ? errno : 0);
-	return result;
-}
-
-int shim_close(int fd) __asm__("close");
-int shim_close(int fd)
-{
-	int result = syscall(SYS_close, fd);
-	int saved_errno = errno;
-	if (result == 0)
-		forget_kqueue_fd(fd);
-	shim_fd_trace_log("close caller=%p fd=%d result=%d errno=%d\n",
-	                  SHIM_CALLER_RETURN_ADDRESS(), fd, result,
-	                  result < 0 ? saved_errno : 0);
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: close(fd=%d) -> %d errno=%d\n",
-		        fd, result, result < 0 ? saved_errno : 0);
-	errno = saved_errno;
-	return result;
-}
-
-int shim_pipe(int pipefd[2]) __asm__("pipe");
-int shim_pipe(int pipefd[2])
-{
-	int result = syscall(SYS_pipe2, pipefd, 0);
-	shim_fd_trace_log("pipe caller=%p result=%d read_fd=%d write_fd=%d errno=%d\n",
-	                  SHIM_CALLER_RETURN_ADDRESS(), result,
-	                  result == 0 ? pipefd[0] : -1,
-	                  result == 0 ? pipefd[1] : -1,
-	                  result < 0 ? errno : 0);
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: pipe() -> %d fds=[%d,%d] errno=%d\n",
-		        result, result == 0 ? pipefd[0] : -1,
-		        result == 0 ? pipefd[1] : -1, result < 0 ? errno : 0);
-	return result;
-}
-
-int shim_pipe2(int pipefd[2], int flags) __asm__("pipe2");
-int shim_pipe2(int pipefd[2], int flags)
-{
-	int result = syscall(SYS_pipe2, pipefd, translate_oflags(flags));
-	shim_fd_trace_log("pipe2 caller=%p flags=%#x result=%d read_fd=%d write_fd=%d errno=%d\n",
-	                  SHIM_CALLER_RETURN_ADDRESS(), flags, result,
-	                  result == 0 ? pipefd[0] : -1,
-	                  result == 0 ? pipefd[1] : -1,
-	                  result < 0 ? errno : 0);
-	if (shim_trace_enabled())
-		fprintf(stderr, "libsystem_shim: pipe2(flags=%#x) -> %d fds=[%d,%d] errno=%d\n",
-		        flags, result, result == 0 ? pipefd[0] : -1,
-		        result == 0 ? pipefd[1] : -1, result < 0 ? errno : 0);
-	return result;
-}
-
-/* ===== stat() ABI translation ===== */
-
-/*
- * macOS aarch64 and Linux aarch64 have different struct stat layouts.
- * macOS st_mode is uint16_t at offset 4; Linux st_mode is uint32_t at
- * offset 16. The guest allocates a Darwin-sized buffer (144 bytes) and
- * reads fields at Darwin offsets, so we call the real Linux stat via
- * syscall and convert the result to Darwin layout.
- */
-
-struct darwin_stat {
-	int32_t         st_dev;
-	uint16_t        st_mode;
-	uint16_t        st_nlink;
-	uint64_t        st_ino;
-	uint32_t        st_uid;
-	uint32_t        st_gid;
-	int32_t         st_rdev;
-	int32_t         __pad0;
-	struct timespec st_atimespec;
-	struct timespec st_mtimespec;
-	struct timespec st_ctimespec;
-	struct timespec st_birthtimespec;
-	int64_t         st_size;
-	int64_t         st_blocks;
-	int32_t         st_blksize;
-	uint32_t        st_flags;
-	uint32_t        st_gen;
-	int32_t         st_lspare;
-	int64_t         st_qspare[2];
-};
-
-_Static_assert(sizeof(struct darwin_stat) == 144,
-	"darwin_stat must be 144 bytes");
-
-static void linux_to_darwin_stat(const struct stat *ls, struct darwin_stat *ds)
-{
-	memset(ds, 0, sizeof(*ds));
-	ds->st_dev        = (int32_t)ls->st_dev;
-	ds->st_mode       = (uint16_t)ls->st_mode;
-	ds->st_nlink      = (uint16_t)ls->st_nlink;
-	ds->st_ino        = ls->st_ino;
-	ds->st_uid        = ls->st_uid;
-	ds->st_gid        = ls->st_gid;
-	ds->st_rdev       = (int32_t)ls->st_rdev;
-	ds->st_atimespec  = ls->st_atim;
-	ds->st_mtimespec  = ls->st_mtim;
-	ds->st_ctimespec  = ls->st_ctim;
-	ds->st_birthtimespec = ls->st_ctim; /* no birth time on Linux */
-	ds->st_size       = ls->st_size;
-	ds->st_blocks     = ls->st_blocks;
-	ds->st_blksize    = ls->st_blksize;
-}
-
-/*
- * Use syscall(SYS_newfstatat) directly to avoid recursion — our
- * wrappers redefine stat/fstat/lstat, so calling glibc's stat()
- * would call ourselves.
- */
-
-int stat_darwin(const char *path, void *buf)
-{
-	struct stat ls;
-	int ret = syscall(SYS_newfstatat, AT_FDCWD, path, &ls, 0);
-	if (ret == 0)
-		linux_to_darwin_stat(&ls, (struct darwin_stat *)buf);
-	else
-		ret = -1;  /* syscall returns -errno on error */
-	return ret;
-}
-
-int fstat_darwin(int fd, void *buf)
-{
-	struct stat ls;
-	int ret = syscall(SYS_fstat, fd, &ls);
-	if (ret == 0)
-		linux_to_darwin_stat(&ls, (struct darwin_stat *)buf);
-	else
-		ret = -1;
-	return ret;
-}
-
-int lstat_darwin(const char *path, void *buf)
-{
-	struct stat ls;
-	int ret = syscall(SYS_newfstatat, AT_FDCWD, path, &ls, AT_SYMLINK_NOFOLLOW);
-	if (ret == 0)
-		linux_to_darwin_stat(&ls, (struct darwin_stat *)buf);
-	else
-		ret = -1;
-	return ret;
-}
-
-int fstatat_darwin(int dirfd, const char *path, void *buf, int flags)
-{
-	struct stat ls;
-	int ret = syscall(SYS_newfstatat, dirfd, path, &ls, flags);
-	if (ret == 0)
-		linux_to_darwin_stat(&ls, (struct darwin_stat *)buf);
-	else
-		ret = -1;
-	return ret;
-}
-
-/* Export under standard names so the resolver finds them when the guest
- * imports stat/fstat/lstat from libSystem.B.dylib.
- * Use __asm__ labels to avoid conflicting with glibc's prototypes. */
-/* Export under standard names so the resolver finds them when the guest
- * imports stat/fstat/lstat from libSystem.B.dylib. Only Mach-O code
- * reaches these (via GOT patching), so unconditionally translate. */
-int shim_stat(const char *path, void *buf) __asm__("stat");
-int shim_stat(const char *path, void *buf)
-{
-	return stat_darwin(path, buf);
-}
-
-int shim_fstat(int fd, void *buf) __asm__("fstat");
-int shim_fstat(int fd, void *buf)
-{
-	return fstat_darwin(fd, buf);
-}
-
-int shim_lstat(const char *path, void *buf) __asm__("lstat");
-int shim_lstat(const char *path, void *buf)
-{
-	return lstat_darwin(path, buf);
-}
-
-int shim_fstatat(int dirfd, const char *path, void *buf, int flags) __asm__("fstatat");
-int shim_fstatat(int dirfd, const char *path, void *buf, int flags)
-{
-	return fstatat_darwin(translate_dirfd(dirfd), path, buf,
-	                      translate_atflags(flags));
-}
-
-/* ===== readdir() ABI translation ===== */
-
-/*
- * macOS struct dirent (64-bit):
- *   uint64_t  d_ino;       // offset 0
- *   uint64_t  d_seekoff;   // offset 8  (macOS-only)
- *   uint16_t  d_reclen;    // offset 16
- *   uint16_t  d_namlen;    // offset 18 (macOS-only)
- *   uint8_t   d_type;      // offset 20
- *   char      d_name[1024];// offset 21
- *   [padding to 1048]
- *
- * Linux struct dirent (aarch64):
- *   ino_t     d_ino;       // offset 0  (8 bytes)
- *   off_t     d_off;       // offset 8  (8 bytes)
- *   uint16_t  d_reclen;    // offset 16
- *   uint8_t   d_type;      // offset 18
- *   char      d_name[256]; // offset 19
- *
- * The guest reads d_type at offset 20 and d_name at offset 21 (macOS).
- * We convert the Linux result into a static Darwin-layout buffer.
- */
-
-struct darwin_dirent {
-	uint64_t  d_ino;
-	uint64_t  d_seekoff;
-	uint16_t  d_reclen;
-	uint16_t  d_namlen;
-	uint8_t   d_type;
-	char      d_name[1024];
-	/* padding to 8-byte alignment */
-	char      __pad[3];
-};
-
-_Static_assert(sizeof(struct darwin_dirent) == 1048,
-	"darwin_dirent must be 1048 bytes");
-
-/*
- * Thread-local buffer for the converted dirent, since readdir returns
- * a pointer to an internal buffer (not caller-allocated).
- */
-static __thread struct darwin_dirent tls_darwin_dirent;
-
-static struct dirent* host_readdir(DIR* directory)
-{
-	static struct dirent* (*function)(DIR*);
-	if (!function)
-		function = dlsym(RTLD_NEXT, "readdir");
-	if (!function) {
-		errno = ENOSYS;
-		return NULL;
-	}
-	return function(directory);
-}
-
-static void convert_dirent(const struct dirent* source,
-			   struct darwin_dirent* result)
-{
-	memset(result, 0, sizeof(*result));
-	result->d_ino = source->d_ino;
-	result->d_reclen = sizeof(*result);
-	result->d_type = source->d_type;
-	size_t name_length = strnlen(source->d_name, sizeof(source->d_name));
-	if (name_length >= sizeof(result->d_name))
-		name_length = sizeof(result->d_name) - 1;
-	memcpy(result->d_name, source->d_name, name_length);
-	result->d_name[name_length] = '\0';
-	result->d_namlen = (uint16_t)name_length;
-}
-
-struct dirent *shim_readdir(DIR *dirp) __asm__("readdir");
-struct dirent *shim_readdir(DIR *dirp)
-{
-	struct dirent* entry = host_readdir(dirp);
-	if (!entry)
-		return NULL;
-	convert_dirent(entry, &tls_darwin_dirent);
-	return (struct dirent*)(void*)&tls_darwin_dirent;
-}
-
-int shim_readdir_r(DIR *dirp, void *entry, void **result) __asm__("readdir_r");
-int shim_readdir_r(DIR *dirp, void *entry, void **result)
-{
-	if (!entry || !result)
-		return EINVAL;
-	errno = 0;
-	struct dirent* source = host_readdir(dirp);
-	if (!source) {
-		*result = NULL;
-		return errno;
-	}
-	convert_dirent(source, entry);
-	*result = entry;
-	return 0;
-}
-
-/* ===== mmap flag translation ===== */
-
-/* macOS and Linux use different values for mmap flags.
- * macOS MAP_ANON = 0x1000, Linux MAP_ANONYMOUS = 0x0020.
- * Without translation, LuaJIT's allocator (and any other code using
- * mmap with MAP_ANON) silently fails on Linux. */
-
-#include <sys/mman.h>
-
-#define DARWIN_MAP_ANON  0x1000
-#define DARWIN_MAP_JIT   0x0800
+#define DARWIN_MAP_ANON 0x1000
+#define DARWIN_MAP_JIT 0x0800
 
 typedef long (*machgate_darwin_mmap_fn)(void*, size_t, int, int, int, off_t);
 typedef long (*machgate_darwin_munmap_fn)(void*, size_t);
@@ -11045,18 +6440,6 @@ void* dlopen(const char* path, int flags)
 	return real_dlopen(path, linux_flags);
 }
 
-/* ===== Darwin assert ===== */
-
-/* macOS __assert_rtn(func, file, line, expr) → Linux __assert_fail(expr, file, line, func) */
-extern void __assert_fail(const char *, const char *, unsigned int, const char *)
-	__attribute__((noreturn));
-
-__attribute__((noreturn))
-void __assert_rtn(const char *func, const char *file, int line, const char *expr)
-{
-	__assert_fail(expr, file, (unsigned)line, func);
-}
-
 __attribute__((noreturn))
 void abort(void)
 {
@@ -11077,29 +6460,20 @@ int timingsafe_bcmp(const void* buffer_a, const void* buffer_b, size_t length)
 	return (result + 0xff) >> 8;
 }
 
-/* ===== Heap allocation wrappers ===== */
+typedef void* (*host_malloc_function)(size_t);
+typedef void (*host_free_function)(void*);
+typedef void* (*host_calloc_function)(size_t, size_t);
+typedef void* (*host_realloc_function)(void*, size_t);
+typedef int (*host_posix_memalign_function)(void**, size_t, size_t);
 
-/* Intercept malloc/free/calloc/realloc for:
- * 1. Zero-initialization (macOS malloc returns zeroed pages)
- * 2. mmap registry (munmap instead of free for mmap'd regions)
- *
- * Uses dlsym(RTLD_NEXT) to find the real glibc functions.
- * Only Mach-O code reaches these (via GOT patching). */
+static host_malloc_function real_malloc;
+static host_free_function real_free;
+static host_calloc_function real_calloc;
+static host_realloc_function real_realloc;
+static host_posix_memalign_function real_posix_memalign;
 
-typedef void *(*real_malloc_fn)(size_t);
-typedef void  (*real_free_fn)(void *);
-typedef void *(*real_calloc_fn)(size_t, size_t);
-typedef void *(*real_realloc_fn)(void *, size_t);
-typedef int   (*real_posix_memalign_fn)(void **, size_t, size_t);
-
-static real_malloc_fn  real_malloc  = NULL;
-static real_free_fn    real_free    = NULL;
-static real_calloc_fn  real_calloc  = NULL;
-static real_realloc_fn real_realloc = NULL;
-static real_posix_memalign_fn real_posix_memalign = NULL;
-
-static char bootstrap_buf[4096];
-static int bootstrap_pos = 0;
+static unsigned char bootstrap_storage[4096];
+static size_t bootstrap_used;
 
 #define MACHGATE_ALLOCATION_INITIAL_TABLE_SIZE 262144
 #define MACHGATE_ALLOCATION_MAX_TABLE_SIZE 4194304
@@ -11488,35 +6862,39 @@ static int should_forward_guest_cxx_delete(const void* ptr)
 	return 1;
 }
 
-static void resolve_real_funcs(void)
+static void resolve_host_allocator(void)
 {
-	if (real_malloc) return;
-	real_malloc  = (real_malloc_fn)dlsym(RTLD_NEXT, "malloc");
-	real_free    = (real_free_fn)dlsym(RTLD_NEXT, "free");
-	real_calloc  = (real_calloc_fn)dlsym(RTLD_NEXT, "calloc");
-	real_realloc = (real_realloc_fn)dlsym(RTLD_NEXT, "realloc");
-	real_posix_memalign = (real_posix_memalign_fn)dlsym(RTLD_NEXT,
-	                                                    "posix_memalign");
+	if (real_malloc)
+		return;
+	real_malloc = (host_malloc_function)dlsym(RTLD_NEXT, "malloc");
+	real_free = (host_free_function)dlsym(RTLD_NEXT, "free");
+	real_calloc = (host_calloc_function)dlsym(RTLD_NEXT, "calloc");
+	real_realloc = (host_realloc_function)dlsym(RTLD_NEXT, "realloc");
+	real_posix_memalign = (host_posix_memalign_function)dlsym(
+		RTLD_NEXT, "posix_memalign");
+}
+
+static void* allocate_from_bootstrap_storage(size_t size)
+{
+	size_t start = (bootstrap_used + 15u) & ~(size_t)15u;
+	if (start > sizeof(bootstrap_storage) ||
+	    size > sizeof(bootstrap_storage) - start)
+		return NULL;
+
+	void* result = bootstrap_storage + start;
+	memset(result, 0, size);
+	bootstrap_used = start + size;
+	record_allocation(result, size ? size : 1);
+	return result;
 }
 
 static void *shim_malloc_impl_at(size_t size, void* caller)
 {
 	if (!real_malloc) {
-		resolve_real_funcs();
-		if (!real_malloc) {
-			/* Bootstrap: return zeroed memory from static buffer */
-			int aligned = (bootstrap_pos + 15) & ~15;
-			if (aligned + (int)size <= (int)sizeof(bootstrap_buf)) {
-				void *p = bootstrap_buf + aligned;
-				memset(p, 0, size);
-				bootstrap_pos = aligned + size;
-				record_allocation(p, size ? size : 1);
-				return p;
-			}
-			return NULL;
-		}
+		resolve_host_allocator();
+		if (!real_malloc)
+			return allocate_from_bootstrap_storage(size);
 	}
-	/* macOS malloc returns zeroed pages — zero-init for compatibility. */
 	void *p = real_malloc(size);
 	if (p) {
 		memset(p, 0, size);
@@ -11543,11 +6921,11 @@ static void shim_free_impl_at(void *ptr, void* caller)
 	if (!known && shim_alloc_mismatch_trace_enabled())
 		shim_dump_recent_alloc_events("free-unknown-pointer", ptr);
 	forget_allocation(ptr);
-	/* Don't free bootstrap allocations */
-	if ((char *)ptr >= bootstrap_buf &&
-	    (char *)ptr < bootstrap_buf + sizeof(bootstrap_buf))
+	if ((unsigned char*)ptr >= bootstrap_storage &&
+	    (unsigned char*)ptr < bootstrap_storage + sizeof(bootstrap_storage))
 		return;
-	if (!real_free) resolve_real_funcs();
+	if (!real_free)
+		resolve_host_allocator();
 	if (real_free) real_free(ptr);
 }
 
@@ -11560,7 +6938,7 @@ void shim_free(void *ptr)
 static void *shim_calloc_impl_at(size_t nmemb, size_t size, void* caller)
 {
 	if (!real_calloc) {
-		resolve_real_funcs();
+		resolve_host_allocator();
 		if (!real_calloc) {
 			size_t total = nmemb * size;
 			return shim_malloc_impl_at(total, caller);
@@ -11585,8 +6963,8 @@ static void *shim_realloc_impl_at(void *ptr, size_t size, void* caller)
 	size_t old_size = 0;
 	int known = 0;
 
-	if (ptr && (char *)ptr >= bootstrap_buf &&
-	    (char *)ptr < bootstrap_buf + sizeof(bootstrap_buf)) {
+	if (ptr && (unsigned char*)ptr >= bootstrap_storage &&
+	    (unsigned char*)ptr < bootstrap_storage + sizeof(bootstrap_storage)) {
 		lookup_allocation_size(ptr, &old_size);
 		void* new_ptr = shim_malloc_impl_at(size, caller);
 		if (!new_ptr && size != 0)
@@ -11602,7 +6980,8 @@ static void *shim_realloc_impl_at(void *ptr, size_t size, void* caller)
 		if (!known && shim_alloc_mismatch_trace_enabled())
 			shim_dump_recent_alloc_events("realloc-unknown-pointer", ptr);
 	}
-	if (!real_realloc) resolve_real_funcs();
+	if (!real_realloc)
+		resolve_host_allocator();
 	if (!real_realloc) return NULL;
 	void *new_ptr = real_realloc(ptr, size);
 	if (new_ptr || size == 0)
@@ -11628,7 +7007,7 @@ static int shim_posix_memalign_impl_at(void **memptr, size_t alignment,
 	if (alignment < sizeof(void*) || (alignment & (alignment - 1)) != 0)
 		return EINVAL;
 	if (!real_posix_memalign)
-		resolve_real_funcs();
+		resolve_host_allocator();
 	if (!real_posix_memalign)
 		return ENOMEM;
 	int result = real_posix_memalign(memptr, alignment, size);

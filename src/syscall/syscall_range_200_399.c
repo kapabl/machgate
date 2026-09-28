@@ -22,6 +22,7 @@
 #include <sys/shm.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <sys/xattr.h>

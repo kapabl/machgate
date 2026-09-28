@@ -1,0 +1,64 @@
+# Extended public ARM64 Mach-O command-line regression gate.
+#
+# Format:
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+#
+# Every artifact is public and checksum-pinned. Keep this gate at 57 unique
+# probes. Focused manifests are diagnostics, not substitutes for this gate.
+ripgrep|https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-aarch64-apple-darwin.tar.gz|378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715|ripgrep-15.1.0-aarch64-apple-darwin/rg|--version
+fd|https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-aarch64-apple-darwin.tar.gz|623dc0afc81b92e4d4606b380d7bc91916ba7b97814263e554d50923a39e480a|fd-v10.4.2-aarch64-apple-darwin/fd|--version
+hyperfine|https://github.com/sharkdp/hyperfine/releases/download/v1.20.0/hyperfine-v1.20.0-aarch64-apple-darwin.tar.gz|8ee7067016620447c9d2d6234ec9a4680f958b7ad983549b56334668f63075b5|hyperfine-v1.20.0-aarch64-apple-darwin/hyperfine|--version
+bat|https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-aarch64-apple-darwin.tar.gz|e30beff26779c9bf60bb541e1d79046250cb74378f2757f8eb250afddb19e114|bat-v0.26.1-aarch64-apple-darwin/bat|--version
+jq|https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-macos-arm64|2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e|.|--version
+yq|https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_darwin_arm64.tar.gz|8415210a2c06e706e4037ccbbfc0d0e35c2518683da21a432d28258752567474|yq_darwin_arm64|--version
+starship|https://github.com/starship/starship/releases/download/v1.25.1/starship-aarch64-apple-darwin.tar.gz|1062a2363489b9335529b83204472f02633c08fc3609f1b325be5eba36feb631|starship|--version
+delta|https://github.com/dandavison/delta/releases/download/0.19.2/delta-0.19.2-aarch64-apple-darwin.tar.gz|9be36612a5a13e9e386dc498fb8e50dc87c72ee42b63db0ea05b32f99a72a69a|delta-0.19.2-aarch64-apple-darwin/delta|--version
+bottom|https://github.com/ClementTsang/bottom/releases/download/0.14.1/bottom_aarch64-apple-darwin.tar.gz|1e7f03acb9189a4ad79c20fdef0bd7163265fa56ab75fc54b19f1dde5aaea5ae|btm|--version
+just|https://github.com/casey/just/releases/download/1.53.0/just-1.53.0-aarch64-apple-darwin.tar.gz|27f1361f2e4fb5d733837f1a9f80f85c237e5a36c75ee14961e59141713aa4ed|just|--version
+zoxide|https://github.com/ajeetdsouza/zoxide/releases/download/v0.9.9/zoxide-0.9.9-aarch64-apple-darwin.tar.gz|57e733d0436309dae2ed97e46bba43937209395298e1d88812d4e893900cb40a|zoxide|--version
+sd|https://github.com/chmln/sd/releases/download/v1.1.0/sd-v1.1.0-aarch64-apple-darwin.tar.gz|4bd3c09226376ca0a1d69589c91e86276fae36c5fbaaee669afce583f6682030|sd-v1.1.0-aarch64-apple-darwin/sd|--version
+git-cliff|https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-aarch64-apple-darwin.tar.gz|21547ae4a0421164070ab75c2522864ea5565858a011fabc5f583061b20f1226|git-cliff-2.13.1/git-cliff|--version
+sccache|https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-aarch64-apple-darwin.tar.gz|ded590cae2c72042c61178632906bef62d635fa20d45f8b22110a2241f430960|sccache-v0.16.0-aarch64-apple-darwin/sccache|--version
+cargo-binstall|https://github.com/cargo-bins/cargo-binstall/releases/download/v1.20.1/cargo-binstall-aarch64-apple-darwin.zip|691c4fda20d2e58920dc056e4eb7dacec6de448bb547aca17b0ae819716ebef6|cargo-binstall|-V
+hexyl|https://github.com/sharkdp/hexyl/releases/download/v0.17.0/hexyl-v0.17.0-aarch64-apple-darwin.tar.gz|d8c50f5ec688faf566ea4c13d6aa12a5681dc370dab3ffba0a9db935a5986630|hexyl-v0.17.0-aarch64-apple-darwin/hexyl|--version
+pastel|https://github.com/sharkdp/pastel/releases/download/v0.12.0/pastel-v0.12.0-aarch64-apple-darwin.tar.gz|7fd81518fac1dab7bd60e4759194a942c51bb911ef5de4513f4a9e3fb4b8ac1c|pastel-v0.12.0-aarch64-apple-darwin/pastel|--version
+atuin|https://github.com/atuinsh/atuin/releases/download/v18.16.1/atuin-aarch64-apple-darwin.tar.gz|0a3fdc4cfa18758d6a872950625f2042233df0412a0c10d0dadf30bfc3bc6d6b|atuin-aarch64-apple-darwin/atuin|--version
+ninja|https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-mac.zip|c99048673aa765960a99cf10c6ddb9f1fad506099ff0a0e137ad8960a88f321b|ninja|--version
+procs|https://github.com/dalance/procs/releases/download/v0.14.11/procs-v0.14.11-aarch64-mac.zip|6650e7f354c07d0319d0f771ef8bb898ce8d0c841865a96c23281eebb033cac3|procs|--version
+nu|https://github.com/nushell/nushell/releases/download/0.113.1/nu-0.113.1-aarch64-apple-darwin.tar.gz|458aa21674221b2e8adbd784f9ba8113288b78f3c352465cef37b114ff3dffd5|nu-0.113.1-aarch64-apple-darwin/nu|--version
+fzf|https://github.com/junegunn/fzf/releases/download/v0.73.1/fzf-0.73.1-darwin_arm64.tar.gz|d27fd68c04fb9b42f7c73a3f7d38069a74d308e40174f64a072c747213e97286|fzf|--version
+gh|https://github.com/cli/cli/releases/download/v2.95.0/gh_2.95.0_macOS_arm64.zip|3677f9c27965825f9c7d50395473c134edaea4b484373ef6b25de653570a0489|gh_2.95.0_macOS_arm64/bin/gh|--version
+lazygit|https://github.com/jesseduffield/lazygit/releases/download/v0.62.2/lazygit_0.62.2_darwin_arm64.tar.gz|f311d96b666b4865760e39f3967edfd7bf30b5d09e52a1bc7ae511f6bdfdd02c|lazygit|--version
+glow|https://github.com/charmbracelet/glow/releases/download/v2.1.2/glow_2.1.2_Darwin_arm64.tar.gz|6f7abfb47de69fbf7b0e67d2fa019cc554916e8b6694f9877212be89fc7ebb8c|glow_2.1.2_Darwin_arm64/glow|--version
+gum|https://github.com/charmbracelet/gum/releases/download/v0.17.0/gum_0.17.0_Darwin_arm64.tar.gz|e2a4b8596efa05821d8c58d0c1afbcd7ad1699ba69c689cc3ff23a4a99c8b237|gum_0.17.0_Darwin_arm64/gum|--version
+goreleaser|https://github.com/goreleaser/goreleaser/releases/download/v2.16.0/goreleaser_Darwin_arm64.tar.gz|8f6898256f35531165d90f2db581c5ee0d32bda83ebc25ac231ff5bdb9d2071a|goreleaser|--version
+chezmoi|https://github.com/twpayne/chezmoi/releases/download/v2.70.5/chezmoi_2.70.5_darwin_arm64.tar.gz|c3531896769175089b9b2e9cf99b15a2357427f776289b66583a2432d69cd3cc|chezmoi|--version
+duf|https://github.com/muesli/duf/releases/download/v0.9.1/duf_0.9.1_darwin_arm64.tar.gz|512ba0ff3585bb8c65841de557a4c4b8712332db005dc952fa98d373a05d01df|duf|--version
+shfmt|https://github.com/mvdan/sh/releases/download/v3.13.1/shfmt_v3.13.1_darwin_arm64|9680526be4a66ea1ffe988ed08af58e1400fe1e4f4aef5bd88b20bb9b3da33f8|.|--version
+fx|https://github.com/antonmedv/fx/releases/download/39.2.0/fx_darwin_arm64|5d7dadbf8ac4e4a55b5b6d31bdd958b90823292997ba9ddae395f66417bb4a9b|.|--version
+kubectl|https://dl.k8s.io/release/v1.36.2/bin/darwin/arm64/kubectl|4408c85c83fd3a31adaa555bdf3c7a6c81f74b19449a9060ba31ab91926f023d|.|version --client
+helm|https://get.helm.sh/helm-v4.2.2-darwin-arm64.tar.gz|5410a0dae3d5d91f45653b161260d9301aabc4ae80ae50a6605d66884b6df8ea|darwin-arm64/helm|version
+k9s|https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Darwin_arm64.tar.gz|9b8c0e8f461e5d33aeee43a67f5ef4aff646a008a786887b8266cbb153c610cc|k9s|version
+kind|https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-darwin-arm64|dca67911095a110c2b5c36e26df6cac860c602033e456c0db47be498cdef1ebb|.|version
+minikube|https://github.com/kubernetes/minikube/releases/download/v1.38.1/minikube-darwin-arm64|f9b0c70bb7daf38c683c0b6e46dc1b612600247ae826bf74576807746a919ee8|.|version
+tilt|https://github.com/tilt-dev/tilt/releases/download/v0.37.4/tilt.0.37.4.mac.arm64.tar.gz|d25cd4470480325b31effa787e46f002601205c81e41b3c7f412e2defec6c4aa|tilt|version
+argocd|https://github.com/argoproj/argo-cd/releases/download/v3.4.4/argocd-darwin-arm64|300470f888139217590c3e6a7f05ee9f1ca0ea27e8f9587e14d02952505b4845|.|version --client
+flux|https://github.com/fluxcd/flux2/releases/download/v2.8.8/flux_2.8.8_darwin_arm64.tar.gz|f54bb4d83cfc9563fd3213381d50fe1102215ef904ecf9c38afa183b02c74eb7|flux|--version
+kubeseal|https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.38.1/kubeseal-0.38.1-darwin-arm64.tar.gz|c1103c48582a8d932fee2ab4153ec4fe099a98969eafd570b82f7de8ac1cac42|kubeseal|--version
+stern|https://github.com/stern/stern/releases/download/v1.34.0/stern_1.34.0_darwin_arm64.tar.gz|4014d84096e1e603ee115864e03a1e15fb9bae9876647bf7bb8031eee278dcd3|stern|--version
+terraform|https://releases.hashicorp.com/terraform/1.15.6/terraform_1.15.6_darwin_arm64.zip|8d4c6791a744332bc7ca3962c61ab2ed8e5d25a7299f176f5edffb9cb525e85f|terraform|--version
+packer|https://releases.hashicorp.com/packer/1.15.4/packer_1.15.4_darwin_arm64.zip|d95ba177dd2ebb84d7d155493b4188ec2a519d2c3b041528db5b63a6aff9da80|packer|--version
+vault|https://releases.hashicorp.com/vault/2.0.3/vault_2.0.3_darwin_arm64.zip|abf89e4e56a3af41471ccccdaac1b691874c5e8b20e72c053133d948be0cec42|vault|--version
+consul|https://releases.hashicorp.com/consul/2.0.1/consul_2.0.1_darwin_arm64.zip|ab6f2baa756b7ade58b335ec98312ff8235bc3d6d520de9c7ec95bd9c8a13485|consul|--version
+nomad|https://releases.hashicorp.com/nomad/2.0.3/nomad_2.0.3_darwin_arm64.zip|e482c25c608ea7c40bcc75a6802c51580e3fa08e3a78e387faf62b6d499ecb0b|nomad|--version
+boundary|https://releases.hashicorp.com/boundary/0.21.3/boundary_0.21.3_darwin_arm64.zip|7d64c6bf6ca437b10a143d47bb85cfaff0af7ba83c598a38b1ac275d2acc75c1|boundary|version
+tofu|https://github.com/opentofu/opentofu/releases/download/v1.12.3/tofu_1.12.3_darwin_arm64.zip|2b81c065cdcf5e573cfb5d9e0c663ac4cfc32512927078b645b58ef81cec2474|tofu|--version
+terragrunt|https://github.com/gruntwork-io/terragrunt/releases/download/v1.0.8/terragrunt_darwin_arm64|7acf580bb22736299e86837f36ef663c3b7eb7ab20e36c810f92a2bb10016441|.|--version
+pulumi|https://github.com/pulumi/pulumi/releases/download/v3.247.0/pulumi-v3.247.0-darwin-arm64.tar.gz|3b37d840550c6250ccfa9996d7d4b0372864ecf2a47b1a184f3d903874cd1d34|pulumi/pulumi|version
+cmake|https://github.com/Kitware/CMake/releases/download/v4.3.3/cmake-4.3.3-macos-universal.tar.gz|5221a13450c7a0219a2a0d1b6c9085eb06489721fafd8488ccebc1584175d2fb|cmake-4.3.3-macos-universal/CMake.app/Contents/bin/cmake|--version
+sqlite3|https://www.sqlite.org/2026/sqlite-tools-osx-arm64-3530200.zip|43ec32933b8f9ba66cd73da1e1f32bca8407365a930b587935f834df2c1effbb|sqlite3|--version
+duckdb|https://github.com/duckdb/duckdb/releases/download/v1.5.4/duckdb_cli-osx-arm64.zip|d6c35195683fd1378e5624b01ca390069d399f8341c38986b7e3dfa0b3470d10|duckdb|--version
+node|https://nodejs.org/dist/latest/node-v26.3.1-darwin-arm64.tar.gz|3f624ab0d774553c0d28b968e141d8c676a35a2811fb0b7b356ba9cbdce15f74|node-v26.3.1-darwin-arm64/bin/node|--version
+bun|https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip|d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620|bun-darwin-aarch64/bun|--version
+protoc|https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip|193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2|bin/protoc|--version
+nvim|https://github.com/neovim/neovim/releases/download/v0.12.3/nvim-macos-arm64.tar.gz|532da1d00e465a660fa01c3d4991333d09c52107dce7df937368545daca0a14e|nvim-macos-arm64/bin/nvim|--version

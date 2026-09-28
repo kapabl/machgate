@@ -49,10 +49,10 @@ static uint32_t section_flags(struct mach_header_64* header,
 	return S_SYMBOL_STUBS;
 }
 
-void* machgate_find_guest_definition(struct load_results* loaded,
+void* machgate_find_guest_definition(struct machgate_guest_image* image,
 				     const char* name)
 {
-	struct mach_header_64* header = loaded->mh;
+	struct mach_header_64* header = image->header;
 	struct symtab_command* symbol_table = NULL;
 	uint8_t* cursor = (uint8_t*)(header + 1);
 	for (uint32_t index = 0; index < header->ncmds; index++) {
@@ -67,9 +67,9 @@ void* machgate_find_guest_definition(struct load_results* loaded,
 	uint64_t symbol_bytes =
 		(uint64_t)symbol_table->nsyms * sizeof(struct nlist_64);
 	struct nlist_64* symbols = address_for_file_offset(
-		header, loaded->slide, symbol_table->symoff, symbol_bytes);
+		header, image->slide, symbol_table->symoff, symbol_bytes);
 	char* strings = address_for_file_offset(
-		header, loaded->slide, symbol_table->stroff, symbol_table->strsize);
+		header, image->slide, symbol_table->stroff, symbol_table->strsize);
 	if (!symbols || !strings)
 		return NULL;
 
@@ -88,7 +88,7 @@ void* machgate_find_guest_definition(struct load_results* loaded,
 		if ((section_flags(header, symbol->n_sect) & SECTION_TYPE) ==
 		    S_SYMBOL_STUBS)
 			return NULL;
-		return (void*)(uintptr_t)(symbol->n_value + loaded->slide);
+		return (void*)(uintptr_t)(symbol->n_value + image->slide);
 	}
 	return NULL;
 }

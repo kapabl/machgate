@@ -11,13 +11,22 @@ concurrency:
 
 jobs:
   external-arm64:
-    name: External ARM64 Mach-O CLI probes
+    name: Extended ARM64 Mach-O CLI gate
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    timeout-minutes: 240
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Check out Apple-ABI libc++ source
+        run: git submodule update --init --depth 1 extern/llvm-project
+
+      - name: Restore external artifact cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/machgate-external
+          key: external-arm64-57-v1
 
       - name: Build ARM64 toolchain image
         run: |
@@ -36,9 +45,16 @@ jobs:
               set -euo pipefail
               cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Debug
               cmake --build build-arm64 --verbose -j1
+              MACHGATE_SHIM_LIB=/work/build-arm64/libsystem_shim.so \
+                scripts/build-libcxx.sh
               MACHGATE_RUN_EXTERNAL=1 \
                 MACHGATE_SYSTEM_SHIM_LIB=/work/build-arm64/libsystem_shim.so \
                 BUILD_DIR=/work/build-arm64 \
+                MACHGATE_EXTERNAL_MANIFEST=/work/tests/external/extended_arm64_macho_cli_manifest.txt \
+                MACHGATE_EXTERNAL_CACHE=/work/.cache/machgate-external \
+                MACHGATE_EXTERNAL_TIMEOUT=120 \
+                MACHGATE_EXTERNAL_REQUIRE_LIBCXX=1 \
+                MACHGATE_EXTERNAL_LIBCXX=/work/build-libcxx/lib/libc++.so.1 \
                 bash tests/test_external_macho_cli.sh
             '
 

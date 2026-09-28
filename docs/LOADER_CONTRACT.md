@@ -39,13 +39,16 @@ Before the entry point runs, MachGate must:
    selected native providers;
 3. apply explicitly configured native trampolines;
 4. patch Darwin syscall instructions;
-5. allocate a guarded, 16-byte-aligned guest stack;
-6. expose guest process arguments and executable-path state;
-7. connect guest C++ allocation operators to the shim when both surfaces are
+5. configure the initialized, alignment-padding, and zero-fill extent of the
+   guest TLV storage image;
+6. allocate a guarded, 16-byte-aligned guest stack;
+7. expose guest process arguments and executable-path state;
+8. connect guest C++ allocation operators to the shim when both surfaces are
    available;
-8. run non-null `__mod_init_func` entries on the guest stack;
-9. enter the guest executable's directory; and
-10. transfer control to the selected entry point.
+9. run pointer-based `S_MOD_INIT_FUNC_POINTERS` and offset-based
+   `S_INIT_FUNC_OFFSETS` entries on the guest stack;
+10. enter the guest executable's directory; and
+11. transfer control to the selected entry point.
 
 No initializer or guest entry point may run before syscall sites are patched.
 

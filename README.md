@@ -55,6 +55,12 @@ MachGate also includes focused compatibility components:
 
 See [syscall patching](docs/SYSCALL_PATCHING.md) for the gateway design and
 [the syscall table](docs/DARWIN_SYSCALL_TABLE_STATUS.md) for dispatcher coverage.
+The [domain model](docs/DOMAIN_MODEL.md) defines the ubiquitous language,
+bounded contexts, invariants, and application workflow used by the rewrite.
+The [source similarity audit](docs/CLEAN_ROOM_SIMILARITY_AUDIT.md) records the
+current technical evidence and the remaining native-shim rewrite work.
+The [external corpus status](docs/EXTERNAL_CORPUS_STATUS.md) classifies the
+current compatibility baseline by bounded context.
 
 ## Build
 

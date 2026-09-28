@@ -29,6 +29,7 @@ machgate_enter_guest:
 	mov x0, x2
 	mov x1, x3
 	mov x2, x4
+	mov x3, x5
 	adrp x30, machgate_guest_return
 	add x30, x30, :lo12:machgate_guest_return
 	br x9
@@ -37,8 +38,7 @@ machgate_enter_guest:
 	.align 2
 	.type machgate_guest_return, %function
 machgate_guest_return:
-	mov x8, #94
-	svc #0
+	bl machgate_terminate_after_guest_return
 	brk #0
 	.size machgate_guest_return, .-machgate_guest_return
 

@@ -3,7 +3,7 @@
 
 #include "loader.h"
 
-int machgate_bind_native_imports(struct load_results* loaded, char* error,
+int machgate_bind_native_imports(struct machgate_guest_image* image, char* error,
 				 size_t error_size);
 
 #endif

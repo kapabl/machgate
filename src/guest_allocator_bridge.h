@@ -3,6 +3,6 @@
 
 #include "loader.h"
 
-int machgate_configure_guest_allocator_bridge(struct load_results* loaded);
+int machgate_configure_guest_allocator_bridge(struct machgate_guest_image* image);
 
 #endif

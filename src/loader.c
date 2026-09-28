@@ -1,5 +1,6 @@
 #include "loader.h"
 
+#include "instruction_adaptation.h"
 #include "macho_defs.h"
 
 #include <errno.h>
@@ -248,9 +249,9 @@ static int validate_segment(const struct load_context* context,
 		snprintf(error, error_size, "invalid Mach-O segment command");
 		return -1;
 	}
-	if (segment->filesize > segment->vmsize ||
-	    !range_valid(segment->fileoff, segment->filesize,
-	                 context->slice.size)) {
+	if (!range_valid(segment->fileoff, segment->filesize,
+	                 context->slice.size) ||
+	    (segment->vmsize != 0 && segment->filesize > segment->vmsize)) {
 		snprintf(error, error_size, "invalid Mach-O segment file range");
 		return -1;
 	}
@@ -354,7 +355,7 @@ static int walk_segments(struct load_context* context, char* error,
 }
 
 static int locate_header_and_entry(struct load_context* context,
-				   struct load_results* result,
+				   struct machgate_guest_image* image,
 				   char* error, size_t error_size)
 {
 	uint8_t* cursor = context->commands;
@@ -389,19 +390,19 @@ static int locate_header_and_entry(struct load_context* context,
 		if (command->cmd == LC_SEGMENT_64) {
 			struct segment_command_64* segment = (void*)command;
 			if (segment->fileoff == 0 && segment->filesize >= sizeof(context->header))
-				result->mh = (void*)(uintptr_t)segment->vmaddr;
+				image->header = (void*)(uintptr_t)segment->vmaddr;
 			if (has_main_entry && entry_offset >= segment->fileoff &&
 			    entry_offset - segment->fileoff < segment->filesize) {
-				result->entry_point = (uintptr_t)segment->vmaddr +
+				image->entry_point = (uintptr_t)segment->vmaddr +
 				                      (uintptr_t)(entry_offset - segment->fileoff);
 			}
 		}
 		cursor += command->cmdsize;
 	}
 
-	if (!result->entry_point)
-		result->entry_point = unix_thread_entry;
-	if (!result->mh || !result->entry_point) {
+	if (!image->entry_point)
+		image->entry_point = unix_thread_entry;
+	if (!image->header || !image->entry_point) {
 		snprintf(error, error_size,
 		         "Mach-O executable has no supported mapped entry point");
 		return -1;
@@ -435,13 +436,14 @@ static void unmap_segments(struct load_context* context)
 		       context->segments[index].size);
 }
 
-int machgate_load_executable(const char* path, struct load_results* result,
+int machgate_load_executable(const char* path,
+			     struct machgate_guest_image* image,
 			     char* error, size_t error_size)
 {
 	struct load_context context;
 	memset(&context, 0, sizeof(context));
 	context.file_descriptor = -1;
-	memset(result, 0, sizeof(*result));
+	memset(image, 0, sizeof(*image));
 
 	context.file_descriptor = open(path, O_RDONLY | O_CLOEXEC);
 	if (context.file_descriptor < 0) {
@@ -463,13 +465,15 @@ int machgate_load_executable(const char* path, struct load_results* result,
 	                 &context.slice, error, error_size) != 0 ||
 	    read_load_commands(&context, error, error_size) != 0 ||
 	    walk_segments(&context, error, error_size) != 0 ||
-	    locate_header_and_entry(&context, result, error, error_size) != 0 ||
-	    protect_segments(&context, error, error_size) != 0)
+	    locate_header_and_entry(&context, image, error, error_size) != 0)
 		goto done;
 
-	result->slide = 0;
-	result->mapping_start = context.mapping_start;
-	result->mapping_end = context.mapping_end;
+	image->slide = 0;
+	image->mapping_start = context.mapping_start;
+	image->mapping_end = context.mapping_end;
+	if (machgate_adapt_guest_instructions(image, error, error_size) < 0 ||
+	    protect_segments(&context, error, error_size) != 0)
+		goto done;
 	load_result = 0;
 
 done:
@@ -485,9 +489,9 @@ static uintptr_t align_up(uintptr_t value, size_t alignment)
 	return (value + alignment - 1) & ~((uintptr_t)alignment - 1);
 }
 
-void* machgate_pool_alloc(struct load_results* result, size_t size)
+void* machgate_pool_alloc(struct machgate_guest_image* image, size_t size)
 {
-	if (!result || !result->mapping_end || !size)
+	if (!image || !image->mapping_end || !size)
 		return NULL;
 
 	long page_size_result = sysconf(_SC_PAGESIZE);
@@ -495,7 +499,7 @@ void* machgate_pool_alloc(struct load_results* result, size_t size)
 		return NULL;
 	size_t page_size = (size_t)page_size_result;
 	size = align_up(size, page_size);
-	uintptr_t start = align_up(result->mapping_end, page_size);
+	uintptr_t start = align_up(image->mapping_end, page_size);
 
 	for (uintptr_t distance = 0; distance < (1u << 27);
 	     distance += MACHGATE_POOL_SEARCH_STEP) {

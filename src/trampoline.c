@@ -34,7 +34,7 @@ static void* address_for_file_offset(struct mach_header_64* header,
 	return NULL;
 }
 
-static int patch_function(struct load_results* loaded, uintptr_t function,
+static int patch_function(struct machgate_guest_image* image, uintptr_t function,
 			  uintptr_t replacement, char* error,
 			  size_t error_size)
 {
@@ -44,7 +44,7 @@ static int patch_function(struct load_results* loaded, uintptr_t function,
 		return -1;
 	}
 	size_t page_size = (size_t)page_size_result;
-	uint32_t* island = machgate_pool_alloc(loaded, page_size);
+	uint32_t* island = machgate_pool_alloc(image, page_size);
 	if (!island) {
 		snprintf(error, error_size,
 		         "could not allocate a nearby trampoline island");
@@ -85,7 +85,7 @@ static int patch_function(struct load_results* loaded, uintptr_t function,
 	return 0;
 }
 
-int machgate_apply_trampolines(struct load_results* loaded, char* error,
+int machgate_apply_trampolines(struct machgate_guest_image* image, char* error,
 			       size_t error_size)
 {
 	const char* library_path = getenv("MACHGATE_TRAMPOLINE_LIB");
@@ -100,7 +100,7 @@ int machgate_apply_trampolines(struct load_results* loaded, char* error,
 		return -1;
 	}
 
-	struct mach_header_64* header = loaded->mh;
+	struct mach_header_64* header = image->header;
 	struct symtab_command* symbol_table_command = NULL;
 	uint8_t* cursor = (uint8_t*)(header + 1);
 	for (uint32_t index = 0; index < header->ncmds; index++) {
@@ -143,8 +143,8 @@ int machgate_apply_trampolines(struct load_results* loaded, char* error,
 		void* replacement = dlsym(library, native_name);
 		if (!replacement)
 			continue;
-		if (patch_function(loaded,
-		                   (uintptr_t)symbol->n_value + loaded->slide,
+		if (patch_function(image,
+		                   (uintptr_t)symbol->n_value + image->slide,
 		                   (uintptr_t)replacement, error, error_size) != 0)
 			return -1;
 		patched++;

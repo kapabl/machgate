@@ -12,6 +12,7 @@
 
 #define LC_SEGMENT_64 0x19u
 #define LC_SYMTAB 0x2u
+#define LC_DYSYMTAB 0xbu
 #define LC_UNIXTHREAD 0x5u
 #define LC_MAIN 0x80000028u
 #define LC_LOAD_DYLIB 0xcu
@@ -34,7 +35,15 @@
 #define N_SECT 0x0eu
 
 #define SECTION_TYPE 0x000000ffu
+#define S_LAZY_SYMBOL_POINTERS 0x00000007u
 #define S_SYMBOL_STUBS 0x00000008u
+#define S_MOD_INIT_FUNC_POINTERS 0x00000009u
+#define S_THREAD_LOCAL_REGULAR 0x00000011u
+#define S_THREAD_LOCAL_ZEROFILL 0x00000012u
+#define S_INIT_FUNC_OFFSETS 0x00000016u
+
+#define INDIRECT_SYMBOL_LOCAL 0x80000000u
+#define INDIRECT_SYMBOL_ABS 0x40000000u
 
 struct fat_header {
 	uint32_t magic;
@@ -117,6 +126,29 @@ struct symtab_command {
 	uint32_t nsyms;
 	uint32_t stroff;
 	uint32_t strsize;
+};
+
+struct dysymtab_command {
+	uint32_t cmd;
+	uint32_t cmdsize;
+	uint32_t ilocalsym;
+	uint32_t nlocalsym;
+	uint32_t iextdefsym;
+	uint32_t nextdefsym;
+	uint32_t iundefsym;
+	uint32_t nundefsym;
+	uint32_t tocoff;
+	uint32_t ntoc;
+	uint32_t modtaboff;
+	uint32_t nmodtab;
+	uint32_t extrefsymoff;
+	uint32_t nextrefsyms;
+	uint32_t indirectsymoff;
+	uint32_t nindirectsyms;
+	uint32_t extreloff;
+	uint32_t nextrel;
+	uint32_t locreloff;
+	uint32_t nlocrel;
 };
 
 struct dylib_info {

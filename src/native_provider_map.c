@@ -34,23 +34,58 @@ static int install_name_key(const char* install_name, char* key,
 	return 0;
 }
 
-static int copy_provider_path(const char* value, char* path,
-			      size_t path_size, char* error,
-			      size_t error_size)
+static int copy_provider_path(const char* value, char* path, size_t path_size,
+			      char* error, size_t error_size)
 {
-	if (strcmp(value, "SKIP") == 0 || strcmp(value, "STUB") == 0)
-		return 0;
 	int written = snprintf(path, path_size, "%s", value);
 	if (written < 0 || (size_t)written >= path_size) {
 		snprintf(error, error_size, "native provider path is too long");
 		return -1;
 	}
-	return 1;
+	return 0;
+}
+
+static int parse_provider_decision(
+	const char* value, enum machgate_provider_decision_kind* kind,
+	char* path, size_t path_size, char* error, size_t error_size)
+{
+	path[0] = '\0';
+	if (strcmp(value, "UNMAPPED") == 0) {
+		*kind = MACHGATE_PROVIDER_UNMAPPED;
+		return 0;
+	}
+	if (strcmp(value, "SKIP") == 0) {
+		*kind = MACHGATE_PROVIDER_SKIP;
+		return 0;
+	}
+	if (strcmp(value, "STUB") == 0) {
+		*kind = MACHGATE_PROVIDER_STUB;
+		return 0;
+	}
+	const char* provider_path = value;
+	if (strncmp(value, "MAP:", 4) == 0) {
+		provider_path = value + 4;
+		*kind = MACHGATE_PROVIDER_MAP;
+	} else if (strncmp(value, "PARTIAL:", 8) == 0) {
+		provider_path = value + 8;
+		*kind = MACHGATE_PROVIDER_PARTIAL;
+	} else {
+		*kind = MACHGATE_PROVIDER_MAP;
+	}
+	while (isspace((unsigned char)*provider_path))
+		provider_path++;
+	if (!*provider_path) {
+		snprintf(error, error_size, "native provider path is empty");
+		return -1;
+	}
+	return copy_provider_path(provider_path, path, path_size, error,
+	                          error_size);
 }
 
 static int find_provider_in_map(const char* map_path, const char* key,
-				char* path, size_t path_size,
-				char* error, size_t error_size)
+				enum machgate_provider_decision_kind* kind,
+				char* path, size_t path_size, char* error,
+				size_t error_size)
 {
 	FILE* map = fopen(map_path, "r");
 	if (!map) {
@@ -80,8 +115,12 @@ static int find_provider_in_map(const char* map_path, const char* key,
 		char* entry_path = trim_space(equals + 1);
 		if (strcmp(entry_key, key) != 0)
 			continue;
-		result = copy_provider_path(entry_path, path, path_size,
-		                            error, error_size);
+		if (parse_provider_decision(entry_path, kind, path, path_size,
+		                            error, error_size) != 0) {
+			result = -1;
+			break;
+		}
+		result = 1;
 		break;
 	}
 	if (ferror(map) && result == 0) {
@@ -93,15 +132,30 @@ static int find_provider_in_map(const char* map_path, const char* key,
 	return result;
 }
 
-int machgate_native_provider_path(const char* install_name, char* path,
-				  size_t path_size, char* error,
-				  size_t error_size)
+static int remove_numeric_version(char* key)
 {
+	char* dot = strrchr(key, '.');
+	if (!dot || !dot[1])
+		return 0;
+	for (char* cursor = dot + 1; *cursor; cursor++) {
+		if (!isdigit((unsigned char)*cursor))
+			return 0;
+	}
+	*dot = '\0';
+	return 1;
+}
+
+int machgate_native_provider_decision(
+	const char* install_name, enum machgate_provider_decision_kind* kind,
+	char* path, size_t path_size, char* error, size_t error_size)
+{
+	*kind = MACHGATE_PROVIDER_UNMAPPED;
+	path[0] = '\0';
 	if (strstr(install_name, "libSystem")) {
 		const char* shim = getenv("MACHGATE_SYSTEM_SHIM_LIB");
 		if (shim && *shim)
-			return copy_provider_path(shim, path, path_size, error,
-			                          error_size);
+			return parse_provider_decision(shim, kind, path, path_size,
+			                               error, error_size);
 	}
 
 	const char* map_path = getenv("MACHGATE_DYLIB_MAP");
@@ -112,6 +166,20 @@ int machgate_native_provider_path(const char* install_name, char* path,
 		snprintf(error, error_size, "native dependency name is too long");
 		return -1;
 	}
-	return find_provider_in_map(map_path, key, path, path_size, error,
-	                            error_size);
+	int result = find_provider_in_map(map_path, key, kind, path, path_size,
+	                                  error, error_size);
+	if (result < 0)
+		return -1;
+	if (result > 0)
+		return 0;
+
+	while (remove_numeric_version(key)) {
+		result = find_provider_in_map(map_path, key, kind, path, path_size,
+		                              error, error_size);
+		if (result < 0)
+			return -1;
+		if (result > 0)
+			return 0;
+	}
+	return 0;
 }

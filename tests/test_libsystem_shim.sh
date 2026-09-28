@@ -9,7 +9,7 @@ BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
 # Test that the .so loads without errors
 BUILD_DIR="$BUILD_DIR" LD_LIBRARY_PATH="$BUILD_DIR" python3 -c "
-import ctypes, os, signal, subprocess, sys, threading, time
+import ctypes, errno as host_errno, fcntl as host_fcntl, os, signal, subprocess, sys, tempfile, threading, time
 
 build_dir = os.environ['BUILD_DIR']
 lib = ctypes.CDLL(os.path.join(build_dir, 'libsystem_shim.so'))
@@ -21,34 +21,764 @@ for removed_symbol in [
     'LSOpenCFURLRef',
     'NSStartSearchPathEnumeration',
     'NSGetNextSearchPathEnumeration',
+    'CFRunLoopGetCurrent',
+    'CFRunLoopIsWaiting',
+    'CFRunLoopRun',
+    'CFRunLoopStop',
+    'CFRunLoopWakeUp',
+    'FSEventStreamCreate',
+    'FSEventStreamStart',
+    'FSEventsGetCurrentEventId',
+    'mach_msg_server_once',
+    'mach_port_allocate',
+    'mach_port_construct',
+    'mach_port_insert_right',
+    'mach_port_set_attributes',
     'mmap_registry_add',
+    'stat_darwin',
+    'fstat_darwin',
+    'lstat_darwin',
+    'fstatat_darwin',
+    'thread_get_state',
+    'thread_info',
+    'thread_resume',
+    'thread_set_exception_ports',
+    'thread_suspend',
+    'u_charDirection',
+    'ubrk_open',
+    'ucal_open',
+    'ucol_open',
+    'udat_open',
+    'uidna_openUTS46',
+    'uloc_getDefault',
+    'unorm2_normalize',
+    'unum_open',
+    'ures_open',
+    'utext_setup',
 ]:
     assert not hasattr(lib, removed_symbol), f'unexpected target-excluded symbol: {removed_symbol}'
+
+class MachNdrRecord(ctypes.Structure):
+    _fields_ = [
+        ('mig_version', ctypes.c_ubyte),
+        ('interface_version', ctypes.c_ubyte),
+        ('reserved', ctypes.c_ubyte),
+        ('protocol', ctypes.c_ubyte),
+        ('integer_representation', ctypes.c_ubyte),
+        ('character_representation', ctypes.c_ubyte),
+        ('float_representation', ctypes.c_ubyte),
+        ('trailing_reserved', ctypes.c_ubyte),
+    ]
+
+ndr_record = MachNdrRecord.in_dll(lib, 'NDR_record')
+assert bytes(ndr_record) == bytes([0, 0, 0, 0, 1, 0, 0, 0])
+
+io_main_port = ctypes.c_uint32.in_dll(lib, 'kIOMainPortDefault')
+assert io_main_port.value == 0
+lib.IOServiceMatching.argtypes = [ctypes.c_char_p]
+lib.IOServiceMatching.restype = ctypes.c_void_p
+lib.IOServiceGetMatchingService.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+lib.IOServiceGetMatchingService.restype = ctypes.c_uint32
+matching_service = lib.IOServiceMatching(b'IOPlatformDevice')
+assert matching_service
+assert lib.IOServiceGetMatchingService(io_main_port.value, matching_service) == 0
+lib.CFRelease.argtypes = [ctypes.c_void_p]
+lib.CFRelease(matching_service)
+
+lib.notify_register_file_descriptor.argtypes = [
+    ctypes.c_char_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+    ctypes.POINTER(ctypes.c_int),
+]
+lib.notify_register_file_descriptor.restype = ctypes.c_uint32
+lib.notify_cancel.argtypes = [ctypes.c_int]
+lib.notify_cancel.restype = ctypes.c_uint32
+lib.notify_is_valid_token.argtypes = [ctypes.c_int]
+lib.notify_is_valid_token.restype = ctypes.c_int
+notify_fd = ctypes.c_int(42)
+notify_token = ctypes.c_int(42)
+assert lib.notify_register_file_descriptor(
+    b'org.machgate.unsupported', ctypes.byref(notify_fd), 0,
+    ctypes.byref(notify_token)
+) == 1000000
+assert notify_fd.value == -1
+assert notify_token.value == -1
+assert lib.notify_cancel(notify_token.value) == 2
+assert lib.notify_is_valid_token(notify_token.value) == 0
+
+class MachTimespec(ctypes.Structure):
+    _fields_ = [('tv_sec', ctypes.c_uint32), ('tv_nsec', ctypes.c_int32)]
+
+lib.semaphore_create.argtypes = [
+    ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,
+    ctypes.c_int,
+]
+lib.semaphore_create.restype = ctypes.c_int32
+lib.semaphore_destroy.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+lib.semaphore_destroy.restype = ctypes.c_int32
+lib.semaphore_signal.argtypes = [ctypes.c_uint32]
+lib.semaphore_signal.restype = ctypes.c_int32
+lib.semaphore_wait.argtypes = [ctypes.c_uint32]
+lib.semaphore_wait.restype = ctypes.c_int32
+lib.semaphore_timedwait.argtypes = [ctypes.c_uint32, MachTimespec]
+lib.semaphore_timedwait.restype = ctypes.c_int32
+mach_semaphore = ctypes.c_uint32()
+assert lib.semaphore_create(0, ctypes.byref(mach_semaphore), 0, 0) == 0
+assert mach_semaphore.value != 0
+assert lib.semaphore_timedwait(mach_semaphore, MachTimespec(0, 0)) == 49
+assert lib.semaphore_signal(mach_semaphore) == 0
+assert lib.semaphore_wait(mach_semaphore) == 0
+assert lib.semaphore_destroy(0, mach_semaphore) == 0
+assert lib.semaphore_signal(mach_semaphore) == 4
 
 lib.getenv.argtypes = [ctypes.c_char_p]
 lib.getenv.restype = ctypes.c_char_p
 expected_home = os.environ['HOME'].encode()
 assert lib.getenv(b'HOME') == expected_home, 'getenv changed HOME instead of preserving the guest environment'
 
-# mach_absolute_time should return a nonzero nanosecond timestamp
-lib.mach_absolute_time.restype = ctypes.c_uint64
-t1 = lib.mach_absolute_time()
-t2 = lib.mach_absolute_time()
-assert t1 > 0, f'mach_absolute_time returned 0'
-assert t2 >= t1, f'mach_absolute_time went backwards: {t2} < {t1}'
+cf_null = ctypes.c_void_p.in_dll(lib, 'kCFNull')
+assert cf_null.value, 'kCFNull was not initialized'
+lib.CFStringCreateWithCStringNoCopy.argtypes = [
+    ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_void_p
+]
+lib.CFStringCreateWithCStringNoCopy.restype = ctypes.c_void_p
+no_copy_string = lib.CFStringCreateWithCStringNoCopy(
+    None, b'clean-room', 0, None
+)
+assert ctypes.string_at(no_copy_string) == b'clean-room'
 
-# mach_timebase_info should return {1, 1}
+random_bytes = (ctypes.c_uint8 * 16)()
+lib.SecRandomCopyBytes.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+assert lib.SecRandomCopyBytes(None, len(random_bytes), random_bytes) == 0
+assert any(random_bytes), 'SecRandomCopyBytes returned an all-zero sample'
+trust_certificates = ctypes.c_void_p(1)
+lib.SecTrustSettingsCopyCertificates.argtypes = [
+    ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)
+]
+assert lib.SecTrustSettingsCopyCertificates(
+    0, ctypes.byref(trust_certificates)
+) == -25300
+assert trust_certificates.value is None
+
+lib.mach_absolute_time.restype = ctypes.c_uint64
+absolute_time_samples = [lib.mach_absolute_time() for _ in range(2)]
+assert absolute_time_samples[0] != 0, 'absolute time must be nonzero'
+assert absolute_time_samples == sorted(absolute_time_samples), (
+    f'absolute time was not monotonic: {absolute_time_samples}'
+)
+
 class TimebaseInfo(ctypes.Structure):
     _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
-info = TimebaseInfo()
-lib.mach_timebase_info(ctypes.byref(info))
-assert info.numer == 1, f'timebase numer={info.numer}, expected 1'
-assert info.denom == 1, f'timebase denom={info.denom}, expected 1'
+
+timebase = TimebaseInfo()
+assert lib.mach_timebase_info(ctypes.byref(timebase)) == 0
+assert (timebase.numer, timebase.denom) == (1, 1), (
+    f'unexpected timebase: {(timebase.numer, timebase.denom)}'
+)
+assert lib.mach_timebase_info(None) == 4, 'null timebase output was not rejected'
+
+lib.clock_gettime_nsec_np.argtypes = [ctypes.c_int]
+lib.clock_gettime_nsec_np.restype = ctypes.c_uint64
+realtime_ns = lib.clock_gettime_nsec_np(0)
+expected_realtime_ns = time.time_ns()
+assert abs(realtime_ns - expected_realtime_ns) < 5_000_000_000, (
+    f'realtime clock differs by too much: {realtime_ns} vs {expected_realtime_ns}'
+)
+process_ns = lib.clock_gettime_nsec_np(12)
+thread_ns = lib.clock_gettime_nsec_np(16)
+assert process_ns > 0, 'process CPU clock returned zero'
+assert thread_ns > 0, 'thread CPU clock returned zero'
+
+lib.task_info.restype = ctypes.c_int
+assert lib.task_info(0, 0, None, None) == 46, 'unsupported task_info did not fail explicitly'
+lib.task_policy_set.argtypes = [
+    ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_int32),
+    ctypes.c_uint32,
+]
+lib.task_policy_set.restype = ctypes.c_int32
+task_self = ctypes.c_uint32.in_dll(lib, 'mach_task_self_').value
+default_application = ctypes.c_int32(7)
+assert lib.task_policy_set(
+    task_self, 1, ctypes.byref(default_application), 1
+) == 46, 'unsupported task category policy reported success'
+assert lib.task_policy_set(
+    task_self, 1, None, 1
+) == 4, 'null task category policy was not rejected'
+assert lib.task_policy_set(
+    task_self, 1, ctypes.byref(default_application), 0
+) == 4, 'invalid task category policy count was not rejected'
+assert lib.task_policy_set(
+    task_self + 1, 1, ctypes.byref(default_application), 1
+) == 4, 'non-current task policy was not rejected'
+lib.mach_msg.restype = ctypes.c_int
+assert lib.mach_msg(None, 1, 0, 0, 0, 0, 0) == 0x10000003, (
+    'unsupported Mach send did not report an invalid destination'
+)
+assert lib.mach_msg(None, 2, 0, 0, 0, 0, 0) == 0x10004002, (
+    'unsupported Mach receive did not report an invalid receive name'
+)
+lib.mach_port_deallocate.restype = ctypes.c_int
+assert lib.mach_port_deallocate(0, 0) == 46, (
+    'unsupported port deallocation did not fail explicitly'
+)
 
 # __error should return a valid pointer (errno location)
 lib.__error.restype = ctypes.POINTER(ctypes.c_int)
 p = lib.__error()
 assert p, '__error returned NULL'
+
+lib.sysctlbyname.argtypes = [
+    ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+    ctypes.c_void_p, ctypes.c_size_t,
+]
+lib.sysctlbyname.restype = ctypes.c_int
+lib.sysctl.argtypes = [
+    ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+]
+lib.sysctl.restype = ctypes.c_int
+lib.sysctlnametomib.argtypes = [
+    ctypes.c_char_p, ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_size_t),
+]
+lib.sysctlnametomib.restype = ctypes.c_int
+
+cpu_size = ctypes.c_size_t()
+assert lib.sysctlbyname(b'hw.ncpu', None, ctypes.byref(cpu_size), None, 0) == 0
+assert cpu_size.value == ctypes.sizeof(ctypes.c_int)
+cpu_count = ctypes.c_int()
+assert lib.sysctlbyname(
+    b'hw.ncpu', ctypes.byref(cpu_count), ctypes.byref(cpu_size), None, 0
+) == 0
+assert cpu_count.value >= 1, f'hw.ncpu returned {cpu_count.value}'
+
+page_size = ctypes.c_int()
+page_size_length = ctypes.c_size_t(ctypes.sizeof(page_size))
+assert lib.sysctlbyname(
+    b'hw.pagesize', ctypes.byref(page_size), ctypes.byref(page_size_length), None, 0
+) == 0
+assert page_size.value >= 4096, f'hw.pagesize returned {page_size.value}'
+
+memory_size_buffer = ctypes.create_string_buffer(1)
+memory_size_length = ctypes.c_size_t(1)
+p.contents.value = 0
+assert lib.sysctlbyname(
+    b'hw.memsize', memory_size_buffer, ctypes.byref(memory_size_length), None, 0
+) == -1
+assert p.contents.value == host_errno.ENOMEM
+assert memory_size_length.value == ctypes.sizeof(ctypes.c_uint64)
+
+p.contents.value = 0
+unknown_length = ctypes.c_size_t()
+assert lib.sysctlbyname(
+    b'machgate.unknown', None, ctypes.byref(unknown_length), None, 0
+) == -1
+assert p.contents.value == host_errno.ENOENT
+
+mib = (ctypes.c_int * 2)()
+mib_length = ctypes.c_size_t(2)
+assert lib.sysctlnametomib(b'hw.ncpu', mib, ctypes.byref(mib_length)) == 0
+assert list(mib) == [6, 3]
+assert mib_length.value == 2
+
+short_mib_length = ctypes.c_size_t(1)
+p.contents.value = 0
+assert lib.sysctlnametomib(
+    b'hw.ncpu', mib, ctypes.byref(short_mib_length)
+) == -1
+assert p.contents.value == host_errno.ENOMEM
+assert short_mib_length.value == 2
+
+mib_cpu_count = ctypes.c_int()
+mib_cpu_size = ctypes.c_size_t(ctypes.sizeof(mib_cpu_count))
+assert lib.sysctl(
+    mib, 2, ctypes.byref(mib_cpu_count), ctypes.byref(mib_cpu_size), None, 0
+) == 0
+assert mib_cpu_count.value == cpu_count.value
+
+uname_buffer = ctypes.create_string_buffer(256 * 5)
+lib.uname.argtypes = [ctypes.c_void_p]
+lib.uname.restype = ctypes.c_int
+assert lib.uname(uname_buffer) == 0
+uname_fields = [
+    uname_buffer.raw[offset:offset + 256].split(b'\0', 1)[0]
+    for offset in range(0, 256 * 5, 256)
+]
+assert uname_fields[0] == b'Darwin'
+assert uname_fields[1], 'uname returned an empty host name'
+assert uname_fields[2] == b'24.6.0'
+assert b'MachGate' in uname_fields[3]
+assert uname_fields[4] == b'arm64'
+
+class FileTimespec(ctypes.Structure):
+    _fields_ = [('seconds', ctypes.c_long), ('nanoseconds', ctypes.c_long)]
+
+class DarwinFileStatus(ctypes.Structure):
+    _fields_ = [
+        ('device', ctypes.c_int32),
+        ('mode', ctypes.c_uint16),
+        ('link_count', ctypes.c_uint16),
+        ('inode', ctypes.c_uint64),
+        ('user_id', ctypes.c_uint32),
+        ('group_id', ctypes.c_uint32),
+        ('special_device', ctypes.c_int32),
+        ('alignment_padding', ctypes.c_int32),
+        ('access_time', FileTimespec),
+        ('modification_time', FileTimespec),
+        ('status_change_time', FileTimespec),
+        ('creation_time', FileTimespec),
+        ('byte_size', ctypes.c_int64),
+        ('allocated_blocks', ctypes.c_int64),
+        ('preferred_block_size', ctypes.c_int32),
+        ('flags', ctypes.c_uint32),
+        ('generation', ctypes.c_uint32),
+        ('reserved', ctypes.c_int32),
+        ('extended_reserved', ctypes.c_int64 * 2),
+    ]
+
+assert ctypes.sizeof(DarwinFileStatus) == 144
+assert DarwinFileStatus.mode.offset == 4
+assert DarwinFileStatus.inode.offset == 8
+assert DarwinFileStatus.access_time.offset == 32
+assert DarwinFileStatus.byte_size.offset == 96
+assert DarwinFileStatus.extended_reserved.offset == 128
+
+lib.stat.argtypes = [ctypes.c_char_p, ctypes.POINTER(DarwinFileStatus)]
+lib.stat.restype = ctypes.c_int
+lib.fstat.argtypes = [ctypes.c_int, ctypes.POINTER(DarwinFileStatus)]
+lib.fstat.restype = ctypes.c_int
+lib.lstat.argtypes = [ctypes.c_char_p, ctypes.POINTER(DarwinFileStatus)]
+lib.lstat.restype = ctypes.c_int
+lib.fstatat.argtypes = [
+    ctypes.c_int, ctypes.c_char_p, ctypes.POINTER(DarwinFileStatus), ctypes.c_int,
+]
+lib.fstatat.restype = ctypes.c_int
+
+with tempfile.TemporaryDirectory() as metadata_directory:
+    file_path = os.path.join(metadata_directory, 'entry.txt')
+    link_path = os.path.join(metadata_directory, 'entry-link')
+    payload = b'machgate-metadata'
+    with open(file_path, 'wb') as metadata_file:
+        metadata_file.write(payload)
+    os.symlink('entry.txt', link_path)
+
+    file_status = DarwinFileStatus()
+    assert lib.stat(file_path.encode(), ctypes.byref(file_status)) == 0
+    assert file_status.byte_size == len(payload)
+    assert file_status.mode & 0o170000 == 0o100000
+    assert file_status.link_count >= 1
+    assert file_status.user_id == os.getuid()
+    assert file_status.group_id == os.getgid()
+    assert file_status.alignment_padding == 0
+    assert file_status.flags == 0
+    assert file_status.generation == 0
+    assert file_status.reserved == 0
+    assert list(file_status.extended_reserved) == [0, 0]
+
+    descriptor = os.open(file_path, os.O_RDONLY)
+    try:
+        descriptor_status = DarwinFileStatus()
+        assert lib.fstat(descriptor, ctypes.byref(descriptor_status)) == 0
+        assert descriptor_status.inode == file_status.inode
+        assert descriptor_status.byte_size == file_status.byte_size
+    finally:
+        os.close(descriptor)
+
+    followed_status = DarwinFileStatus()
+    link_status = DarwinFileStatus()
+    assert lib.stat(link_path.encode(), ctypes.byref(followed_status)) == 0
+    assert lib.lstat(link_path.encode(), ctypes.byref(link_status)) == 0
+    assert followed_status.mode & 0o170000 == 0o100000
+    assert link_status.mode & 0o170000 == 0o120000
+
+    fstatat_status = DarwinFileStatus()
+    assert lib.fstatat(
+        -2, link_path.encode(), ctypes.byref(fstatat_status), 0x0020
+    ) == 0
+    assert fstatat_status.mode & 0o170000 == 0o120000
+
+    p.contents.value = 0
+    assert lib.stat(
+        os.path.join(metadata_directory, 'missing').encode(),
+        ctypes.byref(DarwinFileStatus()),
+    ) == -1
+    assert p.contents.value == host_errno.ENOENT
+
+    p.contents.value = 0
+    assert lib.stat(file_path.encode(), None) == -1
+    assert p.contents.value == host_errno.EFAULT
+
+    class DarwinDirectoryEntry(ctypes.Structure):
+        _fields_ = [
+            ('inode', ctypes.c_uint64),
+            ('seek_offset', ctypes.c_uint64),
+            ('record_length', ctypes.c_uint16),
+            ('name_length', ctypes.c_uint16),
+            ('type', ctypes.c_uint8),
+            ('name', ctypes.c_char * 1024),
+            ('alignment_padding', ctypes.c_char * 3),
+        ]
+
+    assert ctypes.sizeof(DarwinDirectoryEntry) == 1048
+    assert DarwinDirectoryEntry.record_length.offset == 16
+    assert DarwinDirectoryEntry.type.offset == 20
+    assert DarwinDirectoryEntry.name.offset == 21
+
+    directory_libc = ctypes.CDLL('libc.so.6')
+    directory_libc.opendir.argtypes = [ctypes.c_char_p]
+    directory_libc.opendir.restype = ctypes.c_void_p
+    directory_libc.closedir.argtypes = [ctypes.c_void_p]
+    directory_libc.closedir.restype = ctypes.c_int
+    lib.readdir.argtypes = [ctypes.c_void_p]
+    lib.readdir.restype = ctypes.POINTER(DarwinDirectoryEntry)
+    lib.readdir_r.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(DarwinDirectoryEntry),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.readdir_r.restype = ctypes.c_int
+
+    directory = directory_libc.opendir(metadata_directory.encode())
+    assert directory
+    try:
+        observed_entry = None
+        while True:
+            entry_pointer = lib.readdir(directory)
+            if not entry_pointer:
+                break
+            entry = entry_pointer.contents
+            if bytes(entry.name) == b'entry.txt':
+                observed_entry = entry
+                break
+        assert observed_entry is not None, 'readdir omitted the fixture entry'
+        assert observed_entry.name_length == len(b'entry.txt')
+        expected_record_length = (25 + len(b'entry.txt') + 7) & ~7
+        assert observed_entry.record_length == expected_record_length
+        assert observed_entry.type == 8
+    finally:
+        assert directory_libc.closedir(directory) == 0
+
+    directory = directory_libc.opendir(metadata_directory.encode())
+    assert directory
+    try:
+        reentrant_entry = DarwinDirectoryEntry()
+        reentrant_result = ctypes.c_void_p()
+        while True:
+            reentrant_status = lib.readdir_r(
+                directory, ctypes.byref(reentrant_entry), ctypes.byref(reentrant_result)
+            )
+            assert reentrant_status == 0
+            if not reentrant_result.value:
+                break
+            if bytes(reentrant_entry.name) == b'entry-link':
+                break
+        assert reentrant_result.value
+        assert reentrant_entry.type == 10
+        assert lib.readdir_r(directory, None, ctypes.byref(reentrant_result)) == host_errno.EINVAL
+    finally:
+        assert directory_libc.closedir(directory) == 0
+
+lib.open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint]
+lib.open.restype = ctypes.c_int
+lib.openat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint]
+lib.openat.restype = ctypes.c_int
+lib.close.argtypes = [ctypes.c_int]
+lib.close.restype = ctypes.c_int
+lib.machgate_darwin_fcntl_fixed.argtypes = [
+    ctypes.c_int, ctypes.c_int, ctypes.c_ulong,
+]
+lib.machgate_darwin_fcntl_fixed.restype = ctypes.c_int
+lib.machgate_darwin_ioctl_fixed.argtypes = [
+    ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+]
+lib.machgate_darwin_ioctl_fixed.restype = ctypes.c_int
+lib.renameatx_np.argtypes = [
+    ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+]
+lib.renameatx_np.restype = ctypes.c_int
+lib.dup.argtypes = [ctypes.c_int]
+lib.dup.restype = ctypes.c_int
+lib.pipe.argtypes = [ctypes.POINTER(ctypes.c_int)]
+lib.pipe.restype = ctypes.c_int
+lib.pipe2.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+lib.pipe2.restype = ctypes.c_int
+
+DARWIN_O_RDWR = 0x00000002
+DARWIN_O_NONBLOCK = 0x00000004
+DARWIN_O_APPEND = 0x00000008
+DARWIN_O_CREAT = 0x00000200
+DARWIN_O_TRUNC = 0x00000400
+DARWIN_O_CLOEXEC = 0x01000000
+DARWIN_F_GETFL = 3
+DARWIN_F_SETFL = 4
+DARWIN_F_GETPATH = 50
+DARWIN_F_DUPFD_CLOEXEC = 67
+
+with tempfile.TemporaryDirectory() as file_operation_directory:
+    first_path = os.path.join(file_operation_directory, 'created.txt')
+    second_path = os.path.join(file_operation_directory, 'renamed.txt')
+    descriptor = lib.open(
+        first_path.encode(), DARWIN_O_RDWR | DARWIN_O_CREAT | DARWIN_O_TRUNC,
+        0o640,
+    )
+    assert descriptor >= 0
+    try:
+        assert os.write(descriptor, b'file-abi') == len(b'file-abi')
+        open_flags = lib.machgate_darwin_fcntl_fixed(
+            descriptor, DARWIN_F_GETFL, 0
+        )
+        assert open_flags & 0x3 == DARWIN_O_RDWR
+        assert lib.machgate_darwin_fcntl_fixed(
+            descriptor, DARWIN_F_SETFL, DARWIN_O_RDWR | DARWIN_O_APPEND
+        ) == 0
+        assert lib.machgate_darwin_fcntl_fixed(
+            descriptor, DARWIN_F_GETFL, 0
+        ) & DARWIN_O_APPEND
+
+        descriptor_path = ctypes.create_string_buffer(1024)
+        assert lib.machgate_darwin_fcntl_fixed(
+            descriptor, DARWIN_F_GETPATH, ctypes.addressof(descriptor_path)
+        ) == 0
+        assert descriptor_path.value.decode() == first_path
+
+        cloexec_duplicate = lib.machgate_darwin_fcntl_fixed(
+            descriptor, DARWIN_F_DUPFD_CLOEXEC, 0
+        )
+        assert cloexec_duplicate >= 0
+        assert host_fcntl.fcntl(
+            cloexec_duplicate, host_fcntl.F_GETFD
+        ) & host_fcntl.FD_CLOEXEC
+        assert lib.close(cloexec_duplicate) == 0
+    finally:
+        assert lib.close(descriptor) == 0
+
+    openat_descriptor = lib.openat(
+        -2, second_path.encode(), DARWIN_O_RDWR | DARWIN_O_CREAT, 0o600
+    )
+    assert openat_descriptor >= 0
+    assert lib.close(openat_descriptor) == 0
+    assert lib.renameatx_np(-2, second_path.encode(), -2, first_path.encode(), 0) == 0
+    p.contents.value = 0
+    assert lib.renameatx_np(
+        -2, first_path.encode(), -2, second_path.encode(), 0x80
+    ) == -1
+    assert p.contents.value == host_errno.ENOTSUP
+
+pipe_descriptors = (ctypes.c_int * 2)()
+assert lib.pipe(pipe_descriptors) == 0
+try:
+    assert os.write(pipe_descriptors[1], b'abc') == 3
+    readable_bytes = ctypes.c_int()
+    assert lib.machgate_darwin_ioctl_fixed(
+        pipe_descriptors[0], 0x4004667f, ctypes.addressof(readable_bytes)
+    ) == 0
+    assert readable_bytes.value == 3
+    duplicated_pipe = lib.dup(pipe_descriptors[0])
+    assert duplicated_pipe >= 0
+    assert lib.close(duplicated_pipe) == 0
+    p.contents.value = 0
+    assert lib.machgate_darwin_ioctl_fixed(
+        pipe_descriptors[0], 0x12345678, 0
+    ) == -1
+    assert p.contents.value == host_errno.ENOSYS
+finally:
+    assert lib.close(pipe_descriptors[0]) == 0
+    assert lib.close(pipe_descriptors[1]) == 0
+
+pipe2_descriptors = (ctypes.c_int * 2)()
+assert lib.pipe2(
+    pipe2_descriptors, DARWIN_O_NONBLOCK | DARWIN_O_CLOEXEC
+) == 0
+try:
+    for pipe_descriptor in pipe2_descriptors:
+        assert host_fcntl.fcntl(
+            pipe_descriptor, host_fcntl.F_GETFD
+        ) & host_fcntl.FD_CLOEXEC
+        assert host_fcntl.fcntl(
+            pipe_descriptor, host_fcntl.F_GETFL
+        ) & os.O_NONBLOCK
+finally:
+    assert lib.close(pipe2_descriptors[0]) == 0
+    assert lib.close(pipe2_descriptors[1]) == 0
+
+class TlvDescriptor(ctypes.Structure):
+    _fields_ = [
+        ('resolver', ctypes.c_void_p),
+        ('key', ctypes.c_size_t),
+        ('offset', ctypes.c_size_t),
+    ]
+
+lib._tlv_bootstrap_impl.argtypes = [ctypes.POINTER(TlvDescriptor)]
+lib._tlv_bootstrap_impl.restype = ctypes.c_void_p
+lib._tlv_bootstrap.argtypes = [ctypes.POINTER(TlvDescriptor)]
+lib._tlv_bootstrap.restype = ctypes.c_void_p
+tlv_image_base = ctypes.c_void_p.in_dll(lib, '__tlv_image_base')
+tlv_image_size = ctypes.c_size_t.in_dll(lib, '__tlv_image_size')
+tlv_bss_size = ctypes.c_size_t.in_dll(lib, '__tlv_bss_size')
+tlv_initial_bytes = (ctypes.c_uint8 * 4)(1, 2, 3, 4)
+tlv_image_base.value = ctypes.addressof(tlv_initial_bytes)
+tlv_image_size.value = len(tlv_initial_bytes)
+tlv_bss_size.value = 4
+
+tlv_descriptor = TlvDescriptor(None, 0, 2)
+main_tlv_address = lib._tlv_bootstrap_impl(ctypes.byref(tlv_descriptor))
+assert main_tlv_address
+assert tlv_descriptor.key != 0
+assert list((ctypes.c_uint8 * 6).from_address(main_tlv_address)) == [3, 4, 0, 0, 0, 0]
+assert lib._tlv_bootstrap(ctypes.byref(tlv_descriptor)) == main_tlv_address
+(ctypes.c_uint8 * 1).from_address(main_tlv_address)[0] = 99
+
+thread_tlv_results = []
+
+def read_thread_local_image():
+    address = lib._tlv_bootstrap(ctypes.byref(tlv_descriptor))
+    thread_tlv_results.append((
+        address,
+        list((ctypes.c_uint8 * 6).from_address(address)),
+    ))
+
+tlv_thread = threading.Thread(target=read_thread_local_image)
+tlv_thread.start()
+tlv_thread.join(1.0)
+assert not tlv_thread.is_alive(), 'TLV worker did not finish'
+assert len(thread_tlv_results) == 1
+assert thread_tlv_results[0][0] != main_tlv_address
+assert thread_tlv_results[0][1] == [3, 4, 0, 0, 0, 0]
+
+large_offset_descriptor = TlvDescriptor(None, 0, 5000)
+large_offset_address = lib._tlv_bootstrap_impl(
+    ctypes.byref(large_offset_descriptor)
+)
+assert large_offset_address
+assert ctypes.c_uint8.from_address(large_offset_address).value == 0
+
+p.contents.value = 0
+assert not lib._tlv_bootstrap_impl(None)
+assert p.contents.value == host_errno.EINVAL
+
+lib.dispatch_semaphore_create.argtypes = [ctypes.c_long]
+lib.dispatch_semaphore_create.restype = ctypes.c_void_p
+lib.dispatch_semaphore_wait.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+lib.dispatch_semaphore_wait.restype = ctypes.c_long
+lib.dispatch_semaphore_signal.argtypes = [ctypes.c_void_p]
+lib.dispatch_semaphore_signal.restype = ctypes.c_long
+lib.dispatch_time.argtypes = [ctypes.c_uint64, ctypes.c_int64]
+lib.dispatch_time.restype = ctypes.c_uint64
+lib.dispatch_walltime.argtypes = [ctypes.POINTER(FileTimespec), ctypes.c_int64]
+lib.dispatch_walltime.restype = ctypes.c_uint64
+lib.dispatch_retain.argtypes = [ctypes.c_void_p]
+lib.dispatch_release.argtypes = [ctypes.c_void_p]
+
+dispatch_semaphore = lib.dispatch_semaphore_create(0)
+assert dispatch_semaphore
+assert lib.dispatch_semaphore_wait(dispatch_semaphore, 0) != 0
+assert lib.dispatch_semaphore_signal(dispatch_semaphore) == 0
+assert lib.dispatch_semaphore_wait(dispatch_semaphore, 0) == 0
+expired_dispatch_deadline = lib.dispatch_time(0, 1_000_000)
+assert expired_dispatch_deadline > 0
+assert lib.dispatch_semaphore_wait(
+    dispatch_semaphore, expired_dispatch_deadline
+) != 0
+
+def signal_dispatch_semaphore():
+    time.sleep(0.01)
+    assert lib.dispatch_semaphore_signal(dispatch_semaphore) == 0
+
+dispatch_signaler = threading.Thread(target=signal_dispatch_semaphore)
+dispatch_signaler.start()
+assert lib.dispatch_semaphore_wait(dispatch_semaphore, 0xffffffffffffffff) == 0
+dispatch_signaler.join(1.0)
+assert not dispatch_signaler.is_alive()
+lib.dispatch_retain(dispatch_semaphore)
+lib.dispatch_release(dispatch_semaphore)
+lib.dispatch_release(dispatch_semaphore)
+
+lib.dispatch_get_global_queue.argtypes = [ctypes.c_long, ctypes.c_ulong]
+lib.dispatch_get_global_queue.restype = ctypes.c_void_p
+lib.dispatch_queue_create.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+lib.dispatch_queue_create.restype = ctypes.c_void_p
+dispatch_global_queue = lib.dispatch_get_global_queue(0, 0)
+assert dispatch_global_queue
+dispatch_queue = lib.dispatch_queue_create(b'machgate.test.queue', None)
+assert dispatch_queue
+
+BLOCK_INVOKE = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+
+class DispatchBlock(ctypes.Structure):
+    _fields_ = [
+        ('isa', ctypes.c_void_p),
+        ('flags', ctypes.c_uint32),
+        ('reserved', ctypes.c_uint32),
+        ('invoke', BLOCK_INVOKE),
+        ('descriptor', ctypes.c_void_p),
+    ]
+
+block_invocations = ctypes.c_int()
+
+@BLOCK_INVOKE
+def count_block_invocation(block_pointer):
+    block_invocations.value += 1
+
+dispatch_block = DispatchBlock(None, 0, 0, count_block_invocation, None)
+lib.dispatch_sync.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+lib.dispatch_async.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+lib.dispatch_sync(dispatch_queue, ctypes.byref(dispatch_block))
+lib.dispatch_async(dispatch_queue, ctypes.byref(dispatch_block))
+assert block_invocations.value == 2
+
+DISPATCH_FUNCTION = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+once_invocations = ctypes.c_int()
+
+@DISPATCH_FUNCTION
+def count_once_invocation(context):
+    time.sleep(0.005)
+    once_invocations.value += 1
+
+lib.dispatch_once_f.argtypes = [
+    ctypes.POINTER(ctypes.c_long), ctypes.c_void_p, DISPATCH_FUNCTION,
+]
+once_predicate = ctypes.c_long()
+once_threads = [
+    threading.Thread(
+        target=lambda: lib.dispatch_once_f(
+            ctypes.byref(once_predicate), None, count_once_invocation
+        )
+    )
+    for _ in range(8)
+]
+for once_thread in once_threads:
+    once_thread.start()
+for once_thread in once_threads:
+    once_thread.join(1.0)
+assert all(not once_thread.is_alive() for once_thread in once_threads)
+assert once_invocations.value == 1
+assert once_predicate.value == -1
+
+lib.dispatch_data_create.argtypes = [
+    ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p,
+]
+lib.dispatch_data_create.restype = ctypes.c_void_p
+dispatch_data_bytes = ctypes.create_string_buffer(b'data')
+dispatch_data = lib.dispatch_data_create(
+    dispatch_data_bytes, 4, dispatch_queue, None
+)
+assert dispatch_data
+lib.dispatch_release(dispatch_data)
+
+lib.dispatch_source_create.argtypes = [
+    ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_void_p,
+]
+lib.dispatch_source_create.restype = ctypes.c_void_p
+p.contents.value = 0
+mach_receive_source_type = ctypes.c_int.in_dll(
+    lib, '_dispatch_source_type_mach_recv'
+)
+assert not lib.dispatch_source_create(
+    ctypes.byref(mach_receive_source_type), 0, 0, dispatch_queue
+)
+assert p.contents.value == host_errno.ENOTSUP
+
+assert lib.dispatch_walltime(None, 0) > 0
+lib.dispatch_release(dispatch_queue)
+lib.dispatch_release(dispatch_global_queue)
 
 lib.__cxa_guard_acquire.argtypes = [ctypes.POINTER(ctypes.c_uint64)]
 lib.__cxa_guard_acquire.restype = ctypes.c_int
@@ -98,6 +828,78 @@ assert lib.__cxa_guard_acquire(ctypes.byref(abort_guard)) == 1, '__cxa_guard_acq
 lib.__cxa_guard_abort(ctypes.byref(abort_guard))
 assert lib.__cxa_guard_acquire(ctypes.byref(abort_guard)) == 1, '__cxa_guard_abort did not reset pending state'
 lib.__cxa_guard_release(ctypes.byref(abort_guard))
+
+assert_script = f'''
+import ctypes, os
+lib = ctypes.CDLL(os.path.join({build_dir!r}, \"libsystem_shim.so\"))
+lib.__assert_rtn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p]
+lib.__assert_rtn(b\"test_fn\", b\"fixture.c\", 37, b\"value != 0\")
+'''
+assert_result = subprocess.run(
+    [sys.executable, '-c', assert_script], capture_output=True, text=True
+)
+assert assert_result.returncode == -signal.SIGABRT, (
+    f'__assert_rtn returned {assert_result.returncode}, expected SIGABRT'
+)
+for token in ['test_fn', 'fixture.c', '37', 'value != 0']:
+    assert token in assert_result.stderr, (
+        f'__assert_rtn diagnostic omitted {token!r}: {assert_result.stderr!r}'
+    )
+
+null_assert_script = f'''
+import ctypes, os
+lib = ctypes.CDLL(os.path.join({build_dir!r}, \"libsystem_shim.so\"))
+lib.__assert_rtn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p]
+lib.__assert_rtn(None, b\"null.c\", 9, b\"failed\")
+'''
+null_assert_result = subprocess.run(
+    [sys.executable, '-c', null_assert_script], capture_output=True, text=True
+)
+assert null_assert_result.returncode == -signal.SIGABRT, (
+    f'null-function __assert_rtn returned {null_assert_result.returncode}'
+)
+for token in ['<unknown>', 'null.c', '9', 'failed']:
+    assert token in null_assert_result.stderr, (
+        f'null-function diagnostic omitted {token!r}: {null_assert_result.stderr!r}'
+    )
+
+UNWIND_TRACE = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+unwind_frames = []
+
+@UNWIND_TRACE
+def record_unwind_frame(context, argument):
+    unwind_frames.append(context)
+    return 0
+
+lib._Unwind_Backtrace.argtypes = [UNWIND_TRACE, ctypes.c_void_p]
+lib._Unwind_Backtrace.restype = ctypes.c_int
+unwind_result = lib._Unwind_Backtrace(record_unwind_frame, None)
+assert unwind_frames, '_Unwind_Backtrace did not visit a stack frame'
+assert unwind_result != 3, '_Unwind_Backtrace reported fatal phase-one failure'
+for unwind_symbol in (
+    '_Unwind_DeleteException',
+    '_Unwind_GetCFA',
+    '_Unwind_GetDataRelBase',
+    '_Unwind_GetIP',
+    '_Unwind_GetIPInfo',
+    '_Unwind_GetLanguageSpecificData',
+    '_Unwind_GetRegionStart',
+    '_Unwind_GetTextRelBase',
+    '_Unwind_RaiseException',
+    '_Unwind_Resume',
+    '_Unwind_SetGR',
+    '_Unwind_SetIP',
+):
+    assert hasattr(lib, unwind_symbol), f'missing standard unwind adapter: {unwind_symbol}'
+
+lib.vfork.restype = ctypes.c_int
+vfork_child = lib.vfork()
+if vfork_child == 0:
+    os._exit(0)
+assert vfork_child > 0, f'vfork compatibility call failed: {vfork_child}'
+waited_child, wait_status = os.waitpid(vfork_child, 0)
+assert waited_child == vfork_child, 'vfork compatibility call returned wrong child'
+assert os.waitstatus_to_exitcode(wait_status) == 0, 'vfork child did not exit cleanly'
 
 pthread_t = ctypes.c_ulong
 PTHREAD_START = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)
@@ -152,39 +954,82 @@ assert lib.__ulock_wait2(
     ctypes.byref(ulock_word), 2, 0, 0
 ) == -35, '__ulock_wait2 did not return negative Darwin EAGAIN in no-errno mode'
 
-# __sincosf_stret should compute sin/cos correctly
-class Float2(ctypes.Structure):
-    _fields_ = [('sinval', ctypes.c_float), ('cosval', ctypes.c_float)]
-lib.__sincosf_stret.restype = Float2
-result = lib.__sincosf_stret(ctypes.c_float(0.0))
-assert abs(result.sinval - 0.0) < 1e-6, f'sin(0)={result.sinval}'
-assert abs(result.cosval - 1.0) < 1e-6, f'cos(0)={result.cosval}'
+class FloatPair(ctypes.Structure):
+    _fields_ = [('first', ctypes.c_float), ('second', ctypes.c_float)]
 
-# __exp10f
+lib.__sincosf_stret.restype = FloatPair
+zero_pair = lib.__sincosf_stret(ctypes.c_float())
+assert abs(zero_pair.first) < 1e-6
+assert abs(zero_pair.second - 1.0) < 1e-6
+
 lib.__exp10f.restype = ctypes.c_float
-val = lib.__exp10f(ctypes.c_float(2.0))
-assert abs(val - 100.0) < 0.01, f'__exp10f(2)={val}, expected 100'
+power_of_ten = lib.__exp10f(ctypes.c_float(2))
+assert abs(power_of_ten - 100) < 0.01, f'exp10 result={power_of_ten}'
 
-# _NSGetExecutablePath should return something via /proc/self/exe
-buf = ctypes.create_string_buffer(1024)
-bufsize = ctypes.c_uint32(1024)
-ret = lib._NSGetExecutablePath(buf, ctypes.byref(bufsize))
-assert ret == 0, f'_NSGetExecutablePath returned {ret}'
-path = buf.value.decode()
-assert len(path) > 0, '_NSGetExecutablePath returned empty path'
+executable_buffer = ctypes.create_string_buffer(1024)
+executable_capacity = ctypes.c_uint32(len(executable_buffer))
+path_result = lib._NSGetExecutablePath(
+    executable_buffer, ctypes.byref(executable_capacity)
+)
+assert path_result == 0, f'executable path result={path_result}'
+executable_path = executable_buffer.value.decode()
+assert executable_path, 'executable path was empty'
+small_path = ctypes.create_string_buffer(1)
+small_path_size = ctypes.c_uint32(1)
+assert lib._NSGetExecutablePath(
+    small_path, ctypes.byref(small_path_size)
+) == -1, '_NSGetExecutablePath accepted a short buffer'
+assert small_path_size.value == len(executable_path) + 1, (
+    f'_NSGetExecutablePath required size={small_path_size.value}'
+)
 
-# stdio globals should be non-null after constructor runs
-# (ctypes can't easily check FILE* globals, but we can check they exist)
-# Just verify the symbols exist
-assert hasattr(lib, '__stdinp'), 'missing __stdinp'
-assert hasattr(lib, '__stdoutp'), 'missing __stdoutp'
-assert hasattr(lib, '__stderrp'), 'missing __stderrp'
+lib._NSGetArgc.restype = ctypes.POINTER(ctypes.c_int)
+assert lib._NSGetArgc().contents.value == 0, 'fallback guest argc was not zero'
+lib.getprogname.restype = ctypes.c_char_p
+assert lib.getprogname() == b'machgate', 'fallback program name changed'
 
-# memset_pattern4
-buf = ctypes.create_string_buffer(16)
-pattern = (ctypes.c_uint8 * 4)(0xDE, 0xAD, 0xBE, 0xEF)
-lib.memset_pattern4(buf, pattern, 16)
-assert buf.raw == b'\\xDE\\xAD\\xBE\\xEF' * 4, f'memset_pattern4 failed: {buf.raw.hex()}'
+pid_path = ctypes.create_string_buffer(4096)
+lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+lib.proc_pidpath.restype = ctypes.c_int
+pid_path_length = lib.proc_pidpath(os.getpid(), pid_path, len(pid_path))
+assert pid_path_length > 0, 'proc_pidpath failed for the current process'
+assert pid_path_length == len(pid_path.value), 'proc_pidpath length mismatch'
+
+for stdio_symbol in ('__stdinp', '__stdoutp', '__stderrp'):
+    assert hasattr(lib, stdio_symbol), f'missing {stdio_symbol}'
+
+pattern4_bytes = bytes.fromhex('DE AD BE EF')
+pattern4_buffer = ctypes.create_string_buffer(16)
+pattern4 = (ctypes.c_uint8 * len(pattern4_bytes))(*pattern4_bytes)
+lib.memset_pattern4(pattern4_buffer, pattern4, len(pattern4_buffer))
+assert pattern4_buffer.raw == pattern4_bytes * 4, pattern4_buffer.raw.hex()
+
+pattern8_buffer = ctypes.create_string_buffer(19)
+pattern8 = (ctypes.c_uint8 * 8)(*range(8))
+lib.memset_pattern8(pattern8_buffer, pattern8, len(pattern8_buffer))
+assert pattern8_buffer.raw == bytes(range(8)) * 2 + bytes(range(3)), (
+    f'memset_pattern8 failed: {pattern8_buffer.raw.hex()}'
+)
+
+pattern16_buffer = ctypes.create_string_buffer(35)
+pattern16 = (ctypes.c_uint8 * 16)(*range(16))
+lib.memset_pattern16(pattern16_buffer, pattern16, len(pattern16_buffer))
+assert pattern16_buffer.raw == bytes(range(16)) * 2 + bytes(range(3)), (
+    f'memset_pattern16 failed: {pattern16_buffer.raw.hex()}'
+)
+
+lib.strlcpy.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+lib.strlcpy.restype = ctypes.c_size_t
+copy_buffer = ctypes.create_string_buffer(5)
+assert lib.strlcpy(copy_buffer, b'abcdef', len(copy_buffer)) == 6
+assert copy_buffer.value == b'abcd', f'strlcpy result={copy_buffer.value!r}'
+
+lib.strlcat.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+lib.strlcat.restype = ctypes.c_size_t
+append_buffer = ctypes.create_string_buffer(5)
+append_buffer.value = b'ab'
+assert lib.strlcat(append_buffer, b'cdef', len(append_buffer)) == 6
+assert append_buffer.value == b'abcd', f'strlcat result={append_buffer.value!r}'
 
 lib.posix_memalign.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t]
 lib.posix_memalign.restype = ctypes.c_int
@@ -609,6 +1454,55 @@ assert lib.pthread_mutex_unlock(ctypes.byref(mutex)) == 0, 'pthread_mutex_unlock
 assert lib.pthread_cond_destroy(ctypes.byref(cond)) == 0, 'pthread_cond_destroy failed'
 assert lib.pthread_mutex_destroy(ctypes.byref(mutex)) == 0, 'pthread_mutex_destroy failed'
 assert timedwait_result == 60, f'pthread_cond_timedwait returned {timedwait_result}, expected Darwin ETIMEDOUT 60'
+
+lib.pthread_mutex_trylock.argtypes = [ctypes.c_void_p]
+lib.pthread_cond_signal.argtypes = [ctypes.c_void_p]
+lib.pthread_rwlock_rdlock.argtypes = [ctypes.c_void_p]
+lib.pthread_rwlock_wrlock.argtypes = [ctypes.c_void_p]
+lib.pthread_rwlock_unlock.argtypes = [ctypes.c_void_p]
+
+recursive_mutex = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(recursive_mutex).value = 0x32AAABA2
+assert lib.pthread_mutex_lock(ctypes.byref(recursive_mutex)) == 0, 'static recursive mutex first lock failed'
+assert lib.pthread_mutex_lock(ctypes.byref(recursive_mutex)) == 0, 'static recursive mutex second lock failed'
+assert lib.pthread_mutex_unlock(ctypes.byref(recursive_mutex)) == 0, 'static recursive mutex first unlock failed'
+assert lib.pthread_mutex_unlock(ctypes.byref(recursive_mutex)) == 0, 'static recursive mutex second unlock failed'
+assert lib.pthread_mutex_destroy(ctypes.byref(recursive_mutex)) == 0, 'static recursive mutex destroy failed'
+
+error_check_mutex = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(error_check_mutex).value = 0x32AAABA1
+assert lib.pthread_mutex_lock(ctypes.byref(error_check_mutex)) == 0, 'static error-check mutex first lock failed'
+assert lib.pthread_mutex_lock(ctypes.byref(error_check_mutex)) == 11, 'static error-check mutex did not return Darwin EDEADLK'
+assert lib.pthread_mutex_unlock(ctypes.byref(error_check_mutex)) == 0, 'static error-check mutex unlock failed'
+assert lib.pthread_mutex_destroy(ctypes.byref(error_check_mutex)) == 0, 'static error-check mutex destroy failed'
+
+first_fit_mutex = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(first_fit_mutex).value = 0x32AAABA3
+assert lib.pthread_mutex_lock(ctypes.byref(first_fit_mutex)) == 0, 'static first-fit mutex lock failed'
+assert lib.pthread_mutex_unlock(ctypes.byref(first_fit_mutex)) == 0, 'static first-fit mutex unlock failed'
+assert lib.pthread_mutex_destroy(ctypes.byref(first_fit_mutex)) == 0, 'static first-fit mutex destroy failed'
+
+default_mutex = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(default_mutex).value = 0x32AAABA7
+assert lib.pthread_mutex_lock(ctypes.byref(default_mutex)) == 0, 'static default mutex lock failed'
+assert lib.pthread_mutex_trylock(ctypes.byref(default_mutex)) == 16, 'static default mutex did not return EBUSY'
+assert lib.pthread_mutex_unlock(ctypes.byref(default_mutex)) == 0, 'static default mutex unlock failed'
+assert lib.pthread_mutex_destroy(ctypes.byref(default_mutex)) == 0, 'static default mutex destroy failed'
+
+static_condition = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(static_condition).value = 0x3CB0B1BB
+assert lib.pthread_cond_signal(ctypes.byref(static_condition)) == 0, 'static condition signal failed'
+assert lib.pthread_cond_destroy(ctypes.byref(static_condition)) == 0, 'static condition destroy failed'
+
+static_read_lock = ctypes.create_string_buffer(256)
+ctypes.c_uint32.from_buffer(static_read_lock).value = 0x2DA8B3B4
+assert lib.pthread_rwlock_rdlock(ctypes.byref(static_read_lock)) == 0, 'static rwlock read lock failed'
+assert lib.pthread_rwlock_unlock(ctypes.byref(static_read_lock)) == 0, 'static rwlock read unlock failed'
+
+static_write_lock = ctypes.create_string_buffer(256)
+ctypes.c_uint32.from_buffer(static_write_lock).value = 0x2DA8B3B4
+assert lib.pthread_rwlock_wrlock(ctypes.byref(static_write_lock)) == 0, 'static rwlock write lock failed'
+assert lib.pthread_rwlock_unlock(ctypes.byref(static_write_lock)) == 0, 'static rwlock write unlock failed'
 
 GUEST_NEW = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
 GUEST_NEW_NOTHROW = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p)

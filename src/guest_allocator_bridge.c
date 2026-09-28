@@ -28,9 +28,9 @@ static allocator_setter_fn find_allocator_setter(void)
 	return (allocator_setter_fn)dlsym(shim, symbol_name);
 }
 
-static void* find_operator(struct load_results* loaded, const char* name)
+static void* find_operator(struct machgate_guest_image* image, const char* name)
 {
-	void* result = machgate_find_guest_definition(loaded, name);
+	void* result = machgate_find_guest_definition(image, name);
 	if (result || name[0] != '_')
 		return result;
 
@@ -40,38 +40,38 @@ static void* find_operator(struct load_results* loaded, const char* name)
 		return NULL;
 	macho_name[0] = '_';
 	memcpy(macho_name + 1, name, length + 1);
-	result = machgate_find_guest_definition(loaded, macho_name);
+	result = machgate_find_guest_definition(image, macho_name);
 	free(macho_name);
 	return result;
 }
 
-int machgate_configure_guest_allocator_bridge(struct load_results* loaded)
+int machgate_configure_guest_allocator_bridge(struct machgate_guest_image* image)
 {
 	allocator_setter_fn setter = find_allocator_setter();
 	if (!setter)
 		return 0;
 
 	void* operators[] = {
-		find_operator(loaded, "_Znwm"),
-		find_operator(loaded, "_Znam"),
-		find_operator(loaded, "_ZnwmSt11align_val_t"),
-		find_operator(loaded, "_ZnamSt11align_val_t"),
-		find_operator(loaded, "_ZdlPv"),
-		find_operator(loaded, "_ZdaPv"),
-		find_operator(loaded, "_ZdlPvm"),
-		find_operator(loaded, "_ZdaPvm"),
-		find_operator(loaded, "_ZdlPvSt11align_val_t"),
-		find_operator(loaded, "_ZdaPvSt11align_val_t"),
-		find_operator(loaded, "_ZdlPvmSt11align_val_t"),
-		find_operator(loaded, "_ZdaPvmSt11align_val_t"),
-		find_operator(loaded, "_ZnwmRKSt9nothrow_t"),
-		find_operator(loaded, "_ZnamRKSt9nothrow_t"),
-		find_operator(loaded, "_ZnwmSt11align_val_tRKSt9nothrow_t"),
-		find_operator(loaded, "_ZnamSt11align_val_tRKSt9nothrow_t"),
-		find_operator(loaded, "_ZdlPvRKSt9nothrow_t"),
-		find_operator(loaded, "_ZdaPvRKSt9nothrow_t"),
-		find_operator(loaded, "_ZdlPvSt11align_val_tRKSt9nothrow_t"),
-		find_operator(loaded, "_ZdaPvSt11align_val_tRKSt9nothrow_t"),
+		find_operator(image, "_Znwm"),
+		find_operator(image, "_Znam"),
+		find_operator(image, "_ZnwmSt11align_val_t"),
+		find_operator(image, "_ZnamSt11align_val_t"),
+		find_operator(image, "_ZdlPv"),
+		find_operator(image, "_ZdaPv"),
+		find_operator(image, "_ZdlPvm"),
+		find_operator(image, "_ZdaPvm"),
+		find_operator(image, "_ZdlPvSt11align_val_t"),
+		find_operator(image, "_ZdaPvSt11align_val_t"),
+		find_operator(image, "_ZdlPvmSt11align_val_t"),
+		find_operator(image, "_ZdaPvmSt11align_val_t"),
+		find_operator(image, "_ZnwmRKSt9nothrow_t"),
+		find_operator(image, "_ZnamRKSt9nothrow_t"),
+		find_operator(image, "_ZnwmSt11align_val_tRKSt9nothrow_t"),
+		find_operator(image, "_ZnamSt11align_val_tRKSt9nothrow_t"),
+		find_operator(image, "_ZdlPvRKSt9nothrow_t"),
+		find_operator(image, "_ZdaPvRKSt9nothrow_t"),
+		find_operator(image, "_ZdlPvSt11align_val_tRKSt9nothrow_t"),
+		find_operator(image, "_ZdaPvSt11align_val_tRKSt9nothrow_t"),
 	};
 
 	int configured = 0;

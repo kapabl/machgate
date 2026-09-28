@@ -3,7 +3,7 @@
 
 #include "loader.h"
 
-void* machgate_find_guest_definition(struct load_results* loaded,
+void* machgate_find_guest_definition(struct machgate_guest_image* image,
 				     const char* name);
 
 #endif

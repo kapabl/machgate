@@ -606,21 +606,21 @@ static int patch_section(uint32_t* code, size_t size)
 	return patched;
 }
 
-int syscall_gate_patch(struct load_results* lr)
+int syscall_gate_patch(struct machgate_guest_image* image)
 {
-	if (!lr || !lr->mh)
+	if (!image || !image->header)
 		return 0;
 
 	gate_pool_count = 0;
 
-	void* pool = machgate_pool_alloc(lr, SYSCALL_GATE_POOL_SIZE);
+	void* pool = machgate_pool_alloc(image, SYSCALL_GATE_POOL_SIZE);
 	if (!pool) {
 		fprintf(stderr, "syscall_gate: no adjacent pool space for syscall islands\n");
 	} else if (!register_gate_pool(pool, SYSCALL_GATE_POOL_SIZE)) {
 		return -1;
 	}
 
-	struct mach_header_64* mh = (struct mach_header_64*)lr->mh;
+	struct mach_header_64* mh = image->header;
 	uint8_t* cmds = (uint8_t*)(mh + 1);
 	int total = 0;
 	uint32_t offset = 0;
@@ -630,7 +630,7 @@ int syscall_gate_patch(struct load_results* lr)
 		if (lc->cmd == LC_SEGMENT_64) {
 			struct segment_command_64* seg = (struct segment_command_64*)lc;
 			if (seg->maxprot & VM_PROT_EXECUTE) {
-				void* seg_addr = (void*)(seg->vmaddr + lr->slide);
+				void* seg_addr = (void*)(seg->vmaddr + image->slide);
 				mprotect(seg_addr, seg->vmsize, PROT_READ | PROT_WRITE | PROT_EXEC);
 
 				struct section_64* sect = (struct section_64*)(seg + 1);
@@ -638,7 +638,7 @@ int syscall_gate_patch(struct load_results* lr)
 					if (!(sect->flags & S_ATTR_SOME_INSTRUCTIONS) &&
 					    !(sect->flags & S_ATTR_PURE_INSTRUCTIONS))
 						continue;
-					uint32_t* code = (uint32_t*)(sect->addr + lr->slide);
+					uint32_t* code = (uint32_t*)(sect->addr + image->slide);
 					int result = patch_section(code, sect->size);
 					if (result < 0)
 						return -1;
