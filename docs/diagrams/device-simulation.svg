@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <text x="30" y="50" font-size="28" font-weight="700" fill="#0f172a">Making an ARM64 host answer like an iPhone</text>
+  <text x="30" y="80" font-size="16" fill="#475569">Every "what machine am I on?" question crosses MachGate — that is the control point</text>
+
+  <!-- guest asks -->
+  <rect x="40" y="120" width="330" height="250" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="205" y="152" font-size="16" font-weight="700" fill="#1e3a8a" text-anchor="middle">The guest asks</text>
+  <g font-family="ui-monospace, Menlo, Consolas, monospace" font-size="13.5" fill="#1e40af">
+    <text x="60" y="188">sysctl hw.ncpu = ?</text>
+    <text x="60" y="218">sysctl hw.machine = ?</text>
+    <text x="60" y="248">hw.model, hw.memsize</text>
+    <text x="60" y="278">sysconf(_SC_NPROCESSORS…)</text>
+    <text x="60" y="308">affinity: how many CPUs?</text>
+  </g>
+
+  <!-- choke point -->
+  <rect x="435" y="120" width="330" height="250" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+  <text x="600" y="152" font-size="16" font-weight="700" fill="#78350f" text-anchor="middle">MachGate answers</text>
+  <g font-size="14" fill="#334155">
+    <text x="451" y="186">one choke point: the range</text>
+    <text x="451" y="208">dispatcher matches every hw.*</text>
+    <text x="451" y="244">today: real host facts</text>
+    <text x="451" y="264" font-family="ui-monospace, Menlo, monospace" font-size="13">(host_facts.c → sysconf)</text>
+    <text x="451" y="300">device profile (small change):</text>
+  </g>
+  <rect x="451" y="314" width="298" height="40" rx="8" fill="#fef3c7" stroke="#d97706"/>
+  <text x="600" y="339" font-size="13.5" font-weight="700" fill="#92400e" text-anchor="middle" font-family="ui-monospace, Menlo, monospace">hw.ncpu → 2 · hw.machine → iPhone</text>
+
+  <!-- believes -->
+  <rect x="830" y="120" width="330" height="250" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+  <text x="995" y="152" font-size="16" font-weight="700" fill="#065f46" text-anchor="middle">So the guest believes</text>
+  <g font-size="14.5" fill="#064e3b">
+    <text x="846" y="192">"I am running on a</text>
+    <text x="846" y="216">2-core iPhone."</text>
+    <text x="846" y="252">it adapts thread pools,</text>
+    <text x="846" y="276">code paths, feature checks</text>
+    <text x="846" y="312">no Apple hardware involved</text>
+  </g>
+
+  <line x1="372" y1="245" x2="431" y2="245" stroke="#334155" stroke-width="2.5" marker-end="url(#arw)"/>
+  <line x1="767" y1="245" x2="826" y2="245" stroke="#334155" stroke-width="2.5" marker-end="url(#arw)"/>
+
+  <!-- enforcement -->
+  <rect x="40" y="404" width="1120" height="92" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+  <text x="60" y="436" font-size="16" font-weight="700" fill="#065f46">Make the lie true</text>
+  <text x="60" y="466" font-size="14.5" fill="#334155">sched_setaffinity pins the guest and its threads to exactly the claimed cores — thread counts and timing behave like the device, not just the report.</text>
+
+  <!-- use cases -->
+  <g font-size="14">
+    <rect x="40" y="524" width="350" height="46" rx="23" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="215" y="553" fill="#334155" text-anchor="middle">device-QA matrix without hardware</text>
+    <rect x="425" y="524" width="350" height="46" rx="23" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="600" y="553" fill="#334155" text-anchor="middle">reproduce "only on iPhone" bugs</text>
+    <rect x="810" y="524" width="350" height="46" rx="23" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="985" y="553" fill="#334155" text-anchor="middle">simulator-style resource limits</text>
+  </g>
+
+  <text x="600" y="630" font-size="13.5" fill="#94a3b8" text-anchor="middle">Status: MachGate reports real host facts today; the profile override is a small, contained change at this single choke point.</text>
+</svg>

@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <marker id="arwr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/>
+    </marker>
+  </defs>
+
+  <text x="30" y="50" font-size="28" font-weight="700" fill="#0f172a">One syscall, four hops</text>
+  <text x="30" y="80" font-size="16" fill="#475569">What happens at runtime when guest code reaches a patched site</text>
+
+  <!-- guest -->
+  <rect x="40" y="130" width="240" height="230" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="160" y="162" font-size="16" font-weight="700" fill="#1e3a8a" text-anchor="middle">Guest (Darwin ABI)</text>
+  <g font-family="ui-monospace, Menlo, Consolas, monospace" font-size="14" fill="#1e40af">
+    <text x="56" y="200">b island_47</text>
+    <text x="56" y="230">x16 = syscall number</text>
+    <text x="56" y="260">x0..x5 = arguments</text>
+    <text x="56" y="290">NZCV = guest flags</text>
+  </g>
+
+  <!-- island -->
+  <rect x="330" y="130" width="240" height="230" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+  <text x="450" y="162" font-size="16" font-weight="700" fill="#065f46" text-anchor="middle">Branch island</text>
+  <g font-size="14" fill="#064e3b">
+    <text x="346" y="200">saves all registers + flags</text>
+    <text x="346" y="230">calls the dispatcher</text>
+    <text x="346" y="260">remembers resume N+4</text>
+  </g>
+
+  <!-- dispatcher -->
+  <rect x="620" y="130" width="300" height="230" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+  <text x="770" y="162" font-size="16" font-weight="700" fill="#78350f" text-anchor="middle">Dispatcher (plain C)</text>
+  <g font-size="14" fill="#334155">
+    <text x="636" y="200">routes by x16: 0–99 · 100–199</text>
+    <text x="636" y="226" font-family="ui-monospace, Menlo, monospace">200–399 · 400+</text>
+    <text x="636" y="256">translates flags, structs, errno</text>
+    <text x="636" y="286">raw Linux syscall (x8 = SYS_*)</text>
+    <text x="636" y="316">encodes the Darwin result</text>
+  </g>
+
+  <!-- kernel -->
+  <rect x="970" y="130" width="190" height="140" rx="12" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="1065" y="162" font-size="16" font-weight="700" fill="#334155" text-anchor="middle">Linux kernel</text>
+  <text font-size="14" fill="#475569" text-anchor="middle">
+    <tspan x="1065" y="196">runs the Linux call</tspan>
+    <tspan x="1065" y="222">returns Linux result</tspan>
+  </text>
+
+  <line x1="282" y1="245" x2="326" y2="245" stroke="#334155" stroke-width="2.5" marker-end="url(#arw)"/>
+  <line x1="572" y1="245" x2="616" y2="245" stroke="#334155" stroke-width="2.5" marker-end="url(#arw)"/>
+  <line x1="922" y1="245" x2="966" y2="245" stroke="#334155" stroke-width="2.5" marker-end="url(#arw)"/>
+
+  <!-- ENOSYS -->
+  <rect x="620" y="392" width="300" height="52" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-dasharray="6 4"/>
+  <text x="770" y="424" font-size="13.5" fill="#b91c1c" text-anchor="middle">unknown ⇒ Darwin ENOSYS (+ PC diagnostic)</text>
+  <line x1="740" y1="362" x2="740" y2="388" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arwr)"/>
+
+  <!-- return path -->
+  <path d="M 1065 272 L 1065 540 L 160 540 L 160 366" fill="none" stroke="#d97706" stroke-width="3" marker-end="url(#arwr)"/>
+  <text x="612" y="528" font-size="15" font-weight="600" fill="#92400e" text-anchor="middle">x0 = Darwin result · carry set/clear — the island restores every register — guest resumes at N+4</text>
+
+  <text x="600" y="630" font-size="15" fill="#64748b" text-anchor="middle">Linux specifics never leak: the guest sees only Darwin numbers, Darwin errno, and the carry-flag convention.</text>
+</svg>

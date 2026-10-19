@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <text x="30" y="50" font-size="28" font-weight="700" fill="#0f172a">What MachGate adds on the host</text>
+  <text x="30" y="80" font-size="16" fill="#475569">Layered — the guest never talks to Linux directly</text>
+
+  <!-- band 1: guest image -->
+  <rect x="40" y="118" width="1120" height="104" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="60" y="148" font-size="16" font-weight="700" fill="#1e3a8a">GUEST IMAGE — mapped Mach-O (macOS or iOS origin)</text>
+  <g font-family="ui-monospace, Menlo, Consolas, monospace" font-size="14">
+    <rect x="60" y="164" width="300" height="42" rx="8" fill="#ffffff" stroke="#93c5fd"/>
+    <text x="210" y="190" fill="#1e40af" text-anchor="middle">__TEXT: svc sites → b islands</text>
+    <rect x="380" y="164" width="150" height="42" rx="8" fill="#ffffff" stroke="#93c5fd"/>
+    <text x="455" y="190" fill="#1e40af" text-anchor="middle">__DATA</text>
+    <rect x="550" y="164" width="220" height="42" rx="8" fill="#ffffff" stroke="#93c5fd"/>
+    <text x="660" y="190" fill="#1e40af" text-anchor="middle">guarded guest stack</text>
+  </g>
+
+  <line x1="600" y1="224" x2="600" y2="250" stroke="#334155" stroke-width="2.5" marker-end="url(#arw)"/>
+  <text x="615" y="243" font-size="13.5" fill="#475569">patched sites · bind slots</text>
+
+  <!-- band 2: core -->
+  <rect x="40" y="254" width="1120" height="104" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+  <text x="60" y="284" font-size="16" font-weight="700" fill="#065f46">MACHGATE CORE</text>
+  <g font-size="14" fill="#064e3b">
+    <rect x="60" y="300" width="230" height="42" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+    <text x="175" y="326" text-anchor="middle">loader / imaging</text>
+    <rect x="310" y="300" width="300" height="42" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+    <text x="460" y="326" text-anchor="middle">gateway + range dispatchers</text>
+    <rect x="630" y="300" width="340" height="42" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+    <text x="800" y="326" text-anchor="middle">import binder (Provider Decisions)</text>
+    <rect x="990" y="300" width="150" height="42" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+    <text x="1065" y="326" text-anchor="middle">guest VM ledger</text>
+  </g>
+
+  <line x1="600" y1="360" x2="600" y2="386" stroke="#334155" stroke-width="2.5" marker-end="url(#arw)"/>
+  <text x="615" y="379" font-size="13.5" fill="#475569">selects &amp; configures</text>
+
+  <!-- band 3: libraries -->
+  <rect x="40" y="390" width="1120" height="130" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+  <g font-family="ui-monospace, Menlo, Consolas, monospace">
+    <rect x="60" y="410" width="350" height="92" rx="10" fill="#ffffff" stroke="#c4b5fd"/>
+    <text x="76" y="438" font-size="14.5" font-weight="700" fill="#4c1d95">libsystem_shim.so</text>
+    <text x="76" y="466" font-size="13.5" fill="#5b21b6">Darwin names → Linux</text>
+    <text x="76" y="488" font-size="13.5" fill="#5b21b6">implementations (shim)</text>
+
+    <rect x="430" y="410" width="350" height="92" rx="10" fill="#ffffff" stroke="#c4b5fd"/>
+    <text x="446" y="438" font-size="14.5" font-weight="700" fill="#4c1d95">libmachgate_vm_interpose.so</text>
+    <text x="446" y="466" font-size="13.5" fill="#5b21b6">host allocations join the</text>
+    <text x="446" y="488" font-size="13.5" fill="#5b21b6">guest virtual-memory ledger</text>
+
+    <rect x="800" y="410" width="340" height="92" rx="10" fill="#ffffff" stroke="#c4b5fd"/>
+    <text x="816" y="438" font-size="14.5" font-weight="700" fill="#4c1d95">native providers + trampolines</text>
+    <text x="816" y="466" font-size="13.5" fill="#5b21b6">chosen via MACHGATE_DYLIB_MAP,</text>
+    <text x="816" y="488" font-size="13.5" fill="#5b21b6">MACHGATE_TRAMPOLINE_LIB / _PREFIX</text>
+  </g>
+
+  <line x1="600" y1="522" x2="600" y2="548" stroke="#334155" stroke-width="2.5" marker-end="url(#arw)"/>
+  <text x="615" y="541" font-size="13.5" fill="#475569">only MachGate issues raw syscalls</text>
+
+  <!-- band 4: kernel -->
+  <rect x="40" y="552" width="1120" height="60" rx="12" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="600" y="588" font-size="16" font-weight="700" fill="#334155" text-anchor="middle">LINUX KERNEL (ARM64) — sees only the Linux ABI; no guest svc #0x80 remains in mapped text</text>
+
+  <text x="600" y="648" font-size="14" fill="#64748b" text-anchor="middle">guest execve ⇒ Process Replacement: MachGate validates the new Mach-O target and re-invokes itself</text>
+</svg>
