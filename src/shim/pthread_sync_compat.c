@@ -29,6 +29,8 @@ struct native_pthread_sync_api {
 	int (*condition_wait)(pthread_cond_t*, pthread_mutex_t*);
 	int (*condition_timedwait)(pthread_cond_t*, pthread_mutex_t*,
 	                           const struct timespec*);
+	int (*condition_clockwait)(pthread_cond_t*, pthread_mutex_t*, clockid_t,
+	                           const struct timespec*);
 	int (*condition_signal)(pthread_cond_t*);
 	int (*condition_broadcast)(pthread_cond_t*);
 	int (*condition_init)(pthread_cond_t*, const pthread_condattr_t*);
@@ -65,6 +67,7 @@ static int resolve_native_api(void)
 		native_api.mutex_destroy = next_symbol("pthread_mutex_destroy");
 		native_api.condition_wait = next_symbol("pthread_cond_wait");
 		native_api.condition_timedwait = next_symbol("pthread_cond_timedwait");
+		native_api.condition_clockwait = next_symbol("pthread_cond_clockwait");
 		native_api.condition_signal = next_symbol("pthread_cond_signal");
 		native_api.condition_broadcast = next_symbol("pthread_cond_broadcast");
 		native_api.condition_init = next_symbol("pthread_cond_init");
@@ -117,15 +120,12 @@ static int is_guest_mutex_signature(uint32_t signature)
 static int initialize_guest_mutex(pthread_mutex_t* mutex)
 {
 	uint32_t signature;
-	memcpy(&signature, mutex, sizeof(signature));
-	if (!is_guest_mutex_signature(signature))
-		return 0;
-
 	lock_object_initialization();
 	memcpy(&signature, mutex, sizeof(signature));
+	int result = 0;
 	if (is_guest_mutex_signature(signature)) {
 		pthread_mutexattr_t attributes;
-		int result = pthread_mutexattr_init(&attributes);
+		result = pthread_mutexattr_init(&attributes);
 		int attributes_initialized = result == 0;
 
 		if (result == 0) {
@@ -142,20 +142,14 @@ static int initialize_guest_mutex(pthread_mutex_t* mutex)
 		}
 		if (attributes_initialized)
 			pthread_mutexattr_destroy(&attributes);
-		unlock_object_initialization();
-		return result;
 	}
 	unlock_object_initialization();
-	return 0;
+	return result;
 }
 
 static int initialize_guest_condition(pthread_cond_t* condition)
 {
 	uint32_t signature;
-	memcpy(&signature, condition, sizeof(signature));
-	if (signature != GUEST_CONDITION)
-		return 0;
-
 	lock_object_initialization();
 	memcpy(&signature, condition, sizeof(signature));
 	int result = 0;
@@ -170,10 +164,6 @@ static int initialize_guest_condition(pthread_cond_t* condition)
 static int initialize_guest_read_write_lock(pthread_rwlock_t* lock)
 {
 	uint32_t signature;
-	memcpy(&signature, lock, sizeof(signature));
-	if (signature != GUEST_READ_WRITE_LOCK)
-		return 0;
-
 	lock_object_initialization();
 	memcpy(&signature, lock, sizeof(signature));
 	int result = 0;
@@ -185,54 +175,54 @@ static int initialize_guest_read_write_lock(pthread_rwlock_t* lock)
 	return result;
 }
 
-int pthread_mutex_lock(pthread_mutex_t* mutex)
+int machgate_darwin_pthread_mutex_lock(pthread_mutex_t* mutex)
 {
 	int result = resolve_native_api();
 	if (result == 0)
 		result = initialize_guest_mutex(mutex);
 	if (result != 0)
-		return machgate_darwin_errno_from_linux(result);
-	return machgate_darwin_errno_from_linux(native_api.mutex_lock(mutex));
+		return result;
+	return native_api.mutex_lock(mutex);
 }
 
-int pthread_mutex_unlock(pthread_mutex_t* mutex)
+int machgate_darwin_pthread_mutex_unlock(pthread_mutex_t* mutex)
 {
 	int result = resolve_native_api();
 	if (result != 0)
 		return result;
-	return machgate_darwin_errno_from_linux(native_api.mutex_unlock(mutex));
+	return native_api.mutex_unlock(mutex);
 }
 
-int pthread_mutex_trylock(pthread_mutex_t* mutex)
+int machgate_darwin_pthread_mutex_trylock(pthread_mutex_t* mutex)
 {
 	int result = resolve_native_api();
 	if (result == 0)
 		result = initialize_guest_mutex(mutex);
 	if (result != 0)
-		return machgate_darwin_errno_from_linux(result);
-	return machgate_darwin_errno_from_linux(native_api.mutex_trylock(mutex));
+		return result;
+	return native_api.mutex_trylock(mutex);
 }
 
-int pthread_mutex_init(pthread_mutex_t* mutex,
-	               const pthread_mutexattr_t* attributes)
+int machgate_darwin_pthread_mutex_init(
+	pthread_mutex_t* mutex, const pthread_mutexattr_t* attributes)
 {
 	int result = resolve_native_api();
 	if (result != 0)
 		return result;
 	memset(mutex, 0, sizeof(*mutex));
-	return machgate_darwin_errno_from_linux(
-		native_api.mutex_init(mutex, attributes));
+	return native_api.mutex_init(mutex, attributes);
 }
 
-int pthread_mutex_destroy(pthread_mutex_t* mutex)
+int machgate_darwin_pthread_mutex_destroy(pthread_mutex_t* mutex)
 {
 	int result = resolve_native_api();
 	if (result != 0)
 		return result;
-	return machgate_darwin_errno_from_linux(native_api.mutex_destroy(mutex));
+	return native_api.mutex_destroy(mutex);
 }
 
-int pthread_cond_wait(pthread_cond_t* condition, pthread_mutex_t* mutex)
+int machgate_darwin_pthread_cond_wait(pthread_cond_t* condition,
+	                              pthread_mutex_t* mutex)
 {
 	int result = resolve_native_api();
 	if (result == 0)
@@ -240,13 +230,13 @@ int pthread_cond_wait(pthread_cond_t* condition, pthread_mutex_t* mutex)
 	if (result == 0)
 		result = initialize_guest_mutex(mutex);
 	if (result != 0)
-		return machgate_darwin_errno_from_linux(result);
-	return machgate_darwin_errno_from_linux(
-		native_api.condition_wait(condition, mutex));
+		return result;
+	return native_api.condition_wait(condition, mutex);
 }
 
-int pthread_cond_timedwait(pthread_cond_t* condition, pthread_mutex_t* mutex,
-	                   const struct timespec* deadline)
+int machgate_darwin_pthread_cond_timedwait(
+	pthread_cond_t* condition, pthread_mutex_t* mutex,
+	const struct timespec* deadline)
 {
 	int result = resolve_native_api();
 	if (result == 0)
@@ -254,31 +244,44 @@ int pthread_cond_timedwait(pthread_cond_t* condition, pthread_mutex_t* mutex,
 	if (result == 0)
 		result = initialize_guest_mutex(mutex);
 	if (result != 0)
-		return machgate_darwin_errno_from_linux(result);
-	return machgate_darwin_errno_from_linux(
-		native_api.condition_timedwait(condition, mutex, deadline));
+		return result;
+	return native_api.condition_timedwait(condition, mutex, deadline);
 }
 
-int pthread_cond_signal(pthread_cond_t* condition)
+int machgate_darwin_pthread_cond_clockwait(
+	pthread_cond_t* condition, pthread_mutex_t* mutex, clockid_t clock,
+	const struct timespec* deadline)
+{
+	int result = resolve_native_api();
+	if (result == 0)
+		result = initialize_guest_condition(condition);
+	if (result == 0)
+		result = initialize_guest_mutex(mutex);
+	if (result != 0)
+		return result;
+	if (!native_api.condition_clockwait)
+		return ENOSYS;
+	return native_api.condition_clockwait(condition, mutex, clock, deadline);
+}
+
+int machgate_darwin_pthread_cond_signal(pthread_cond_t* condition)
 {
 	int result = resolve_native_api();
 	if (result == 0)
 		result = initialize_guest_condition(condition);
 	if (result != 0)
-		return machgate_darwin_errno_from_linux(result);
-	return machgate_darwin_errno_from_linux(
-		native_api.condition_signal(condition));
+		return result;
+	return native_api.condition_signal(condition);
 }
 
-int pthread_cond_broadcast(pthread_cond_t* condition)
+int machgate_darwin_pthread_cond_broadcast(pthread_cond_t* condition)
 {
 	int result = resolve_native_api();
 	if (result == 0)
 		result = initialize_guest_condition(condition);
 	if (result != 0)
-		return machgate_darwin_errno_from_linux(result);
-	return machgate_darwin_errno_from_linux(
-		native_api.condition_broadcast(condition));
+		return result;
+	return native_api.condition_broadcast(condition);
 }
 
 int pthread_cond_init(pthread_cond_t* condition,
@@ -286,19 +289,80 @@ int pthread_cond_init(pthread_cond_t* condition,
 {
 	int result = resolve_native_api();
 	if (result != 0)
-		return result;
+		return machgate_darwin_errno_from_linux(result);
 	memset(condition, 0, sizeof(*condition));
 	return machgate_darwin_errno_from_linux(
 		native_api.condition_init(condition, attributes));
 }
 
-int pthread_cond_destroy(pthread_cond_t* condition)
+int machgate_darwin_pthread_cond_destroy(pthread_cond_t* condition)
 {
 	int result = resolve_native_api();
 	if (result != 0)
 		return result;
+	return native_api.condition_destroy(condition);
+}
+
+int pthread_mutex_lock(pthread_mutex_t* mutex)
+{
 	return machgate_darwin_errno_from_linux(
-		native_api.condition_destroy(condition));
+		machgate_darwin_pthread_mutex_lock(mutex));
+}
+
+int pthread_mutex_unlock(pthread_mutex_t* mutex)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_mutex_unlock(mutex));
+}
+
+int pthread_mutex_trylock(pthread_mutex_t* mutex)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_mutex_trylock(mutex));
+}
+
+int pthread_mutex_init(pthread_mutex_t* mutex,
+	               const pthread_mutexattr_t* attributes)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_mutex_init(mutex, attributes));
+}
+
+int pthread_mutex_destroy(pthread_mutex_t* mutex)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_mutex_destroy(mutex));
+}
+
+int pthread_cond_wait(pthread_cond_t* condition, pthread_mutex_t* mutex)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_cond_wait(condition, mutex));
+}
+
+int pthread_cond_timedwait(pthread_cond_t* condition, pthread_mutex_t* mutex,
+	                   const struct timespec* deadline)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_cond_timedwait(condition, mutex, deadline));
+}
+
+int pthread_cond_signal(pthread_cond_t* condition)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_cond_signal(condition));
+}
+
+int pthread_cond_broadcast(pthread_cond_t* condition)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_cond_broadcast(condition));
+}
+
+int pthread_cond_destroy(pthread_cond_t* condition)
+{
+	return machgate_darwin_errno_from_linux(
+		machgate_darwin_pthread_cond_destroy(condition));
 }
 
 int pthread_rwlock_rdlock(pthread_rwlock_t* lock)
@@ -325,7 +389,7 @@ int pthread_rwlock_unlock(pthread_rwlock_t* lock)
 {
 	int result = resolve_native_api();
 	if (result != 0)
-		return result;
+		return machgate_darwin_errno_from_linux(result);
 	return machgate_darwin_errno_from_linux(
 		native_api.read_write_unlock(lock));
 }

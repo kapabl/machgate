@@ -3,16 +3,25 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$SCRIPT_DIR"
+
+case "${BUILD_DIR:-}" in
+    "") NATIVE_BUILD_DIR="$PROJECT_DIR/build" ;;
+    /*) NATIVE_BUILD_DIR="$BUILD_DIR" ;;
+    *) NATIVE_BUILD_DIR="$PROJECT_DIR/$BUILD_DIR" ;;
+esac
 
 LLVM_MC="${LLVM_MC:-$(command -v llvm-mc || command -v llvm-mc-18 || true)}"
 LD64_LLD="${LD64_LLD:-$(command -v ld64.lld || command -v ld64.lld-18 || true)}"
 LLVM_LIPO="${LLVM_LIPO:-$(command -v llvm-lipo || command -v llvm-lipo-18 || true)}"
+LLVM_OBJCOPY="${LLVM_OBJCOPY:-$(command -v llvm-objcopy || command -v llvm-objcopy-18 || true)}"
 CLANGXX="${CLANGXX:-$(command -v clang++ || command -v clang++-18 || true)}"
 
 [ -n "$LLVM_MC" ] || { echo "llvm-mc not found" >&2; exit 1; }
 [ -n "$LD64_LLD" ] || { echo "ld64.lld not found" >&2; exit 1; }
 [ -n "$LLVM_LIPO" ] || { echo "llvm-lipo not found" >&2; exit 1; }
+[ -n "$LLVM_OBJCOPY" ] || { echo "llvm-objcopy not found" >&2; exit 1; }
 [ -n "$CLANGXX" ] || { echo "clang++ not found" >&2; exit 1; }
 
 echo "Building test fixtures..."
@@ -173,9 +182,55 @@ echo "  Built guest_cxx_allocator_bridge"
 "$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
     -fixup_chains -o dynamic_chained_libsystem_call -e _main \
     dynamic_libsystem_call.o libsystem_fixture.dylib
-rm -f libsystem_fixture.o dynamic_libsystem_call.o
+"$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj \
+    -o dynamic_resource_limit_imports.o dynamic_resource_limit_imports.s
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -o dynamic_resource_limit_imports -e _main \
+    dynamic_resource_limit_imports.o libsystem_fixture.dylib
+rm -f libsystem_fixture.o dynamic_libsystem_call.o \
+    dynamic_resource_limit_imports.o
 echo "  Built dynamic_libsystem_call"
 echo "  Built dynamic_chained_libsystem_call"
+echo "  Built dynamic_resource_limit_imports"
+
+"$CLANGXX" -target arm64-apple-macos11 -x c -O0 -fno-builtin \
+    -fno-stack-protector -fexceptions -funwind-tables -nostdlib \
+    -c dynamic_guest_unwind.c -o dynamic_guest_unwind.o
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -o dynamic_guest_unwind -e _main dynamic_guest_unwind.o \
+    libsystem_fixture.dylib
+rm -f dynamic_guest_unwind.o
+echo "  Built dynamic_guest_unwind"
+
+"$CLANGXX" -target arm64-apple-macos11 -x c -O0 -fno-builtin \
+    -fno-stack-protector -fexceptions -funwind-tables \
+    -femit-dwarf-unwind=always -nostdlib \
+    -c dynamic_guest_unwind_eh_frame.c \
+    -o dynamic_guest_unwind_eh_frame.o
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -o dynamic_guest_unwind_eh_frame_with_compact -e _main \
+    dynamic_guest_unwind_eh_frame.o libsystem_fixture.dylib
+"$LLVM_OBJCOPY" --remove-section=__TEXT,__unwind_info \
+    dynamic_guest_unwind_eh_frame_with_compact \
+    dynamic_guest_unwind_eh_frame
+rm -f dynamic_guest_unwind_eh_frame.o \
+    dynamic_guest_unwind_eh_frame_with_compact
+echo "  Built dynamic_guest_unwind_eh_frame"
+
+"$CLANGXX" -target arm64-apple-macos11 -x c -O0 -fno-builtin \
+    -fno-stack-protector -fexceptions -funwind-tables -nostdlib \
+    -c dynamic_guest_unwind_registers.c \
+    -o dynamic_guest_unwind_registers_c.o
+"$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj \
+    -o dynamic_guest_unwind_registers_asm.o \
+    dynamic_guest_unwind_registers.s
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -o dynamic_guest_unwind_registers -e _main \
+    dynamic_guest_unwind_registers_c.o \
+    dynamic_guest_unwind_registers_asm.o libsystem_fixture.dylib
+rm -f dynamic_guest_unwind_registers_c.o \
+    dynamic_guest_unwind_registers_asm.o
+echo "  Built dynamic_guest_unwind_registers"
 
 "$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj \
     -o dynamic_flat_provider_precedence.o dynamic_flat_provider_precedence.s
@@ -245,11 +300,45 @@ rm -f mapped_provider_stub.o dynamic_mapped_provider.o
 echo "  Built dynamic_mapped_provider"
 echo "  Built dynamic_versioned_provider"
 
+# --- dynamic_inherited_resolver: provider-local guest resolver ownership ---
+"$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj \
+    -o inherited_resolver_provider_stub.o inherited_resolver_provider_stub.s
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -dylib \
+    -install_name /usr/lib/libMachGateInheritedResolverFixture.dylib \
+    -o inherited_resolver_provider_stub.dylib \
+    inherited_resolver_provider_stub.o
+"$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj \
+    -o dynamic_inherited_resolver.o dynamic_inherited_resolver.s
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -o dynamic_inherited_resolver -e _main \
+    dynamic_inherited_resolver.o inherited_resolver_provider_stub.dylib
+rm -f inherited_resolver_provider_stub.o dynamic_inherited_resolver.o
+echo "  Built dynamic_inherited_resolver"
+
+# --- dynamic_structor_return: Apple ARM64 structor return ABI adaptation ---
+"$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj \
+    -o structor_provider_stub.o structor_provider_stub.s
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -dylib -install_name /usr/lib/libMachGateStructorFixture.dylib \
+    -o structor_provider_stub.dylib structor_provider_stub.o
+"$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj \
+    -o dynamic_structor_return.o dynamic_structor_return.s
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -o dynamic_structor_return -e _main dynamic_structor_return.o \
+    structor_provider_stub.dylib
+"$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
+    -fixup_chains -o dynamic_chained_structor_return -e _main \
+    dynamic_structor_return.o structor_provider_stub.dylib
+rm -f structor_provider_stub.o dynamic_structor_return.o
+echo "  Built dynamic_structor_return"
+echo "  Built dynamic_chained_structor_return"
+
 for fixture in dynamic_lazy_unused dynamic_lazy_called dynamic_skipped_data \
     dynamic_stubbed_function dynamic_partial_provider \
     dynamic_partial_used_data dynamic_regular_lazy_unused \
     dynamic_regular_lazy_called dynamic_compiler_runtime \
-    dynamic_compiler_floattidf; do
+    dynamic_compiler_floattidf dynamic_compiler_divti3; do
     "$LLVM_MC" -triple arm64-apple-macos11 -filetype=obj \
         -o "$fixture.o" "$fixture.s"
     "$LD64_LLD" -arch arm64 -platform_version macos 11.0.0 11.0.0 \
@@ -349,6 +438,16 @@ echo "  Built machgate_trampoline_target"
 # --- native MachGate trampoline provider ---
 gcc -shared -fPIC -o libmachgate_test_provider.so machgate_native_provider.c
 echo "  Built libmachgate_test_provider.so"
+
+gcc -shared -fPIC -I"$PROJECT_DIR/src" \
+    -L"$NATIVE_BUILD_DIR" \
+    -o libinherited_resolver_provider.so inherited_resolver_provider.c \
+    -lsystem_shim
+echo "  Built libinherited_resolver_provider.so"
+
+gcc -shared -fPIC -o libnative_structor_provider.so \
+    native_structor_provider.c native_structor_provider.S
+echo "  Built libnative_structor_provider.so"
 
 gcc -O2 -o process_termination_probe process_termination_probe.c -ldl
 echo "  Built process_termination_probe"

@@ -2,11 +2,14 @@
 
 #include "guest_symbols.h"
 #include "macho_defs.h"
+#include "native_provider_guest_import.h"
 #include "native_provider_map.h"
+#include "native_structor_adapter.h"
 
 #include <dlfcn.h>
 #include <errno.h>
 #include <limits.h>
+#include <link.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,6 +91,7 @@ struct native_provider {
 	const char* install_name;
 	enum machgate_provider_decision_kind decision;
 	void* handle;
+	machgate_guest_import_resolver_function guest_import_resolver;
 };
 
 struct import_context {
@@ -100,6 +104,7 @@ struct import_context {
 	size_t segment_count;
 	struct native_provider providers[MACHGATE_MAX_NATIVE_PROVIDERS];
 	size_t provider_count;
+	struct machgate_structor_adapters* structor_adapters;
 	long page_size;
 	char* error;
 	size_t error_size;
@@ -195,6 +200,18 @@ static int range_valid(uint64_t offset, uint64_t size, uint64_t limit)
 	return offset <= limit && size <= limit - offset;
 }
 
+static int provider_owns_address(void* handle, void* address)
+{
+	struct link_map* provider_map = NULL;
+	Dl_info address_info;
+	if (!address ||
+	    dlinfo(handle, RTLD_DI_LINKMAP, &provider_map) != 0 ||
+	    !provider_map || dladdr(address, &address_info) == 0)
+		return 0;
+	return address_info.dli_fbase ==
+	       (void*)(uintptr_t)provider_map->l_addr;
+}
+
 static int add_provider(struct import_context* context,
 			const struct dylib_command* command)
 {
@@ -235,6 +252,15 @@ static int add_provider(struct import_context* context,
 		         dlerror());
 		return -1;
 	}
+	union {
+		void* object;
+		machgate_guest_import_resolver_function function;
+	} resolver = {
+		.object = dlsym(provider->handle,
+		                MACHGATE_GUEST_IMPORT_RESOLVER_SYMBOL),
+	};
+	if (provider_owns_address(provider->handle, resolver.object))
+		provider->guest_import_resolver = resolver.function;
 	return 0;
 }
 
@@ -325,6 +351,9 @@ static long double compiler_floattidf(__int128 value)
 	return (long double)value;
 }
 
+extern __int128 machgate_host_divti3(__int128 dividend, __int128 divisor)
+	__asm__("__divti3");
+
 static const char* normalized_native_name(const char* guest_name,
 	                                  char* storage,
 	                                  size_t storage_size)
@@ -360,26 +389,43 @@ static void* find_compiler_runtime_symbol(const char* native_name)
 		return compiler_clear_cache;
 	if (strcmp(native_name, "__floattidf") == 0)
 		return compiler_floattidf;
+	if (strcmp(native_name, "__divti3") == 0)
+		return machgate_host_divti3;
 	return NULL;
 }
 
+static void* find_provider_symbol(struct native_provider* provider,
+				  const char* native_name)
+{
+	void* symbol = NULL;
+	if (provider->guest_import_resolver &&
+	    provider->guest_import_resolver(native_name, &symbol))
+		return symbol;
+	return dlsym(provider->handle, native_name);
+}
+
 static void* find_dependency_symbol(struct import_context* context,
-				    const char* native_name)
+				    const char* native_name,
+				    int* mapped_native_provider)
 {
 	for (size_t index = 0; index < context->provider_count; index++) {
-		void* handle = context->providers[index].handle;
-		if (!handle)
+		struct native_provider* provider = &context->providers[index];
+		if (!provider->handle)
 			continue;
-		void* symbol = dlsym(handle, native_name);
-		if (symbol)
+		void* symbol = find_provider_symbol(provider, native_name);
+		if (symbol) {
+			*mapped_native_provider = 1;
 			return symbol;
+		}
 	}
 	return NULL;
 }
 
 static void* find_symbol(struct import_context* context,
-			 struct bind_state* state)
+			 struct bind_state* state,
+			 int* mapped_native_provider)
 {
+	*mapped_native_provider = 0;
 	if (!state->symbol)
 		return NULL;
 	if (strcmp(state->symbol, "dyld_stub_binder") == 0)
@@ -394,9 +440,11 @@ static void* find_symbol(struct import_context* context,
 			return NULL;
 		struct native_provider* provider = &context->providers[index];
 		if (provider->handle) {
-			void* symbol = dlsym(provider->handle, native_name);
-			if (symbol)
+			void* symbol = find_provider_symbol(provider, native_name);
+			if (symbol) {
+				*mapped_native_provider = 1;
 				return symbol;
+			}
 		}
 		if (provider->decision == MACHGATE_PROVIDER_MAP ||
 		    provider->decision == MACHGATE_PROVIDER_PARTIAL)
@@ -417,13 +465,55 @@ static void* find_symbol(struct import_context* context,
 	    state->provider_ordinal != BIND_SPECIAL_DYLIB_WEAK_LOOKUP)
 		return NULL;
 
-	void* symbol = find_dependency_symbol(context, native_name);
+	void* symbol = find_dependency_symbol(context, native_name,
+	                                      mapped_native_provider);
 	if (symbol)
 		return symbol;
 	symbol = dlsym(RTLD_DEFAULT, native_name);
-	if (symbol)
+	if (symbol) {
+		*mapped_native_provider = 1;
 		return symbol;
+	}
 	return find_compiler_runtime_symbol(native_name);
+}
+
+static int add_native_symbol_addend(struct import_context* context,
+				    uintptr_t address, int64_t addend,
+				    uintptr_t* result)
+{
+	if (addend >= 0) {
+		if ((uint64_t)addend <= UINTPTR_MAX - address) {
+			*result = address + (uintptr_t)addend;
+			return 0;
+		}
+	} else {
+		uint64_t magnitude = (uint64_t)(-(addend + 1)) + 1u;
+		if (magnitude <= address) {
+			*result = address - (uintptr_t)magnitude;
+			return 0;
+		}
+	}
+	snprintf(context->error, context->error_size,
+	         "native symbol addend overflows host address space");
+	return -1;
+}
+
+static int resolved_symbol_value(struct import_context* context,
+				 struct bind_state* state, void* symbol,
+				 int mapped_native_provider,
+				 uintptr_t* result)
+{
+	uintptr_t target;
+	if (add_native_symbol_addend(context, (uintptr_t)symbol, state->addend,
+	                             &target) != 0)
+		return -1;
+	if (!mapped_native_provider) {
+		*result = target;
+		return 0;
+	}
+	return machgate_adapt_native_structor(
+		context->image, &context->structor_adapters, state->symbol, target,
+		result, context->error, context->error_size);
 }
 
 enum unresolved_import_action {
@@ -586,7 +676,8 @@ static int write_pointer(struct import_context* context,
 		return -1;
 	}
 
-	void* symbol = find_symbol(context, state);
+	int mapped_native_provider;
+	void* symbol = find_symbol(context, state, &mapped_native_provider);
 	int bind_zero = 0;
 	if (!symbol) {
 		enum unresolved_import_action action =
@@ -603,6 +694,12 @@ static int write_pointer(struct import_context* context,
 		}
 	}
 
+	uintptr_t value = 0;
+	if (!bind_zero &&
+	    resolved_symbol_value(context, state, symbol, mapped_native_provider,
+	                          &value) != 0)
+		return -1;
+
 	uintptr_t address = segment->address + state->segment_offset;
 	uintptr_t page = address & ~((uintptr_t)context->page_size - 1);
 	int restore_protection = segment->protection;
@@ -615,7 +712,6 @@ static int write_pointer(struct import_context* context,
 		return -1;
 	}
 
-	uintptr_t value = bind_zero ? 0 : (uintptr_t)symbol + state->addend;
 	memcpy((void*)address, &value, sizeof(value));
 	if (!(restore_protection & PROT_WRITE) &&
 	    mprotect((void*)page, (size_t)context->page_size,
@@ -879,7 +975,8 @@ static int resolve_chained_bind(struct import_context* context,
 		.segment_offset = segment_offset,
 		.symbol = import->symbol,
 	};
-	void* symbol = find_symbol(context, &state);
+	int mapped_native_provider;
+	void* symbol = find_symbol(context, &state, &mapped_native_provider);
 	int bind_zero = 0;
 	if (!symbol) {
 		enum unresolved_import_action action =
@@ -895,7 +992,13 @@ static int resolve_chained_bind(struct import_context* context,
 			return -1;
 		}
 	}
-	*value = bind_zero ? 0 : (uintptr_t)symbol + state.addend;
+	if (bind_zero) {
+		*value = 0;
+		return 0;
+	}
+	if (resolved_symbol_value(context, &state, symbol,
+	                          mapped_native_provider, value) != 0)
+		return -1;
 	return 0;
 }
 
@@ -1096,22 +1199,29 @@ int machgate_bind_native_imports(struct machgate_guest_image* image, char* error
 			&context, context.dyld_info->bind_off,
 			context.dyld_info->bind_size, 0, 0);
 		if (result < 0)
-			return -1;
+			goto failed;
 		bind_count += result;
 		result = apply_bind_stream(
 			&context, context.dyld_info->weak_bind_off,
 			context.dyld_info->weak_bind_size, 0, 1);
 		if (result < 0)
-			return -1;
+			goto failed;
 		bind_count += result;
 		result = apply_bind_stream(
 			&context, context.dyld_info->lazy_bind_off,
 			context.dyld_info->lazy_bind_size, 1, 0);
 		if (result < 0)
-			return -1;
+			goto failed;
 		bind_count += result;
 	}
 	if (apply_chained_fixups(&context) != 0)
-		return -1;
+		goto failed;
+	if (machgate_finish_native_structor_adapters(
+		    context.structor_adapters, error, error_size) != 0)
+		goto failed;
 	return bind_count;
+
+failed:
+	machgate_discard_native_structor_adapters(context.structor_adapters);
+	return -1;
 }

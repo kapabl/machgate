@@ -8,6 +8,8 @@ build/
 build-arm64/
 build-arm64-release/
 build-cleanroom/
+build-unwind/
+build-zero-unwind/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -36,13 +38,20 @@ tests/fixtures/darwin_init_offsets
 tests/fixtures/guest_cxx_allocator_bridge
 tests/fixtures/dynamic_libsystem_call
 tests/fixtures/dynamic_chained_libsystem_call
+tests/fixtures/dynamic_resource_limit_imports
+tests/fixtures/dynamic_guest_unwind
+tests/fixtures/dynamic_guest_unwind_eh_frame
+tests/fixtures/dynamic_guest_unwind_registers
 tests/fixtures/dynamic_flat_provider_precedence
 tests/fixtures/darwin_variadic_abi
 tests/fixtures/darwin_file_variadic_abi
 tests/fixtures/darwin_guest_return_buffering
 tests/fixtures/darwin_task_policy
 tests/fixtures/dynamic_mapped_provider
+tests/fixtures/dynamic_inherited_resolver
 tests/fixtures/dynamic_versioned_provider
+tests/fixtures/dynamic_structor_return
+tests/fixtures/dynamic_chained_structor_return
 tests/fixtures/dynamic_lazy_unused
 tests/fixtures/dynamic_lazy_called
 tests/fixtures/dynamic_chained_lazy_unused
@@ -55,6 +64,7 @@ tests/fixtures/dynamic_regular_lazy_unused
 tests/fixtures/dynamic_regular_lazy_called
 tests/fixtures/dynamic_compiler_runtime
 tests/fixtures/dynamic_compiler_floattidf
+tests/fixtures/dynamic_compiler_divti3
 tests/fixtures/dynamic_chained_data_missing
 tests/fixtures/dynamic_guest_definition
 tests/fixtures/dynamic_backward_bind_1
@@ -62,6 +72,8 @@ tests/fixtures/dynamic_backward_bind_2
 tests/fixtures/dynamic_backward_bind_3
 tests/fixtures/mapped_provider_stub.dylib
 tests/fixtures/mapped_provider_versioned_stub.dylib
+tests/fixtures/structor_provider_stub.dylib
+tests/fixtures/inherited_resolver_provider_stub.dylib
 tests/fixtures/libsystem_fixture.dylib
 tests/fixtures/tlv_context_provider_stub.dylib
 tests/fixtures/darwin_range_000_099
@@ -79,6 +91,8 @@ tests/fixtures/fat_binary
 tests/fixtures/fat_stub_x86
 tests/fixtures/machgate_trampoline_target
 tests/fixtures/libmachgate_test_provider.so
+tests/fixtures/libnative_structor_provider.so
+tests/fixtures/libinherited_resolver_provider.so
 tests/fixtures/process_termination_probe
 tests/external/cache/
 tests/external/work/

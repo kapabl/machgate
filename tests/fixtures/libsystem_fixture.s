@@ -50,9 +50,29 @@ _vsnprintf:
 _fflush:
     ret
 
+.globl _getrlimit
+.p2align 2
+_getrlimit:
+    ret
+
+.globl _setrlimit
+.p2align 2
+_setrlimit:
+    ret
+
 .globl _task_policy_set
 .p2align 2
 _task_policy_set:
+    ret
+
+.globl __Unwind_Backtrace
+.p2align 2
+__Unwind_Backtrace:
+    ret
+
+.globl __Unwind_GetIP
+.p2align 2
+__Unwind_GetIP:
     ret
 
 .globl _pthread_key_create

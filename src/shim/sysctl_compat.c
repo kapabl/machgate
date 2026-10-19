@@ -1,6 +1,7 @@
 #include "host_facts.h"
 
 #include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +11,42 @@ enum darwin_sysctl_root {
 	DARWIN_SYSCTL_KERN = 1,
 	DARWIN_SYSCTL_HW = 6,
 };
+
+enum darwin_sysctl_kern_selector {
+	DARWIN_SYSCTL_KERN_PROC = 14,
+};
+
+enum darwin_sysctl_kern_proc_selector {
+	DARWIN_SYSCTL_KERN_PROC_PID = 1,
+};
+
+enum {
+	DARWIN_KINFO_PROC_SIZE = 0x288,
+	DARWIN_PROCESS_TRACED = 0x00000800,
+};
+
+struct darwin_extern_proc_header {
+	uint8_t p_un[16];
+	uint64_t p_vmspace;
+	uint64_t p_sigacts;
+	int32_t p_flag;
+	uint8_t p_stat;
+	uint8_t p_stat_padding[3];
+	int32_t p_pid;
+};
+
+struct darwin_kinfo_proc {
+	struct darwin_extern_proc_header kp_proc;
+	uint8_t remaining_fields[DARWIN_KINFO_PROC_SIZE -
+	                         sizeof(struct darwin_extern_proc_header)];
+};
+
+_Static_assert(offsetof(struct darwin_kinfo_proc, kp_proc.p_flag) == 32,
+	       "Darwin extern_proc p_flag offset changed");
+_Static_assert(offsetof(struct darwin_kinfo_proc, kp_proc.p_pid) == 40,
+	       "Darwin extern_proc p_pid offset changed");
+_Static_assert(sizeof(struct darwin_kinfo_proc) == DARWIN_KINFO_PROC_SIZE,
+	       "Darwin kinfo_proc size changed");
 
 enum darwin_sysctl_value_kind {
 	DARWIN_SYSCTL_ACTIVE_CPU_COUNT,
@@ -147,6 +184,61 @@ static int copy_hostname(void* output, size_t* output_size)
 	return copy_string(hostname, output, output_size);
 }
 
+static int current_process_is_traced(void)
+{
+	FILE* status = fopen("/proc/self/status", "r");
+
+	if (!status)
+		return 0;
+
+	char line[128];
+	int tracer_pid = 0;
+	while (fgets(line, sizeof(line), status)) {
+		if (sscanf(line, "TracerPid: %d", &tracer_pid) == 1)
+			break;
+	}
+	fclose(status);
+	return tracer_pid > 0;
+}
+
+static int read_current_process(const int* name, unsigned int name_length,
+	                            void* output, size_t* output_size,
+	                            const void* replacement,
+	                            size_t replacement_size)
+{
+	if (name_length != 4 || name[2] != DARWIN_SYSCTL_KERN_PROC_PID) {
+		errno = ENOENT;
+		return -1;
+	}
+	if (name[3] != getpid()) {
+		errno = ESRCH;
+		return -1;
+	}
+	if (replacement || replacement_size != 0) {
+		errno = EPERM;
+		return -1;
+	}
+	if (!output_size) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (!output) {
+		*output_size = DARWIN_KINFO_PROC_SIZE;
+		return 0;
+	}
+	if (*output_size < DARWIN_KINFO_PROC_SIZE) {
+		*output_size = DARWIN_KINFO_PROC_SIZE;
+		errno = ENOMEM;
+		return -1;
+	}
+
+	struct darwin_kinfo_proc process_info = { 0 };
+	process_info.kp_proc.p_pid = (int32_t)getpid();
+	if (current_process_is_traced())
+		process_info.kp_proc.p_flag |= DARWIN_PROCESS_TRACED;
+	return copy_result(&process_info, sizeof(process_info), output, output_size);
+}
+
 static int read_entry(const struct darwin_sysctl_entry* entry, void* output,
 	                  size_t* output_size)
 {
@@ -212,13 +304,14 @@ int sysctlnametomib(const char* name, int* mib, size_t* mib_length)
 int sysctl(const int* name, unsigned int name_length, void* output,
 	   size_t* output_size, const void* replacement, size_t replacement_size)
 {
-	(void)replacement;
-	(void)replacement_size;
-
 	if (!name || name_length < 2) {
 		errno = ENOENT;
 		return -1;
 	}
+	if (name[0] == DARWIN_SYSCTL_KERN &&
+	    name[1] == DARWIN_SYSCTL_KERN_PROC)
+		return read_current_process(name, name_length, output, output_size,
+		                            replacement, replacement_size);
 
 	const struct darwin_sysctl_entry* entry = find_mib_entry(name[0], name[1]);
 	if (!entry) {

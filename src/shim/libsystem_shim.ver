@@ -15,6 +15,17 @@ GLIBC_2.17 {
         pthread_cond_signal;
         pthread_cond_timedwait;
         pthread_cond_wait;
+        machgate_darwin_pthread_mutex_destroy;
+        machgate_darwin_pthread_mutex_init;
+        machgate_darwin_pthread_mutex_lock;
+        machgate_darwin_pthread_mutex_trylock;
+        machgate_darwin_pthread_mutex_unlock;
+        machgate_darwin_pthread_cond_broadcast;
+        machgate_darwin_pthread_cond_clockwait;
+        machgate_darwin_pthread_cond_destroy;
+        machgate_darwin_pthread_cond_signal;
+        machgate_darwin_pthread_cond_timedwait;
+        machgate_darwin_pthread_cond_wait;
         pthread_rwlock_rdlock;
         pthread_rwlock_wrlock;
         pthread_rwlock_unlock;
@@ -60,6 +71,9 @@ GLIBC_2.17 {
         CFStringGetSystemEncoding;
         freeaddrinfo;
         gai_strerror;
+        machgate_darwin_getrlimit;
+        machgate_darwin_setrlimit;
+        machgate_resolve_guest_import_v1;
         strerror_r;
         _DefaultRuneLocale;
         __maskrune;

@@ -1,4 +1,5 @@
 #include "application/guest_session.h"
+#include "application/guest_unwind.h"
 #include "application/process_launch_context.h"
 
 #include "guest_allocator_bridge.h"
@@ -361,6 +362,10 @@ int machgate_run_guest(const char* executable_path, int argument_count,
 		return 1;
 	}
 	if (machgate_bind_native_imports(&image, error, sizeof(error)) < 0) {
+		fprintf(stderr, "machgate: %s\n", error);
+		return 1;
+	}
+	if (machgate_register_guest_unwind(&image, error, sizeof(error)) != 0) {
 		fprintf(stderr, "machgate: %s\n", error);
 		return 1;
 	}

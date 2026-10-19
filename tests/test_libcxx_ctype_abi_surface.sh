@@ -115,6 +115,7 @@ CPP
 "${CXX:-clang++}" \
     -std=c++17 \
     -nostdinc++ \
+    -nostdlib++ \
     -I "$LIBCXX_INCLUDE" \
     "$tmpdir/libcxx_ctype_probe.cpp" \
     -L "$LIBCXX_DIR" \

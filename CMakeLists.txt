@@ -12,10 +12,13 @@ endif()
 add_executable(machgate
     src/machgate.c
     src/application/guest_session.c
+    src/application/guest_unwind.c
     src/application/process_launch_context.c
     src/loader.c
     src/instruction_adaptation.c
     src/native_imports.c
+    src/native_structor_adapter.c
+    src/native_structor_adapter_entry.S
     src/native_provider_map.c
     src/guest_symbols.c
     src/guest_allocator_bridge.c
@@ -59,6 +62,7 @@ add_library(system_shim SHARED
     src/shim/file_operations_compat.c
     src/shim/file_operations_abi_entry.S
     src/shim/filesystem_metadata_compat.c
+    src/shim/guest_import_resolver.c
     src/shim/guest_process_compat.c
     src/shim/host_facts.c
     src/shim/locale_string_compat.c
@@ -66,6 +70,7 @@ add_library(system_shim SHARED
     src/shim/notify_compat.c
     src/shim/pthread_sync_compat.c
     src/shim/process_termination_compat.c
+    src/shim/resource_limit_compat.c
     src/shim/security_compat.c
     src/shim/sysctl_compat.c
     src/shim/task_policy_compat.c
@@ -78,6 +83,7 @@ add_library(system_shim SHARED
     src/syscall/execve_reexec.c
 )
 target_link_libraries(system_shim PRIVATE m pthread dl)
+target_include_directories(system_shim PRIVATE src)
 target_compile_options(system_shim PRIVATE
     -Wall -O2 -g -fno-omit-frame-pointer
 )

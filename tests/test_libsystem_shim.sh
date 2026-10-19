@@ -9,7 +9,7 @@ BUILD_DIR="${BUILD_DIR:-$MACHGATE_ROOT/build}"
 
 # Test that the .so loads without errors
 BUILD_DIR="$BUILD_DIR" LD_LIBRARY_PATH="$BUILD_DIR" python3 -c "
-import ctypes, errno as host_errno, fcntl as host_fcntl, os, signal, subprocess, sys, tempfile, threading, time
+import ctypes, errno as host_errno, fcntl as host_fcntl, os, resource, signal, subprocess, sys, tempfile, threading, time
 
 build_dir = os.environ['BUILD_DIR']
 lib = ctypes.CDLL(os.path.join(build_dir, 'libsystem_shim.so'))
@@ -226,6 +226,69 @@ lib.__error.restype = ctypes.POINTER(ctypes.c_int)
 p = lib.__error()
 assert p, '__error returned NULL'
 
+class DarwinRlimit(ctypes.Structure):
+    _fields_ = [
+        ('current', ctypes.c_uint64),
+        ('maximum', ctypes.c_uint64),
+    ]
+
+darwin_infinity = (1 << 63) - 1
+
+def darwin_limit(host_limit):
+    return darwin_infinity if host_limit == resource.RLIM_INFINITY else host_limit
+
+darwin_getrlimit = lib.machgate_darwin_getrlimit
+darwin_getrlimit.argtypes = [ctypes.c_int, ctypes.POINTER(DarwinRlimit)]
+darwin_getrlimit.restype = ctypes.c_int
+darwin_setrlimit = lib.machgate_darwin_setrlimit
+darwin_setrlimit.argtypes = [ctypes.c_int, ctypes.POINTER(DarwinRlimit)]
+darwin_setrlimit.restype = ctypes.c_int
+
+for darwin_resource, host_resource in [
+    (0, resource.RLIMIT_CPU),
+    (1, resource.RLIMIT_FSIZE),
+    (2, resource.RLIMIT_DATA),
+    (3, resource.RLIMIT_STACK),
+    (4, resource.RLIMIT_CORE),
+    (5, resource.RLIMIT_AS),
+    (6, resource.RLIMIT_MEMLOCK),
+    (7, resource.RLIMIT_NPROC),
+    (8, resource.RLIMIT_NOFILE),
+]:
+    host_limits = resource.getrlimit(host_resource)
+    limits = DarwinRlimit()
+    assert darwin_getrlimit(darwin_resource, ctypes.byref(limits)) == 0
+    assert limits.current == darwin_limit(host_limits[0]), (
+        f'Darwin resource {darwin_resource} returned current {limits.current}, '
+        f'expected {darwin_limit(host_limits[0])}'
+    )
+    assert limits.maximum == darwin_limit(host_limits[1]), (
+        f'Darwin resource {darwin_resource} returned maximum {limits.maximum}, '
+        f'expected {darwin_limit(host_limits[1])}'
+    )
+
+nofile_limits = DarwinRlimit()
+assert darwin_getrlimit(8, ctypes.byref(nofile_limits)) == 0
+assert darwin_setrlimit(8, ctypes.byref(nofile_limits)) == 0
+roundtrip_nofile_limits = DarwinRlimit()
+assert darwin_getrlimit(8, ctypes.byref(roundtrip_nofile_limits)) == 0
+assert roundtrip_nofile_limits.current == nofile_limits.current
+assert roundtrip_nofile_limits.maximum == nofile_limits.maximum
+
+host_cpu_limits = resource.getrlimit(resource.RLIMIT_CPU)
+if host_cpu_limits == (resource.RLIM_INFINITY, resource.RLIM_INFINITY):
+    unlimited_limits = DarwinRlimit(darwin_infinity, darwin_infinity)
+    assert darwin_setrlimit(0, ctypes.byref(unlimited_limits)) == 0
+    assert resource.getrlimit(resource.RLIMIT_CPU) == host_cpu_limits
+
+p.contents.value = 0
+assert darwin_getrlimit(9, ctypes.byref(nofile_limits)) == -1
+assert p.contents.value == host_errno.EINVAL
+
+p.contents.value = 0
+assert darwin_getrlimit(8, None) == -1
+assert p.contents.value == host_errno.EFAULT
+
 lib.sysctlbyname.argtypes = [
     ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
     ctypes.c_void_p, ctypes.c_size_t,
@@ -294,6 +357,129 @@ assert lib.sysctl(
     mib, 2, ctypes.byref(mib_cpu_count), ctypes.byref(mib_cpu_size), None, 0
 ) == 0
 assert mib_cpu_count.value == cpu_count.value
+
+darwin_kinfo_proc_size = 0x288
+darwin_p_traced = 0x00000800
+darwin_p_flag_offset = 32
+darwin_p_pid_offset = 40
+process_mib = (ctypes.c_int * 4)(1, 14, 1, os.getpid())
+process_info = ctypes.create_string_buffer(darwin_kinfo_proc_size)
+ctypes.memset(process_info, 0xa5, darwin_kinfo_proc_size)
+process_info_size = ctypes.c_size_t(darwin_kinfo_proc_size)
+assert lib.sysctl(
+    process_mib, 4, process_info, ctypes.byref(process_info_size), None, 0
+) == 0
+assert process_info_size.value == darwin_kinfo_proc_size
+with open('/proc/self/status') as process_status:
+    tracer_pid = next(
+        int(line.split(':', 1)[1])
+        for line in process_status
+        if line.startswith('TracerPid:')
+    )
+expected_process_flags = darwin_p_traced if tracer_pid else 0
+returned_process_flags = ctypes.c_int32.from_buffer(
+    process_info, darwin_p_flag_offset
+).value
+returned_process_pid = ctypes.c_int32.from_buffer(
+    process_info, darwin_p_pid_offset
+).value
+assert returned_process_flags == expected_process_flags, (
+    f'kern.proc.pid returned flags {returned_process_flags:#x}, '
+    f'expected {expected_process_flags:#x}'
+)
+assert returned_process_pid == os.getpid(), (
+    f'kern.proc.pid returned pid {returned_process_pid}, expected {os.getpid()}'
+)
+expected_process_info = bytearray(darwin_kinfo_proc_size)
+expected_process_info[darwin_p_flag_offset:darwin_p_flag_offset + 4] = (
+    expected_process_flags.to_bytes(4, byteorder=sys.byteorder)
+)
+expected_process_info[darwin_p_pid_offset:darwin_p_pid_offset + 4] = (
+    os.getpid().to_bytes(4, byteorder=sys.byteorder, signed=True)
+)
+assert process_info.raw == bytes(expected_process_info), (
+    'kern.proc.pid returned fields outside the minimal process representation'
+)
+
+process_info_size = ctypes.c_size_t()
+assert lib.sysctl(
+    process_mib, 4, None, ctypes.byref(process_info_size), None, 0
+) == 0
+assert process_info_size.value == darwin_kinfo_proc_size
+
+short_process_info = ctypes.create_string_buffer(darwin_kinfo_proc_size - 1)
+short_process_info_size = ctypes.c_size_t(len(short_process_info))
+p.contents.value = 0
+assert lib.sysctl(
+    process_mib, 4, short_process_info,
+    ctypes.byref(short_process_info_size), None, 0
+) == -1
+assert p.contents.value == host_errno.ENOMEM
+assert short_process_info_size.value == darwin_kinfo_proc_size
+
+p.contents.value = 0
+assert lib.sysctl(process_mib, 4, process_info, None, None, 0) == -1
+assert p.contents.value == host_errno.EINVAL
+
+unsupported_process_mib = (ctypes.c_int * 4)(1, 14, 0, os.getpid())
+p.contents.value = 0
+assert lib.sysctl(
+    unsupported_process_mib, 4, process_info,
+    ctypes.byref(process_info_size), None, 0
+) == -1
+assert p.contents.value == host_errno.ENOENT
+
+other_process_mib = (ctypes.c_int * 4)(1, 14, 1, os.getpid() + 1)
+p.contents.value = 0
+assert lib.sysctl(
+    other_process_mib, 4, process_info,
+    ctypes.byref(process_info_size), None, 0
+) == -1
+assert p.contents.value == host_errno.ESRCH
+
+replacement_process_info = ctypes.c_int(1)
+process_info_size = ctypes.c_size_t(darwin_kinfo_proc_size)
+p.contents.value = 0
+assert lib.sysctl(
+    process_mib, 4, process_info, ctypes.byref(process_info_size),
+    ctypes.byref(replacement_process_info), ctypes.sizeof(replacement_process_info)
+) == -1
+assert p.contents.value == host_errno.EPERM
+
+traced_process_probe = '''
+import ctypes, os, sys
+
+host_libc = ctypes.CDLL(None, use_errno=True)
+host_libc.ptrace.argtypes = [
+    ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p,
+]
+host_libc.ptrace.restype = ctypes.c_long
+if host_libc.ptrace(0, 0, None, None) != 0:
+    sys.exit(77)
+
+lib = ctypes.CDLL(os.path.join(sys.argv[1], 'libsystem_shim.so'))
+lib.sysctl.argtypes = [
+    ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+]
+lib.sysctl.restype = ctypes.c_int
+process_mib = (ctypes.c_int * 4)(1, 14, 1, os.getpid())
+process_info = ctypes.create_string_buffer(0x288)
+process_info_size = ctypes.c_size_t(len(process_info))
+assert lib.sysctl(
+    process_mib, 4, process_info, ctypes.byref(process_info_size), None, 0
+) == 0
+assert ctypes.c_int32.from_buffer(process_info, 32).value == 0x00000800
+assert ctypes.c_int32.from_buffer(process_info, 40).value == os.getpid()
+'''
+traced_process_result = subprocess.run(
+    [sys.executable, '-c', traced_process_probe, build_dir],
+    capture_output=True, text=True,
+)
+assert traced_process_result.returncode in (0, 77), (
+    'traced kern.proc.pid probe failed:\n'
+    + traced_process_result.stdout + traced_process_result.stderr
+)
 
 uname_buffer = ctypes.create_string_buffer(256 * 5)
 lib.uname.argtypes = [ctypes.c_void_p]
@@ -1398,6 +1584,11 @@ assert aligned_new_ptr and aligned_new_ptr % 64 == 0, f'aligned operator new ret
 assert lib.malloc_size(aligned_new_ptr) >= 72, 'malloc_size returned too little for aligned operator new allocation'
 operator_delete_aligned_sized(aligned_new_ptr, 72, 64)
 
+small_alignment_new_ptr = operator_new_aligned(129, 1)
+assert small_alignment_new_ptr, 'aligned operator new rejected a sub-pointer alignment'
+assert lib.malloc_size(small_alignment_new_ptr) >= 129, 'malloc_size returned too little for small-alignment operator new allocation'
+operator_delete_aligned_sized(small_alignment_new_ptr, 129, 1)
+
 # Darwin ctype masks must match Apple's <ctype.h>. Boost.Test validates
 # names such as auto_start_dbg through std::isalnum, which reaches ___maskrune.
 lib.__maskrune.argtypes = [ctypes.c_int, ctypes.c_ulong]
@@ -1493,6 +1684,110 @@ static_condition = ctypes.create_string_buffer(64)
 ctypes.c_uint32.from_buffer(static_condition).value = 0x3CB0B1BB
 assert lib.pthread_cond_signal(ctypes.byref(static_condition)) == 0, 'static condition signal failed'
 assert lib.pthread_cond_destroy(ctypes.byref(static_condition)) == 0, 'static condition destroy failed'
+
+provider_mutex = ctypes.create_string_buffer(64)
+provider_condition = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(provider_condition).value = 0x3CB0B1BB
+provider_mutex_init = lib.machgate_darwin_pthread_mutex_init
+provider_mutex_init.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+provider_mutex_destroy = lib.machgate_darwin_pthread_mutex_destroy
+provider_mutex_destroy.argtypes = [ctypes.c_void_p]
+provider_mutex_lock = lib.machgate_darwin_pthread_mutex_lock
+provider_mutex_lock.argtypes = [ctypes.c_void_p]
+provider_mutex_trylock = lib.machgate_darwin_pthread_mutex_trylock
+provider_mutex_trylock.argtypes = [ctypes.c_void_p]
+provider_mutex_unlock = lib.machgate_darwin_pthread_mutex_unlock
+provider_mutex_unlock.argtypes = [ctypes.c_void_p]
+provider_condition_signal = lib.machgate_darwin_pthread_cond_signal
+provider_condition_signal.argtypes = [ctypes.c_void_p]
+provider_condition_broadcast = lib.machgate_darwin_pthread_cond_broadcast
+provider_condition_broadcast.argtypes = [ctypes.c_void_p]
+provider_condition_wait = lib.machgate_darwin_pthread_cond_wait
+provider_condition_wait.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+provider_condition_timedwait = lib.machgate_darwin_pthread_cond_timedwait
+provider_condition_timedwait.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(Timespec)]
+provider_condition_clockwait = lib.machgate_darwin_pthread_cond_clockwait
+provider_condition_clockwait.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(Timespec)]
+provider_condition_destroy = lib.machgate_darwin_pthread_cond_destroy
+provider_condition_destroy.argtypes = [ctypes.c_void_p]
+assert provider_mutex_init(ctypes.byref(provider_mutex), None) == 0, 'provider mutex init failed'
+assert provider_mutex_lock(ctypes.byref(provider_mutex)) == 0, 'provider mutex lock failed'
+assert provider_mutex_trylock(ctypes.byref(provider_mutex)) == host_errno.EBUSY, 'provider mutex trylock did not return Linux EBUSY'
+assert provider_mutex_unlock(ctypes.byref(provider_mutex)) == 0, 'provider mutex unlock failed'
+assert provider_mutex_lock(ctypes.byref(provider_mutex)) == 0, 'provider mutex relock failed'
+provider_timedwait_result = provider_condition_timedwait(
+    ctypes.byref(provider_condition), ctypes.byref(provider_mutex), ctypes.byref(deadline))
+assert provider_timedwait_result == host_errno.ETIMEDOUT, 'provider timedwait did not return Linux ETIMEDOUT'
+provider_clockwait_result = provider_condition_clockwait(
+    ctypes.byref(provider_condition), ctypes.byref(provider_mutex), 1, ctypes.byref(deadline))
+assert provider_clockwait_result == host_errno.ETIMEDOUT, 'provider clockwait did not return Linux ETIMEDOUT'
+assert provider_condition_signal(ctypes.byref(provider_condition)) == 0, 'provider condition signal failed'
+assert provider_condition_broadcast(ctypes.byref(provider_condition)) == 0, 'provider condition broadcast failed'
+assert provider_mutex_unlock(ctypes.byref(provider_mutex)) == 0, 'provider mutex timedwait unlock failed'
+assert provider_condition_destroy(ctypes.byref(provider_condition)) == 0, 'provider condition destroy failed'
+assert provider_mutex_destroy(ctypes.byref(provider_mutex)) == 0, 'provider mutex destroy failed'
+
+provider_recursive_mutex = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(provider_recursive_mutex).value = 0x32AAABA2
+assert provider_mutex_lock(ctypes.byref(provider_recursive_mutex)) == 0, 'provider static recursive mutex first lock failed'
+assert provider_mutex_lock(ctypes.byref(provider_recursive_mutex)) == 0, 'provider static recursive mutex second lock failed'
+assert provider_mutex_unlock(ctypes.byref(provider_recursive_mutex)) == 0, 'provider static recursive mutex first unlock failed'
+assert provider_mutex_unlock(ctypes.byref(provider_recursive_mutex)) == 0, 'provider static recursive mutex second unlock failed'
+assert provider_mutex_destroy(ctypes.byref(provider_recursive_mutex)) == 0, 'provider static recursive mutex destroy failed'
+
+provider_error_check_mutex = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(provider_error_check_mutex).value = 0x32AAABA1
+assert provider_mutex_lock(ctypes.byref(provider_error_check_mutex)) == 0, 'provider static error-check mutex first lock failed'
+assert provider_mutex_lock(ctypes.byref(provider_error_check_mutex)) == host_errno.EDEADLK, 'provider mutex did not preserve Linux errno'
+assert provider_mutex_unlock(ctypes.byref(provider_error_check_mutex)) == 0, 'provider static error-check mutex unlock failed'
+assert provider_mutex_destroy(ctypes.byref(provider_error_check_mutex)) == 0, 'provider static error-check mutex destroy failed'
+
+provider_wait_mutex = ctypes.create_string_buffer(64)
+provider_wait_condition = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(provider_wait_condition).value = 0x3CB0B1BB
+provider_waiter_ready = threading.Event()
+provider_waiter_results = []
+assert provider_mutex_init(ctypes.byref(provider_wait_mutex), None) == 0, 'provider wait mutex init failed'
+
+def provider_waiter():
+    provider_waiter_results.append(provider_mutex_lock(ctypes.byref(provider_wait_mutex)))
+    provider_waiter_ready.set()
+    provider_waiter_results.append(provider_condition_wait(
+        ctypes.byref(provider_wait_condition), ctypes.byref(provider_wait_mutex)))
+    provider_waiter_results.append(provider_mutex_unlock(ctypes.byref(provider_wait_mutex)))
+
+provider_waiter_thread = threading.Thread(target=provider_waiter)
+provider_waiter_thread.start()
+assert provider_waiter_ready.wait(timeout=5), 'provider condition waiter did not start'
+assert provider_mutex_lock(ctypes.byref(provider_wait_mutex)) == 0, 'provider condition signal lock failed'
+assert provider_condition_signal(ctypes.byref(provider_wait_condition)) == 0, 'provider condition wake signal failed'
+assert provider_mutex_unlock(ctypes.byref(provider_wait_mutex)) == 0, 'provider condition signal unlock failed'
+provider_waiter_thread.join(timeout=5)
+assert not provider_waiter_thread.is_alive(), 'provider condition waiter did not wake'
+assert provider_waiter_results == [0, 0, 0], f'provider condition wait results={provider_waiter_results}'
+assert provider_condition_destroy(ctypes.byref(provider_wait_condition)) == 0, 'provider wait condition destroy failed'
+assert provider_mutex_destroy(ctypes.byref(provider_wait_mutex)) == 0, 'provider wait mutex destroy failed'
+
+provider_concurrent_mutex = ctypes.create_string_buffer(64)
+ctypes.c_uint32.from_buffer(provider_concurrent_mutex).value = 0x32AAABA7
+provider_concurrent_barrier = threading.Barrier(8)
+provider_concurrent_results = []
+
+def provider_concurrent_worker():
+    provider_concurrent_barrier.wait()
+    result = provider_mutex_lock(ctypes.byref(provider_concurrent_mutex))
+    if result == 0:
+        result = provider_mutex_unlock(ctypes.byref(provider_concurrent_mutex))
+    provider_concurrent_results.append(result)
+
+provider_concurrent_threads = [threading.Thread(target=provider_concurrent_worker) for _ in range(8)]
+for provider_thread in provider_concurrent_threads:
+    provider_thread.start()
+for provider_thread in provider_concurrent_threads:
+    provider_thread.join(timeout=5)
+assert all(not provider_thread.is_alive() for provider_thread in provider_concurrent_threads), 'provider concurrent first use hung'
+assert provider_concurrent_results == [0] * 8, f'provider concurrent results={provider_concurrent_results}'
+assert provider_mutex_destroy(ctypes.byref(provider_concurrent_mutex)) == 0, 'provider concurrent mutex destroy failed'
 
 static_read_lock = ctypes.create_string_buffer(256)
 ctypes.c_uint32.from_buffer(static_read_lock).value = 0x2DA8B3B4

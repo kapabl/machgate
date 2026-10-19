@@ -27,6 +27,11 @@ ___clear_cache:
 ___floattidf:
     ret
 
+.globl ___divti3
+.p2align 2
+___divti3:
+    ret
+
 .globl dyld_stub_binder
 .p2align 2
 dyld_stub_binder:

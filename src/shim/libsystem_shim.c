@@ -4014,15 +4014,26 @@ static int shim_wait_trace_enabled(void)
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
+static const char* shim_host_environment_value(const char* name)
+{
+	size_t name_length = strlen(name);
+	for (char** entry = environ; entry && *entry; entry++) {
+		if (strncmp(*entry, name, name_length) == 0 &&
+		    (*entry)[name_length] == '=')
+			return *entry + name_length + 1;
+	}
+	return NULL;
+}
+
 static int shim_alloc_trace_enabled(void)
 {
-	const char* value = getenv("MACHGATE_TRACE_ALLOC");
+	const char* value = shim_host_environment_value("MACHGATE_TRACE_ALLOC");
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
 static int shim_alloc_trace_full_enabled(void)
 {
-	const char* value = getenv("MACHGATE_TRACE_ALLOC");
+	const char* value = shim_host_environment_value("MACHGATE_TRACE_ALLOC");
 	return value && (strcmp(value, "2") == 0 ||
 	                 strcmp(value, "all") == 0 ||
 	                 strcmp(value, "full") == 0 ||
@@ -4031,7 +4042,8 @@ static int shim_alloc_trace_full_enabled(void)
 
 static int shim_alloc_mismatch_trace_enabled(void)
 {
-	const char* value = getenv("MACHGATE_TRACE_ALLOC_MISMATCH");
+	const char* value =
+		shim_host_environment_value("MACHGATE_TRACE_ALLOC_MISMATCH");
 	if (value && value[0] && strcmp(value, "0") != 0)
 		return 1;
 	return shim_alloc_trace_enabled();
@@ -4039,7 +4051,8 @@ static int shim_alloc_mismatch_trace_enabled(void)
 
 static int shim_alloc_signal_dump_enabled(void)
 {
-	const char* value = getenv("MACHGATE_TRACE_ALLOC_MISMATCH");
+	const char* value =
+		shim_host_environment_value("MACHGATE_TRACE_ALLOC_MISMATCH");
 	if (value && strcmp(value, "0") == 0)
 		return 0;
 	return 1;
@@ -4047,7 +4060,8 @@ static int shim_alloc_signal_dump_enabled(void)
 
 static size_t shim_alloc_trace_size(void)
 {
-	const char* value = getenv("MACHGATE_TRACE_ALLOC_SIZE");
+	const char* value =
+		shim_host_environment_value("MACHGATE_TRACE_ALLOC_SIZE");
 	char* end = NULL;
 	unsigned long long size;
 
@@ -4065,13 +4079,15 @@ static size_t shim_alloc_trace_size(void)
 
 static int shim_alloc_recent_full_enabled(void)
 {
-	const char* value = getenv("MACHGATE_TRACE_ALLOC_RECENT_FULL");
+	const char* value =
+		shim_host_environment_value("MACHGATE_TRACE_ALLOC_RECENT_FULL");
 	return value && value[0] && strcmp(value, "0") != 0;
 }
 
 static size_t shim_alloc_recent_limit(void)
 {
-	const char* value = getenv("MACHGATE_TRACE_ALLOC_RECENT_LIMIT");
+	const char* value =
+		shim_host_environment_value("MACHGATE_TRACE_ALLOC_RECENT_LIMIT");
 	char* end = NULL;
 	unsigned long long limit;
 
@@ -7064,6 +7080,17 @@ static void* machgate_shim_memalign_at(size_t alignment, size_t size, void* call
 	return result;
 }
 
+static void* machgate_shim_operator_new_aligned_at(size_t size,
+                                                   size_t alignment,
+                                                   void* caller)
+{
+	if (!alignment || (alignment & (alignment - 1)) != 0)
+		return NULL;
+	if (alignment < sizeof(void*))
+		alignment = sizeof(void*);
+	return machgate_shim_memalign_at(alignment, size, caller);
+}
+
 void* machgate_shim_memalign(size_t alignment, size_t size)
 {
 	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
@@ -7235,7 +7262,8 @@ void* machgate_shim_guest_operator_new_aligned(size_t size, size_t alignment)
 		mark_guest_cxx_allocation(result, size);
 		return result;
 	}
-	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
+	return machgate_shim_operator_new_aligned_at(
+		size, alignment, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_shim_guest_operator_new_array_aligned(size_t size, size_t alignment)
@@ -7247,7 +7275,8 @@ void* machgate_shim_guest_operator_new_array_aligned(size_t size, size_t alignme
 		mark_guest_cxx_allocation(result, size);
 		return result;
 	}
-	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
+	return machgate_shim_operator_new_aligned_at(
+		size, alignment, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_shim_guest_operator_new_nothrow(size_t size, const void* nothrow_arg)
@@ -7287,7 +7316,8 @@ void* machgate_shim_guest_operator_new_aligned_nothrow(size_t size,
 		mark_guest_cxx_allocation(result, size);
 		return result;
 	}
-	return machgate_shim_guest_operator_new_aligned(size, alignment);
+	return machgate_shim_operator_new_aligned_at(
+		size, alignment, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_shim_guest_operator_new_array_aligned_nothrow(size_t size,
@@ -7302,7 +7332,8 @@ void* machgate_shim_guest_operator_new_array_aligned_nothrow(size_t size,
 		mark_guest_cxx_allocation(result, size);
 		return result;
 	}
-	return machgate_shim_guest_operator_new_array_aligned(size, alignment);
+	return machgate_shim_operator_new_aligned_at(
+		size, alignment, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_shim_guest_operator_delete(void* ptr)
@@ -7563,27 +7594,31 @@ void* machgate_operator_new_array_nothrow(size_t size, const void* nothrow_arg)
 void* machgate_operator_new_aligned(size_t size, size_t alignment) __asm__("_ZnwmSt11align_val_t");
 void* machgate_operator_new_aligned(size_t size, size_t alignment)
 {
-	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
+	return machgate_shim_operator_new_aligned_at(
+		size, alignment, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_array_aligned(size_t size, size_t alignment) __asm__("_ZnamSt11align_val_t");
 void* machgate_operator_new_array_aligned(size_t size, size_t alignment)
 {
-	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
+	return machgate_shim_operator_new_aligned_at(
+		size, alignment, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_aligned_nothrow(size_t size, size_t alignment, const void* nothrow_arg) __asm__("_ZnwmSt11align_val_tRKSt9nothrow_t");
 void* machgate_operator_new_aligned_nothrow(size_t size, size_t alignment, const void* nothrow_arg)
 {
 	(void)nothrow_arg;
-	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
+	return machgate_shim_operator_new_aligned_at(
+		size, alignment, MACHGATE_SHIM_CALLER());
 }
 
 void* machgate_operator_new_array_aligned_nothrow(size_t size, size_t alignment, const void* nothrow_arg) __asm__("_ZnamSt11align_val_tRKSt9nothrow_t");
 void* machgate_operator_new_array_aligned_nothrow(size_t size, size_t alignment, const void* nothrow_arg)
 {
 	(void)nothrow_arg;
-	return machgate_shim_memalign_at(alignment, size, MACHGATE_SHIM_CALLER());
+	return machgate_shim_operator_new_aligned_at(
+		size, alignment, MACHGATE_SHIM_CALLER());
 }
 
 void machgate_operator_delete(void* ptr) __asm__("_ZdlPv");
