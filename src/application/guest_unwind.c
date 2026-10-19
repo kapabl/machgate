@@ -12,7 +12,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define MACHGATE_MAX_UNWIND_ROWS 65536u
 #define UNWIND_SECTION_VERSION 1u
 #define UNWIND_SECOND_LEVEL_REGULAR 2u
 #define UNWIND_SECOND_LEVEL_COMPRESSED 3u
@@ -197,17 +196,26 @@ static uintptr_t find_lsda(const struct mapped_section* compact,
 }
 
 static int append_unwind_row(struct unwind_row* rows, size_t* row_count,
+			     size_t row_capacity,
 			     uint32_t function_offset, uint32_t encoding,
 			     uintptr_t lsda, char* error, size_t error_size)
 {
-	if (*row_count == MACHGATE_MAX_UNWIND_ROWS) {
+	if (*row_count && rows[*row_count - 1].function_offset > function_offset) {
 		snprintf(error, error_size,
-		         "Mach-O compact unwind table has too many rows");
+		         "Mach-O compact unwind rows are not ordered");
 		return -1;
 	}
-	if (*row_count && rows[*row_count - 1].function_offset >= function_offset) {
+	if (*row_count && rows[*row_count - 1].function_offset == function_offset) {
+		rows[*row_count - 1] = (struct unwind_row){
+			.function_offset = function_offset,
+			.encoding = encoding,
+			.lsda = lsda,
+		};
+		return 0;
+	}
+	if (*row_count == row_capacity) {
 		snprintf(error, error_size,
-		         "Mach-O compact unwind rows are not strictly ordered");
+		         "Mach-O compact unwind table has too many rows");
 		return -1;
 	}
 	rows[*row_count] = (struct unwind_row){
@@ -223,7 +231,8 @@ static int collect_regular_rows(const struct mapped_section* compact,
 				const struct compact_unwind_index* index,
 				const struct machgate_guest_image* image,
 				struct unwind_row* rows,
-				size_t* row_count, char* error,
+				size_t* row_count, size_t row_capacity,
+				char* error,
 				size_t error_size)
 {
 	struct compact_regular_header* header = section_bytes(
@@ -243,7 +252,7 @@ static int collect_regular_rows(const struct mapped_section* compact,
 		                           entries[entry_index].function_offset,
 		                           image);
 		if (lsda == UINTPTR_MAX ||
-		    append_unwind_row(rows, row_count,
+		    append_unwind_row(rows, row_count, row_capacity,
 		                      entries[entry_index].function_offset,
 		                      entries[entry_index].encoding, lsda, error,
 		                      error_size) != 0)
@@ -257,7 +266,8 @@ static int collect_compressed_rows(
 	const struct compact_unwind_header* compact_header,
 	const struct compact_unwind_index* index,
 	const struct machgate_guest_image* image,
-	struct unwind_row* rows, size_t* row_count, char* error,
+	struct unwind_row* rows, size_t* row_count, size_t row_capacity,
+	char* error,
 	size_t error_size)
 {
 	struct compact_compressed_header* header = section_bytes(
@@ -297,7 +307,8 @@ static int collect_compressed_rows(
 		uint32_t function_offset = index->function_offset + relative_offset;
 		uintptr_t lsda = find_lsda(compact, index, function_offset, image);
 		if (lsda == UINTPTR_MAX ||
-		    append_unwind_row(rows, row_count, function_offset, encoding,
+		    append_unwind_row(rows, row_count, row_capacity,
+		                      function_offset, encoding,
 		                      lsda, error, error_size) != 0)
 			return -1;
 	}
@@ -307,14 +318,14 @@ static int collect_compressed_rows(
 static int collect_unwind_rows(const struct mapped_section* compact,
 			       const struct machgate_guest_image* image,
 			       struct unwind_row* rows,
-			       size_t* row_count, uint32_t* final_offset,
+			       size_t* row_count, size_t row_capacity,
+			       uint32_t* final_offset,
 			       char* error, size_t error_size)
 {
 	struct compact_unwind_header* header =
 		section_bytes(compact, 0, sizeof(*header));
 	if (!header || header->version != UNWIND_SECTION_VERSION ||
-	    header->index_count < 2 ||
-	    header->index_count > MACHGATE_MAX_UNWIND_ROWS + 1) {
+	    header->index_count < 2) {
 		snprintf(error, error_size, "Mach-O has an invalid compact unwind header");
 		return -1;
 	}
@@ -333,11 +344,12 @@ static int collect_unwind_rows(const struct mapped_section* compact,
 		int result = -1;
 		if (kind && *kind == UNWIND_SECOND_LEVEL_REGULAR)
 			result = collect_regular_rows(compact, index, image, rows,
-			                              row_count, error, error_size);
+			                              row_count, row_capacity, error,
+			                              error_size);
 		if (kind && *kind == UNWIND_SECOND_LEVEL_COMPRESSED)
 			result = collect_compressed_rows(
 				compact, header, index, image, rows, row_count,
-				error, error_size);
+				row_capacity, error, error_size);
 		if (result != 0) {
 			snprintf(error, error_size,
 			         "Mach-O has an invalid compact unwind second-level page");
@@ -713,7 +725,8 @@ int machgate_register_guest_unwind(struct machgate_guest_image* image,
 		return 0;
 	}
 
-	struct unwind_row* rows = calloc(MACHGATE_MAX_UNWIND_ROWS, sizeof(*rows));
+	size_t row_capacity = compact.size / sizeof(uint32_t);
+	struct unwind_row* rows = calloc(row_capacity, sizeof(*rows));
 	if (!rows) {
 		snprintf(error, error_size, "could not allocate guest unwind rows");
 		return -1;
@@ -723,7 +736,8 @@ int machgate_register_guest_unwind(struct machgate_guest_image* image,
 	uintptr_t image_base = (uintptr_t)image->header;
 	if (compact_result &&
 	    collect_unwind_rows(&compact, image, rows, &row_count,
-	                        &final_offset, error, error_size) != 0) {
+	                        row_capacity, &final_offset, error,
+	                        error_size) != 0) {
 		free(rows);
 		return -1;
 	}
@@ -769,6 +783,8 @@ int machgate_register_guest_unwind(struct machgate_guest_image* image,
 			                         final_offset);
 		if (mode == UNWIND_ARM64_MODE_DWARF) {
 			size_t offset = encoding & UNWIND_ARM64_DWARF_SECTION_OFFSET;
+			if (!offset)
+				continue;
 			if (!eh_result || !dwarf_fde_valid(&eh_frame, offset)) {
 				snprintf(error, error_size,
 				         "Mach-O compact unwind row has an invalid DWARF FDE");

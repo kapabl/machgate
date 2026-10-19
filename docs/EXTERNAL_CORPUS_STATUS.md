@@ -109,6 +109,15 @@ documented fail-on-call policy.
 
 ## Reproduction
 
+From the repository root, the complete Docker-based run is:
+
+```sh
+./scripts/run-full-corpus.sh
+```
+
+Set `MACHGATE_LIBCXX_DIR` when the ARM64 libc++ provider is not in the default
+local provider directory.
+
 Run from an ARM64 Linux environment after building MachGate and the pinned
 Apple-ABI libc++ provider:
 
