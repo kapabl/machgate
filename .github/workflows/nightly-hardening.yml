@@ -1,0 +1,140 @@
+name: Nightly hardening
+
+# Host-side hardening for MachGate's own C code: sanitizer build + full
+# suite, test coverage report, and dependency vulnerability scan. Nightly
+# and on demand; non-blocking while sanitizer noise is being tuned.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-hardening-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanitizers:
+    name: ASan + UBSan suite
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build sanitizer image
+        run: |
+          docker build -t machgate-arm64-toolchain \
+            -f .github/docker/arm64-toolchain.Dockerfile .
+
+      - name: Build MachGate with ASan + UBSan and run the suite
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            machgate-arm64-toolchain \
+            bash -lc '
+              set -uo pipefail
+              export BUILD_DIR=/work/build-san
+              cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+                -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+                -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+              cmake --build build-san --parallel
+              BUILD_DIR=/work/build-san bash tests/fixtures/build_fixtures.sh
+              ASAN_OPTIONS=detect_leaks=0 \
+              UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0 \
+              BUILD_DIR=/work/build-san bash tests/run_tests.sh
+            ' 2>&1 | tee sanitizer-suite.log
+          if grep -E "ERROR: (AddressSanitizer|UndefinedBehaviorSanitizer)" sanitizer-suite.log; then
+            echo "sanitizer findings detected" >&2
+            exit 1
+          fi
+
+      - name: Upload sanitizer log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-suite-log
+          path: sanitizer-suite.log
+          if-no-files-found: ignore
+
+  coverage:
+    name: Test coverage (gcovr)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build coverage image
+        run: |
+          docker build -t machgate-arm64-toolchain \
+            -f .github/docker/arm64-toolchain.Dockerfile .
+
+      - name: Build with coverage and run the suite
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            machgate-arm64-toolchain \
+            bash -lc '
+              set -euo pipefail
+              apt-get update -qq && apt-get install -y -qq gcovr >/dev/null
+              export BUILD_DIR=/work/build-cov
+              cmake -S . -B build-cov -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_C_FLAGS="--coverage -g" \
+                -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+              cmake --build build-cov --parallel
+              BUILD_DIR=/work/build-cov bash tests/fixtures/build_fixtures.sh
+              BUILD_DIR=/work/build-cov bash tests/run_tests.sh
+              gcovr --root . --filter src/ --xml-pretty -o coverage.xml
+              gcovr --root . --filter src/ --txt -o coverage.txt
+            '
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage.txt ]; then
+            cat coverage.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            coverage.txt
+          if-no-files-found: ignore
+
+  dependency-vulnerabilities:
+    name: OSV-Scanner
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Scan dependencies
+        run: |
+          version="$(curl -s https://api.github.com/repos/google/osv-scanner/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].lstrip("v"))')"
+          curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${version}/osv-scanner_linux_arm64" -o /tmp/osv-scanner
+          chmod +x /tmp/osv-scanner
+          set +e
+          /tmp/osv-scanner scan-source --recursive . > osv-report.txt 2>&1
+          set -e
+          cat osv-report.txt
+          exit 0
+
+      - name: Upload scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: osv-report
+          path: osv-report.txt
+          if-no-files-found: ignore

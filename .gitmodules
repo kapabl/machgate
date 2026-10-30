@@ -1,0 +1,5 @@
+[submodule "extern/llvm-project"]
+	path = extern/llvm-project
+	url = https://github.com/kapabl/llvm-project.git
+	ignore = dirty
+	branch = darwin-abi-compat

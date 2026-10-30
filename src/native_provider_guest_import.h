@@ -1,0 +1,12 @@
+#ifndef MACHGATE_NATIVE_PROVIDER_GUEST_IMPORT_H
+#define MACHGATE_NATIVE_PROVIDER_GUEST_IMPORT_H
+
+#define MACHGATE_GUEST_IMPORT_RESOLVER_SYMBOL \
+	"machgate_resolve_guest_import_v1"
+
+typedef int (*machgate_guest_import_resolver_function)(const char* name,
+						       void** address);
+
+int machgate_resolve_guest_import_v1(const char* name, void** address);
+
+#endif

@@ -1,0 +1,15 @@
+# MegaLinter configuration for the repository review workflow.
+# Non-blocking initially: tune ENABLE_LINTERS and rules before making the
+# job blocking. VALIDATE_ALL_CODEBASE reviews the full snapshot, not a diff.
+VALIDATE_ALL_CODEBASE: true
+APPLY_FIXES: none
+SHOW_ELAPSED_TIME: true
+PRINT_ALPACA: false
+ENABLE_LINTERS:
+  - CPP_CPPCHECK
+  - BASH_SHELLCHECK
+  - YAML_YAMLLINT
+  - MARKDOWN_MARKDOWNLINT
+FILTER_REGEX_EXCLUDE: |
+  (tests/external/|\.history/|extern/)
+MARKDOWN_MARKDOWNLINT_CONFIG_FILE: .markdownlint.yml
