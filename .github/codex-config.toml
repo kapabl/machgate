@@ -1,0 +1,11 @@
+# Codex CLI config for CI: force HTTPS transport for the Responses API.
+# The default first-party provider uses a WebSocket transport with a known
+# spurious-handshake failure mode in CI (openai/codex#39578); this custom
+# provider points at the same API over HTTPS instead.
+model_provider = "openai-direct"
+
+[model_providers.openai-direct]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+supports_websockets = false

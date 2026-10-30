@@ -1,0 +1,16 @@
+# Bitcoin Core macOS ARM64 Boost.Test runner gate.
+#
+# Format:
+# name|url|sha256|binary path inside archive or "." for direct binary|argv
+#
+# Rows and checksums are the archived artifact of record from the
+# 2026-09-27 seven-version run (7/7 pass, loader + unwind-hardened build).
+# A focused manifest: it complements, and does not substitute for, the
+# 57-probe extended gate. Full unit-suite pass results are engine evidence.
+bitcoin-test|https://bitcoincore.org/bin/bitcoin-core-31.0/bitcoin-31.0-arm64-apple-darwin.tar.gz|a2d7a13b4da53d4a3e4c517f3a0269e2429813417bb320d3b268993cfdc545d0|bitcoin-31.0/libexec/test_bitcoin|--help
+bitcoin-30.2-test|https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-arm64-apple-darwin.tar.gz|c2ecab62891de22228043815cb6211549a32272be3d5d052ff19847d3420bd10|bitcoin-30.2/libexec/test_bitcoin|--help
+bitcoin-29.2-test|https://bitcoincore.org/bin/bitcoin-core-29.2/bitcoin-29.2-arm64-apple-darwin.tar.gz|bd07450f76d149d094842feab58e6240673120c8a317a1c51d45ba30c34e85ef|bitcoin-29.2/bin/test_bitcoin|--help
+bitcoin-28.2-test|https://bitcoincore.org/bin/bitcoin-core-28.2/bitcoin-28.2-arm64-apple-darwin.tar.gz|c0270ed50effc174f7ff3332dba5183a8693999dac2ba78b37d8c8797b3ea2b2|bitcoin-28.2/bin/test_bitcoin|--help
+bitcoin-27.2-test|https://bitcoincore.org/bin/bitcoin-core-27.2/bitcoin-27.2-arm64-apple-darwin.tar.gz|8f2247f4786f3559d37189b58452c91623efc5fa6886c975fa9386f9ff3f1001|bitcoin-27.2/bin/test_bitcoin|--help
+bitcoin-26.2-test|https://bitcoincore.org/bin/bitcoin-core-26.2/bitcoin-26.2-arm64-apple-darwin.tar.gz|863960b4f78130ebb9a5e7f68e5cc021778892ff9b3f8b060056c485470640d5|bitcoin-26.2/bin/test_bitcoin|--help
+bitcoin-25.2-test|https://bitcoincore.org/bin/bitcoin-core-25.2/bitcoin-25.2-arm64-apple-darwin.tar.gz|f55b394eebaa11d4b717d68aad9f75b824aaf3a7841dac7c26b1ef3d6d2915f5|bitcoin-25.2/bin/test_bitcoin|--help

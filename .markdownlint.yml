@@ -1,0 +1,6 @@
+# Default markdownlint tuning: MachGate docs use long reference lines and
+# absolute evidence paths on purpose.
+MD013: false
+MD013_line_length: 120
+MD024: false
+MD033: false

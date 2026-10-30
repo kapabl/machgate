@@ -1,0 +1,87 @@
+name: Repository review
+
+# Full-snapshot repository review: linting, workflow validation, architecture
+# layer policy, and an optional informative AI review. Independent from the
+# build-and-test CI (ci.yml) and from the external corpus gate
+# (external-macho.yml). Reports are attached to each run as artifacts and
+# job summaries.
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-lint:
+    name: MegaLinter (full snapshot)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    # Non-blocking until the linter rules are tuned for this codebase.
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: MegaLinter
+        uses: oxsecurity/megalinter@v8
+        env:
+          VALIDATE_ALL_CODEBASE: true
+          APPLY_FIXES: none
+
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: megalinter-reports
+          path: |
+            megalinter-reports
+            mega-linter.log
+          if-no-files-found: ignore
+
+  workflow-lint:
+    name: actionlint
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate workflows
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
+
+  architecture-layers:
+    name: Layer dependency policy
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install ripgrep
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+
+      - name: Enforce layer dependency policy
+        run: |
+          set -o pipefail
+          bash tests/test_architecture_dependencies.sh 2>&1 | tee layer-policy.log
+
+      - name: Publish layer policy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer-policy-report
+          path: layer-policy.log
+          if-no-files-found: ignore

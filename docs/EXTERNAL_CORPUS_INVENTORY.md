@@ -1,0 +1,91 @@
+## Extended gate: 57 command-line probes
+
+- `ripgrep`
+- `fd`
+- `hyperfine`
+- `bat`
+- `jq`
+- `yq`
+- `starship`
+- `delta`
+- `bottom`
+- `just`
+- `zoxide`
+- `sd`
+- `git-cliff`
+- `sccache`
+- `cargo-binstall`
+- `hexyl`
+- `pastel`
+- `atuin`
+- `ninja`
+- `procs`
+- `nu`
+- `fzf`
+- `gh`
+- `lazygit`
+- `glow`
+- `gum`
+- `goreleaser`
+- `chezmoi`
+- `duf`
+- `shfmt`
+- `fx`
+- `kubectl`
+- `helm`
+- `k9s`
+- `kind`
+- `minikube`
+- `tilt`
+- `argocd`
+- `flux`
+- `kubeseal`
+- `stern`
+- `terraform`
+- `packer`
+- `vault`
+- `consul`
+- `nomad`
+- `boundary`
+- `tofu`
+- `terragrunt`
+- `pulumi`
+- `cmake`
+- `sqlite3`
+- `duckdb`
+- `node`
+- `bun`
+- `protoc`
+- `nvim`
+
+## Smoke set: 19 command-line probes
+
+- `ripgrep`
+- `fd`
+- `hyperfine`
+- `bat`
+- `jq`
+- `yq`
+- `starship`
+- `delta`
+- `bottom`
+- `just`
+- `zoxide`
+- `sd`
+- `git-cliff`
+- `sccache`
+- `cargo-binstall`
+- `hexyl`
+- `pastel`
+- `atuin`
+- `ninja`
+
+## Bitcoin Core unit-test runners: 7 probes
+
+- `bitcoin-test`
+- `bitcoin-30.2-test`
+- `bitcoin-29.2-test`
+- `bitcoin-28.2-test`
+- `bitcoin-27.2-test`
+- `bitcoin-26.2-test`
+- `bitcoin-25.2-test`
